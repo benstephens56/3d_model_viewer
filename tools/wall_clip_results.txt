@@ -1,18 +1,35 @@
-Wall push clip test results: OOT, Spot 00 - Hyrule Field, Adult (18) (mode: move)
-3 tests; worked = Link ended up behind the clipped wall (clipped), fell out of the map (fell)
+Wall push clip test results: MM, Ancient Castle of Ikana, Human (14) (mode: move)
+7 tests; worked = Link ended up behind the clipped wall (clipped), fell out of the map (fell)
 or was moved far away (voided), 30 frames after the test frame.
 
 WORKED
-  extended stand: TRI 256 through TRI 212 - 1 of 1 tried (21 points in the group)
-    [clipped] prev -2033.41357, 0, 839.362915 -> next -2047.99988, -7.5, 828.000427  => after -2058.14014, -7.5, 838.140625, final -2128.42871, 17.25, 783.38678
-  extended stand: TRI 1265 through TRI 1339 - 1 of 1 tried (4 points in the group)
-    [clipped] prev -2902.21729, -500, 13603.6504 -> next -2926.50537, -507.5, 13609.9785  => after -2935.47778, -507.5, 13625.5313, final -3032.14575, -482.75, 13629.8896
-  extended cross: TRI 1131 through TRI 981 - 1 of 1 tried (2 points in the group)
-    [clipped] prev 4104.28369, -163.595886, 7875.79932 -> next 4130.13379, -171.095886, 7891.85596  => after 4116.46631, -171.095886, 7903.57324, final 4209.26563, -146.345886, 7947.46436
+  acute stand: TRI 230 through TRI 414 - 1 of 1 tried (18 points in the group)
+    [clipped] prev 314, 473, -2160 -> next 300.48941, 465.5, -2183.99341  => after 294.540192, 465.5, -2171.75464, final 147.911484, 490.25, -2401.17651
+        start 314, 473, -2160  angle 0x94E0  speedXZ 18.3575592
+  acute stand: TRI 440 through TRI 411 - 1 of 1 tried (19 points in the group)
+    [clipped] prev 1007.5, 473, -2281 -> next 1027.49341, 465.5, -2294.50928  => after 1017.3205, 465.5, -2301.60303, final 1204.43689, 490.25, -2444.75415
+        start 1007.5, 473, -2281  angle 0x5831  speedXZ 16.0865707
+  acute stand: TRI 441 through TRI 411 - 1 of 1 tried (4 points in the group)
+    [clipped] prev 1006, 473, -2281 -> next 1025.99341, 465.5, -2294.50928  => after 1016.17358, 465.5, -2299.16919, final 1196.8175, 490.25, -2444.75415
+        start 1006, 473, -2281  angle 0x5831  speedXZ 16.0865707
+  acute cross: TRI 411 through TRI 441 - 1 of 1 tried (5 points in the group)
+    [clipped] prev 1007.54498, 473, -2281.00439 -> next 1028.32593, 465.5, -2295.56323  => after 1027.5282, 473, -2281, final 1039.60632, 473, -2281
+        start 1007.54498, 473, -2281  angle 0x58EC  speedXZ 16.9158325
+  extended cross: TRI 1150 through TRI 1027 - 1 of 1 tried (3 points in the group)
+    [clipped] prev -201.013092, -1370, -1541.43762 -> next -180.011505, -1377.5, -1545.15161  => after -180.868713, -1377.5, -1531, final -54, -1352.75, -1568.9032
+        start -201.013123, -1370, -1541.43762  angle 0x472D  speedXZ 14.2184505
+  extended cross: TRI 1153 through TRI 1030 - 1 of 1 tried (2 points in the group)
+    [clipped] prev -201.401855, -1370, -1818.55078 -> next -180.013977, -1377.5, -1814.83606  => after -180.957916, -1377.5, -1829, final -54, -1352.75, -1791.27393
+        start -201.401855, -1370, -1818.55078  angle 0x38FB  speedXZ 14.4723616
+  extended cross: TRI 1153 through TRI 1031 - 1 of 1 tried (1 points in the group)
+    [voided] prev -210.834732, -1370, -1829.59412 -> next -179.598328, -1377.5, -1814.56836  => after -180.495804, -1377.5, -1829, final 124.776108, -1352.75, -1689.10986
+        start -210.834763, -1370, -1829.59412  angle 0x2DBB  speedXZ 23.1085339
 
 DIDN'T WORK
 
 SKIPPED
-  extended cross: TRI 256 through TRI 212 - skipped (the pair already clipped)
+  extended stand: TRI 440 through TRI 411 - skipped (the pair already clipped)
+  acute cross: TRI 230 through TRI 414 - skipped (the pair already clipped)
+  acute cross: TRI 440 through TRI 411 - skipped (the pair already clipped)
 
-3 of 3 wall pairs had a point that worked (3 points)
+7 of 7 wall pairs had a point that worked (7 points)

@@ -1337,12 +1337,14 @@ async function scanWallPushClips(model, onProgress) {
 
 // One group per (pusher, clipped wall, standing / crossing, kind): a pair's
 // points that only clip thanks to the extended planes are their own group.
+// (imported results with several forms: clips carry their `form` and the
+// `model` (radius, check height) they were found with, and each group is one form's)
 function groupClips(clips) {
     const groups = new Map();
     for (const c of clips) {
-        const key = [c.pusher.id, c.crossed.id, c.cross ? "cross" : "stand", c.kind].join(":");
+        const key = [c.form ?? "", c.pusher.id, c.crossed.id, c.cross ? "cross" : "stand", c.kind].join(":");
         let g = groups.get(key);
-        if (!g) groups.set(key, g = { pusher: c.pusher, crossed: c.crossed, cross: !!c.cross, kind: c.kind, clips: [] });
+        if (!g) groups.set(key, g = { pusher: c.pusher, crossed: c.crossed, cross: !!c.cross, kind: c.kind, clips: [], form: c.form, model: c.model });
         g.clips.push(c);
     }
     return [...groups.values()];
@@ -1374,7 +1376,9 @@ function describeReach(c) {
 }
 
 function describeClip(g, c, checkHeight) {
-    return describeClipLines(g, c, checkHeight) + "\n" + describeReach(c);
+    const form = g.form ? `  form: ${g.form} (radius ${g.model.radius}, check height ${+checkHeight.toPrecision(7)})\n` : "";
+    const lines = describeClipLines(g, c, checkHeight).split("\n");
+    return [lines[0], form + lines.slice(1).join("\n")].join("\n") + "\n" + describeReach(c);
 }
 
 function describeClipLines(g, c, checkHeight) {
@@ -1495,8 +1499,14 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
 
 const MODEL_NAMES = { acute: "Acute Angle Clips", extended: "Extended Plane Clips", low: "Low Wall Clips (falling)" };
 
+// The marker rows added (one per kind, or per kind and form for imported
+// results with several forms), to take away again.
+let markerNames = [];
+
 function removeMarkerModels(scene) {
-    for (const name of Object.values(MODEL_NAMES)) {
+    const names = markerNames;
+    markerNames = [];
+    for (const name of names) {
         const idx = loadedModels.findIndex(m => m.name === name);
         if (idx < 0) continue;
         const old = loadedModels[idx];
@@ -1535,10 +1545,10 @@ function exportLua(groups, info) {
                 // posNext below it (walking or falling)
                 prev = { x: c.from.x, y: c.floorY ?? c.from.y, z: c.from.z };
             }
-            const key = vec(prev) + vec(next);
+            const key = (g.form ?? "") + vec(prev) + vec(next);
             if (seen.has(key)) continue;
             seen.add(key);
-            lines.push(`    {group=${gi + 1}, kind="${g.kind}", type="${c.cross ? "cross" : "stand"}", ` +
+            lines.push(`    {group=${gi + 1}, ${g.form ? `form=${JSON.stringify(g.form)}, ` : ""}kind="${g.kind}", type="${c.cross ? "cross" : "stand"}", ` +
                 `pusher=${g.pusher.id}, crossed=${g.crossed.id}, prev=${vec(prev)}, next=${vec(next)}, ` +
                 // the exact move (s16 yaw, f32 speedXZ) that makes `next`
                 (c.speed !== undefined ? `yaw=${hex4(c.yaw)}, speed=${num(c.speed)}, ` : "") +
@@ -1548,12 +1558,19 @@ function exportLua(groups, info) {
     const wallLines = [...walls.values()].map(p =>
         `    [${p.id}] = {v={{${p.ax}, ${p.ay}, ${p.az}}, {${p.bx}, ${p.by}, ${p.bz}}, {${p.cx}, ${p.cy}, ${p.cz}}}, ` +
         `n={${p.sx}, ${p.sy}, ${p.sz}}, d=${p.dist}},`);
+    // Imported results: each test's form, and each form's radius / check height
+    // (the tester runs the tests of the form Link is in)
+    const forms = new Map();
+    for (const g of groups) if (g.form) forms.set(g.form, g.model);
+    const formLines = forms.size === 0 ? [] : [`  forms = {`, ...[...forms].map(([f, m]) =>
+        `    [${JSON.stringify(f)}] = {radius=${num(m.radius)}, checkHeight=${num(m.checkHeight)}},`), `  },`];
     return [
         `-- Wall push clip tests exported from 3d_model_viewer (js/wall_push_clips.js).`,
         `-- Run with tools/wall_clip_tester.lua in BizHawk.`,
         `return {`,
         `  game = "${info.game}", map = ${JSON.stringify(info.map)}, form = ${JSON.stringify(info.form)},`,
         `  radius = ${num(info.radius)}, checkHeight = ${num(info.checkHeight)}, numPolygons = ${info.numPolygons},`,
+        ...formLines,
         `  walls = {`, ...wallLines, `  },`,
         `  tests = {`, ...lines, `  },`,
         `}`,
@@ -1635,7 +1652,7 @@ export function setupWallPushClipUI(scene) {
         const clips = last.groups.flatMap(g => g.clips);
         let lastYield = performance.now();
         for (let i = 0; i < clips.length; i++) {
-            clips[i].reach = reachability(last.model, clips[i]);
+            clips[i].reach = reachability(clips[i].model ?? last.model, clips[i]);
             if (performance.now() - lastYield > 30) {
                 status.textContent = `Checking reachability ${Math.floor((i + 1) / clips.length * 100)}%`;
                 await nextTask();
@@ -1670,12 +1687,21 @@ export function setupWallPushClipUI(scene) {
         const byKind = {};
         for (const kind of Object.keys(MODEL_NAMES)) byKind[kind] = shown.filter(g => g.kind === kind);
         const colors = { acute: ACUTE_COLOR, extended: EXTENDED_COLOR, low: LOW_COLOR };
+        // Several forms (imported): a row per kind and form, each drawn with
+        // its own form's radius and check height
+        const forms = last.forms && last.forms.length > 1 ? last.forms : [null];
         for (const kind of Object.keys(MODEL_NAMES)) {
-            if (byKind[kind].length === 0) continue;
-            const g = buildMarkerGroup(last.model, byKind[kind], colors[kind], last.checkHeight);
-            scene.add(g);
-            loadedModels.push({ name: MODEL_NAMES[kind], mesh: g, edges: null });
-            addModelCheckbox(scene, MODEL_NAMES[kind], g, null, false, true, "#" + colors[kind].toString(16).padStart(6, "0"), false, primaryColorTarget(g));
+            for (const f of forms) {
+                const list = f ? byKind[kind].filter(g => g.form === f.form) : byKind[kind];
+                if (list.length === 0) continue;
+                const model = f ? f.model : last.model;
+                const name = MODEL_NAMES[kind] + (f ? ` - ${f.form}` : "");
+                const g = buildMarkerGroup(model, list, colors[kind], model.checkHeight);
+                scene.add(g);
+                loadedModels.push({ name, mesh: g, edges: null });
+                markerNames.push(name);
+                addModelCheckbox(scene, name, g, null, false, true, "#" + colors[kind].toString(16).padStart(6, "0"), false, primaryColorTarget(g));
+            }
         }
         const points = kind => byKind[kind].reduce((n, g) => n + g.clips.length, 0);
         status.textContent = `${points("acute")} acute, ${points("extended")} extended-plane, ${points("low")} low (falling) ` +
@@ -1692,7 +1718,7 @@ export function setupWallPushClipUI(scene) {
         }
         const map = document.getElementById("mapDropdown").value;
         const text = exportLua(window.wallPushClips, {
-            game, map, form: radiusSel.selectedOptions[0]?.textContent ?? "",
+            game, map, form: last.formLabel ?? radiusSel.selectedOptions[0]?.textContent ?? "",
             radius: last.model.radius, checkHeight: last.model.checkHeight,
             numPolygons: last.model.colCtx.colHeader.numPolygons,
         });
@@ -1755,7 +1781,7 @@ export function setupWallPushClipUI(scene) {
             return;
         }
         const map = document.getElementById("mapDropdown").value;
-        if (data.format !== "wall-push-clips-1") {
+        if (data.format !== "wall-push-clips-1" && data.format !== "wall-push-clips-2") {
             status.textContent = `${file.name}: not a clipfinder results file`;
             return;
         }
@@ -1765,17 +1791,27 @@ export function setupWallPushClipUI(scene) {
         }
         removeMarkerModels(scene);
         last = null;
-        const model = new CollisionModel(colCtx, main.mesh.userData.triangles, data.radius, data.checkHeight, data.falling);
+        // Format 1: one form. Format 2: `forms` (name, radius, check height)
+        // and each clip marked with its form, each form getting its own model.
+        const forms = (data.forms ?? [{ form: data.form, radius: data.radius, checkHeight: data.checkHeight }]).map(f => ({
+            form: f.form,
+            model: new CollisionModel(colCtx, main.mesh.userData.triangles, f.radius, f.checkHeight, data.falling),
+        }));
+        const formOf = new Map(forms.map(f => [f.form, f]));
+        const model = forms[0].model;
         const vec = a => ({ x: a[0], y: a[1], z: a[2] });
         const clips = [];
         for (const c of data.clips) {
-            const pusher = model.polys.get(c.pusher), crossed = model.polys.get(c.crossed);
+            const f = formOf.get(c.form ?? forms[0].form);
+            if (!f) continue;
+            const pusher = f.model.polys.get(c.pusher), crossed = f.model.polys.get(c.crossed);
             if (!pusher || !crossed) continue;
             const end = vec(c.end);
             if (c.endNoFloor) end.noFloor = true;
             const clip = {
                 kind: c.kind, cross: c.cross, drop: c.drop, pusher, crossed,
                 from: vec(c.from), prev: vec(c.prev), res: vec(c.res), end,
+                form: f.form, model: f.model,
             };
             if (c.next) clip.next = vec(c.next);
             if (c.floorY !== undefined) clip.floorY = c.floorY;
@@ -1785,7 +1821,8 @@ export function setupWallPushClipUI(scene) {
             clips.push(clip);
         }
         const groups = groupClips(clips);
-        last = { groups, model, checkHeight: model.checkHeight, note: `imported ${data.form}${data.falling ? ", falling" : ""}${data.extendedOnly ? ", extended plane only" : ""}` };
+        const formNames = forms.map(f => f.form).join(", ");
+        last = { groups, model, forms, formLabel: formNames, checkHeight: model.checkHeight, note: `imported ${formNames}${data.falling ? ", falling" : ""}${data.extendedOnly ? ", extended plane only" : ""}` };
         if (data.map !== map) console.warn(`wall push clips: ${file.name} says map "${data.map}", "${map}" is loaded (same polygon count)`);
         render();
         logGroups(groups);

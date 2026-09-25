@@ -1,0 +1,7 @@
+tools/clipfinder/clipfinder.exe --game OOT --map "Bottom of the Well" --form Crawlspace -o tools/clipfinder/results/out-s.json --extended-only
+
+tools/clipfinder/clipfinder.exe --game MM --map "Astral Observatory" --form All -o tools/clipfinder/results/out-s.json
+
+tools/clipfinder/clipfinder.exe --game OOT --all --form Adult,Child --falling --out-dir tools/clipfinder/results
+
+tools/clipfinder/clipfinder.exe --game MM --all --form All --falling --out-dir tools/clipfinder/results

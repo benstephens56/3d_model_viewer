@@ -10,8 +10,12 @@
 //
 // Build (MSYS2 mingw64):  see build.sh next to this file.
 // Usage:
-//   clipfinder --game MM --map "Laundry Pool" --form Human [--falling] [--extended-only] [-o out.json]
+//   clipfinder --game MM --map "Laundry Pool" --form Human [--falling] [--extended-only] [--first-per-pair] [-o out.json]
+//     (--first-per-pair: one clip point per wall pair, the first found - much faster)
 //   clipfinder --game OOT --all --form Adult [--falling] --out-dir results/
+//   clipfinder --game OOT --map "Spot 01 - Kakariko Village" --form All -o kak.json
+//     (--form All: every form's clips in the one JSON, each marked with its form;
+//      --form Adult,Child: just those forms, the same way)
 // Options: --root <viewer dir> (default: two levels up from the exe's dir, or
 // the current dir if it has models/), --threads N, --radius R (overrides --form).
 
@@ -23,6 +27,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -426,6 +431,21 @@ struct Scratch {
 	uint32_t gen = 1;
 	int used = 0;
 	void clearCache() { gen++; used = 0; }
+
+	// standSpot results for the pushing wall being scanned: its crossing
+	// points try starts at the same spots over and over (every falling drop
+	// of a point on a vertical wall has the same x/z), keyed on the f32 bits
+	// of x, z and the floor height.
+	struct SpotKey {
+		uint32_t x, z, y;
+		bool operator==(const SpotKey& o) const { return x == o.x && z == o.z && y == o.y; }
+	};
+	struct SpotHash {
+		size_t operator()(const SpotKey& k) const {
+			return (size_t)(((uint64_t)k.x * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)k.z * 0xC2B2AE3D27D4EB4Full) ^ k.y);
+		}
+	};
+	std::unordered_map<SpotKey, std::optional<V3>, SpotHash> standSpots;
 
 	vector<uint32_t> stamp;
 	uint32_t curStamp = 0;
@@ -1164,6 +1184,18 @@ static std::optional<V3> standSpot(const Model& m, double x, double z, double fl
 	return std::nullopt;
 }
 
+// standSpot through the thread's cache (Scratch::standSpots).
+static std::optional<V3> standSpotCached(const Model& m, Scratch& s, double x, double z, double floorY) {
+	auto bits = [](double v) { float f = (float)v; uint32_t u; memcpy(&u, &f, 4); return u; };
+	Scratch::SpotKey key{ bits(x), bits(z), bits(floorY) };
+	auto it = s.standSpots.find(key);
+	if (it != s.standSpots.end()) return it->second;
+	if (s.standSpots.size() > 500000) s.standSpots.clear();
+	auto r = standSpot(m, x, z, floorY);
+	s.standSpots.emplace(key, r);
+	return r;
+}
+
 struct Clip {
 	int kind = 0; // 0 acute, 1 extended, 2 low
 	bool cross = false;
@@ -1193,7 +1225,10 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 		std::optional<CrossFound> found;
 		for (double dist : MOVE_STEPS) {
 			// standing still at the start, moving from there through the point
-			auto prevO = standSpot(m, F(cp.p.x - dist * dx0), F(cp.p.z - dist * dz0), cp.floorY);
+			// (cached for falling points only: a walking point's starts are
+			// hardly ever tried again, so the cache just costs time there)
+			double sx = F(cp.p.x - dist * dx0), sz = F(cp.p.z - dist * dz0);
+			auto prevO = cp.drop > 0 ? standSpotCached(m, s, sx, sz, cp.floorY) : standSpot(m, sx, sz, cp.floorY);
 			if (!prevO) continue;
 			V3 prev = *prevO;
 			if (!tried.insert({ prev.x, prev.z }).second) continue;
@@ -1346,12 +1381,28 @@ static string keyOf(double a, double b, double c) {
 	return buf;
 }
 
-static vector<Clip> scan(const Model& m, int threads) {
+// firstPerPair: stop looking at a wall pair (pushing wall, clipped wall) once
+// one clip through it is found (like wall_clip_tester.lua's
+// RECORD_ONE_PER_PAIR) - one point per pair, much faster.
+static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false) {
 	auto t0 = std::chrono::steady_clock::now();
 	vector<Pair> pairs = wallPairCandidates(m);
 	SharedSet seen;
 	std::mutex outMu;
 	vector<Clip> clips;
+	std::mutex foundMu;
+	std::set<std::pair<int, int>> foundPairs;
+	auto pairFound = [&](int a, int b) {
+		if (!firstPerPair) return false;
+		std::lock_guard<std::mutex> g(foundMu);
+		return foundPairs.count({ a, b }) > 0;
+	};
+	// Records a clip's pair; false if another thread got there first.
+	auto claimPair = [&](int a, int b) {
+		if (!firstPerPair) return true;
+		std::lock_guard<std::mutex> g(foundMu);
+		return foundPairs.insert({ a, b }).second;
+	};
 	std::atomic<size_t> nextPair{ 0 }, pairsDone{ 0 };
 
 	auto progress = [&](const char* phase, size_t done, size_t total) {
@@ -1372,13 +1423,15 @@ static vector<Clip> scan(const Model& m, int threads) {
 			size_t pi = nextPair++;
 			if (pi >= pairs.size()) break;
 			s.clearCache();
-			nextPositionsForPair(m, s, pairs[pi], [&](const NextPos& np) {
+			const Pair& pr = pairs[pi];
+			nextPositionsForPair(m, s, pr, [&](const NextPos& np) {
+				if (pairFound(pr.A, pr.B)) return;
 				const V3& p = np.p;
 				double h = p.y + m.checkHeight;
 				if (h - GROUND_DROP >= np.lo && h - GROUND_DROP <= np.hi && seen.insert({ p.x, p.z, p.y, 0 })) {
 					if (auto c = standingClip(m, s, p)) {
 						// (extended plane only: an acute one still ends the point, it's just not kept)
-						if (!(m.extendedOnly && c->kind == 0)) local.push_back(*c);
+						if (!(m.extendedOnly && c->kind == 0) && claimPair(c->pusher, c->crossed)) local.push_back(*c);
 						return;
 					}
 				}
@@ -1387,7 +1440,7 @@ static vector<Clip> scan(const Model& m, int threads) {
 					if (hk < np.lo || hk > np.hi) continue;
 					if (!seen.insert({ p.x, p.z, p.y, k })) continue;
 					if (auto c = lowClip(m, s, p, k)) {
-						if (!(m.extendedOnly && c->strict)) local.push_back(*c);
+						if (!(m.extendedOnly && c->strict) && claimPair(c->pusher, c->crossed)) local.push_back(*c);
 						break;
 					}
 				}
@@ -1417,6 +1470,7 @@ static vector<Clip> scan(const Model& m, int threads) {
 			size_t ai = nextPusher++;
 			if (ai >= pushers.size()) break;
 			s.clearCache();
+			s.standSpots.clear();
 			const Poly& A = m.polys[pushers[ai]];
 			const vector<int>& partners = partnersOf[A.id];
 			double k = F(m.radius * F(1 / A.nXZ));
@@ -1435,7 +1489,10 @@ static vector<Clip> scan(const Model& m, int threads) {
 					double d = planeDist(B, res.x, h, res.z);
 					if (d >= -3.5 || d < -4 * m.radius) continue;
 					double t = d / B.nMag;
-					if (pointInTri3D(B, res.x - t * B.nx, h - t * B.ny, res.z - t * B.nz, 1)) { behind = true; break; }
+					if (pointInTri3D(B, res.x - t * B.nx, h - t * B.ny, res.z - t * B.nz, 1) && !pairFound(A.id, bid)) {
+						behind = true;
+						break;
+					}
 				}
 				if (!behind) return;
 				double nx = A.nx * A.invNXZ, nz = A.nz * A.invNXZ;
@@ -1443,6 +1500,21 @@ static vector<Clip> scan(const Model& m, int threads) {
 				for (double sd : { 3.0, -3.0, 12.0, -12.0 })
 					if (m.isInBounds(s, { cp.p.x + sd * nx, cp.floorY, cp.p.z + sd * nz })) { anyIn = true; break; }
 				if (!anyIn) return;
+				// Falling, he has to land out of bounds: where the snap onto A
+				// and the pushes put him is about where the real frame does (the
+				// move is aimed through the point), so if he lands in bounds from
+				// there and from 2 units around it, don't search for the move.
+				// (About 90% of the falling points; in Kakariko / Kokiri Forest
+				// it lost 1 point of ~7400, one that a 0.01 unit change flips.)
+				if (cp.drop > 0) {
+					bool landsOut = false, noFloor;
+					const double offs[5][2] = { { 0, 0 }, { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 } };
+					for (const auto& o : offs) {
+						V3 q = { res.x + o[0] * nx - o[1] * nz, res.y, res.z + o[0] * nz + o[1] * nx };
+						if (landing(m, s, q, cp.floorY, noFloor)) { landsOut = true; break; }
+					}
+					if (!landsOut) return;
+				}
 				auto r = crossingClip(m, s, A, cp, LOOSE);
 				if (!r) return;
 				done.insert({ cp.spotU, cp.spotY });
@@ -1452,6 +1524,7 @@ static vector<Clip> scan(const Model& m, int threads) {
 				// extended planes too, and the ones that still clip left out)
 				bool strict = (cp.drop == 0 || m.extendedOnly) && (bool)crossingClip(m, s, A, cp, STRICT);
 				if (m.extendedOnly && strict) return;
+				if (!claimPair(A.id, r->first.clip.crossed)) return;
 				const CrossFound& f = r->first;
 				Clip c;
 				c.kind = cp.drop > 0 ? 2 : strict ? 0 : 1;
@@ -1527,19 +1600,31 @@ static string jsonStr(const string& s) {
 	return o + "\"";
 }
 
-static string toJson(const string& game, const string& map, const string& form, const Model& m, int numPolygons,
-	bool falling, const vector<Clip>& clips) {
+// One scan's results: the form name (forms sharing a radius and check height
+// share a scan: "Human/Deku"), its radius and check height, and its clips.
+struct FormResult { string form; double radius, checkHeight; vector<Clip> clips; };
+
+// Format 2: every form's clips in one file, each clip marked with its form
+// (one of `forms`), so the viewer can show them all at once.
+static string toJson(const string& game, const string& map, int numPolygons, bool falling, bool extendedOnly,
+	const vector<FormResult>& forms) {
 	static const char* kinds[] = { "acute", "extended", "low" };
 	std::ostringstream o;
-	o << "{\n  \"format\": \"wall-push-clips-1\",\n";
-	o << "  \"game\": " << jsonStr(game) << ", \"map\": " << jsonStr(map) << ", \"form\": " << jsonStr(form) << ",\n";
-	o << "  \"radius\": " << num(m.radius) << ", \"checkHeight\": " << num(m.checkHeight)
-		<< ", \"falling\": " << (falling ? "true" : "false") << ", \"extendedOnly\": " << (m.extendedOnly ? "true" : "false") << ", \"numPolygons\": " << numPolygons << ",\n";
+	o << "{\n  \"format\": \"wall-push-clips-2\",\n";
+	o << "  \"game\": " << jsonStr(game) << ", \"map\": " << jsonStr(map)
+		<< ", \"falling\": " << (falling ? "true" : "false") << ", \"extendedOnly\": " << (extendedOnly ? "true" : "false") << ", \"numPolygons\": " << numPolygons << ",\n";
+	o << "  \"forms\": [";
+	for (size_t i = 0; i < forms.size(); i++) {
+		o << (i ? ",\n    " : "\n    ") << "{\"form\":" << jsonStr(forms[i].form) << ",\"radius\":" << num(forms[i].radius)
+			<< ",\"checkHeight\":" << num(forms[i].checkHeight) << "}";
+	}
+	o << "\n  ],\n";
 	o << "  \"clips\": [";
-	for (size_t i = 0; i < clips.size(); i++) {
-		const Clip& c = clips[i];
-		o << (i ? ",\n    " : "\n    ");
-		o << "{\"kind\":\"" << kinds[c.kind] << "\",\"cross\":" << (c.cross ? "true" : "false")
+	bool first = true;
+	for (const FormResult& fr : forms) for (const Clip& c : fr.clips) {
+		o << (first ? "\n    " : ",\n    ");
+		first = false;
+		o << "{\"form\":" << jsonStr(fr.form) << ",\"kind\":\"" << kinds[c.kind] << "\",\"cross\":" << (c.cross ? "true" : "false")
 			<< ",\"drop\":" << c.drop << ",\"pusher\":" << c.pusher << ",\"crossed\":" << c.crossed
 			<< ",\"from\":" << vec(c.from) << ",\"prev\":" << vec(c.prev);
 		if (c.hasNext) o << ",\"next\":" << vec(c.next);
@@ -1599,7 +1684,7 @@ static string safeName(const string& s) {
 int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root;
 	double radius = 0;
-	bool falling = false, all = false, extendedOnly = false;
+	bool falling = false, all = false, extendedOnly = false, firstPerPair = false;
 	int threads = (int)std::max(1u, std::thread::hardware_concurrency());
 	for (int i = 1; i < argc; i++) {
 		string a = argv[i];
@@ -1610,6 +1695,7 @@ int main(int argc, char** argv) {
 		else if (a == "--radius") radius = std::stod(val());
 		else if (a == "--falling") falling = true;
 		else if (a == "--extended-only") extendedOnly = true;
+		else if (a == "--first-per-pair") firstPerPair = true;
 		else if (a == "--all") all = true;
 		else if (a == "-o" || a == "--out") out = val();
 		else if (a == "--out-dir") outDir = val();
@@ -1621,7 +1707,7 @@ int main(int argc, char** argv) {
 	if ((game != "OOT" && game != "MM") || (mapName.empty() && !all)) {
 		fprintf(stderr,
 			"usage: clipfinder --game OOT|MM (--map \"<name in the viewer's map list>\" | --all)\n"
-			"                  [--form Adult|Child|Crawlspace|Human|Deku|Zora|Goron|FierceDeity] [--radius R] [--falling] [--extended-only]\n"
+			"                  [--form Adult|Child|Crawlspace|Human|Deku|Zora|Goron|FierceDeity|All, or a list: Adult,Child] [--radius R] [--falling] [--extended-only] [--first-per-pair]\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -1631,12 +1717,42 @@ int main(int argc, char** argv) {
 		{ "FIERCEDEITY", 27 }, { "FIERCE_DEITY", 27 }, { "FD", 27 },
 		{ "CRAWLSPACE", 10 }, { "CRAWL", 10 },
 	};
+	// --form All: every form of the game (the viewer's RADIUS_OPTIONS). A
+	// smaller radius's clips aren't a subset of a bigger one's: resting spots,
+	// what fits between walls and which walls are in reach all change with it.
+	static const std::map<string, vector<string>> allForms = {
+		{ "OOT", { "Adult", "Child", "Crawlspace" } },
+		{ "MM", { "Human", "Deku", "Zora", "Goron", "FierceDeity" } },
+	};
 	if (form.empty()) form = game == "OOT" ? "Adult" : "Human";
-	if (radius == 0) {
-		string f = form;
-		for (auto& ch : f) ch = (char)toupper((unsigned char)ch);
-		if (!radii.count(f)) { fprintf(stderr, "unknown form %s (or pass --radius)\n", form.c_str()); return 2; }
-		radius = radii.at(f);
+	auto upper = [](string v) { for (auto& ch : v) ch = (char)toupper((unsigned char)ch); return v; };
+	struct Variant { string form; double radius, checkHeight; };
+	vector<Variant> variants;
+	{
+		// --form All, or a list: --form Adult,Child
+		vector<string> list;
+		for (size_t a = 0; a <= form.size();) {
+			size_t b = form.find(',', a);
+			if (b == string::npos) b = form.size();
+			string f = form.substr(a, b - a);
+			if (!f.empty()) {
+				if (upper(f) == "ALL") list.insert(list.end(), allForms.at(game).begin(), allForms.at(game).end());
+				else list.push_back(f);
+			}
+			a = b + 1;
+		}
+		if (list.size() > 1 && radius != 0) { fprintf(stderr, "--radius can't be used with several forms\n"); return 2; }
+		for (const string& f : list) {
+			const string fu = upper(f);
+			double r = radius;
+			if (r == 0) {
+				if (!radii.count(fu)) { fprintf(stderr, "unknown form %s (or pass --radius)\n", f.c_str()); return 2; }
+				r = radii.at(fu);
+			}
+			// OoT's PLAYER_STATE2_CRAWLING checks walls at 15 instead of 26 (z_player.c)
+			const bool crawl = game == "OOT" && (fu == "CRAWLSPACE" || fu == "CRAWL");
+			variants.push_back({ f, r, crawl ? 15.0 : game == "OOT" ? 26.0 : F(F(268 * F(0.1))) });
+		}
 	}
 	if (root.empty()) {
 		string exe = argv[0];
@@ -1650,39 +1766,61 @@ int main(int argc, char** argv) {
 	for (const MapEntry& e : maps) if (all || e.name == mapName) todo.push_back(e);
 	if (todo.empty()) { fprintf(stderr, "no map named \"%s\" in the %s list\n", mapName.c_str(), game.c_str()); return 1; }
 
-	// OoT's PLAYER_STATE2_CRAWLING checks walls at 15 instead of 26 (z_player.c)
-	string formUp = form;
-	for (auto& ch : formUp) ch = (char)toupper((unsigned char)ch);
-	const bool crawl = game == "OOT" && (formUp == "CRAWLSPACE" || formUp == "CRAWL");
-	const double checkHeight = crawl ? 15.0 : game == "OOT" ? 26.0 : F(F(268 * F(0.1)));
 	int failures = 0;
 	for (const MapEntry& e : todo) {
-		fprintf(stderr, "%s - %s (%s, radius %g%s)\n", game.c_str(), e.name.c_str(), form.c_str(), radius, falling ? ", falling" : "");
 		vector<uint8_t> buf;
-		if (!readFile(root + "/models/" + game + "/" + e.file, buf)) { fprintf(stderr, "  can't read models/%s/%s\n", game.c_str(), e.file.c_str()); failures++; continue; }
+		if (!readFile(root + "/models/" + game + "/" + e.file, buf)) { fprintf(stderr, "%s - %s: can't read models/%s/%s\n", game.c_str(), e.name.c_str(), game.c_str(), e.file.c_str()); failures++; continue; }
 		ColHeader ch;
 		vector<Tri> tris;
 		try {
-			if (!parseScene(buf, game, ch, tris)) { fprintf(stderr, "  no collision header\n"); failures++; continue; }
-		} catch (const std::exception& ex) { fprintf(stderr, "  bad scene file: %s\n", ex.what()); failures++; continue; }
-		Model m;
-		initColCtx(m.colCtx, game, e.name, ch);
-		initializeSubdivisions(m.colCtx, tris);
-		m.radius = F(radius);
-		m.checkHeight = F(checkHeight);
-		m.lowDrop = falling ? 30 : 0;
-		m.extendedOnly = extendedOnly;
-		m.build(tris, ch.numPolygons);
-		vector<Clip> clips = scan(m, threads);
-		string json = toJson(game, e.name, form, m, ch.numPolygons, falling, clips);
+			if (!parseScene(buf, game, ch, tris)) { fprintf(stderr, "%s - %s: no collision header\n", game.c_str(), e.name.c_str()); failures++; continue; }
+		} catch (const std::exception& ex) { fprintf(stderr, "%s - %s: bad scene file: %s\n", game.c_str(), e.name.c_str(), ex.what()); failures++; continue; }
+		// The output file is opened before the scan, so a path that can't be
+		// written (e.g. a missing directory) stops the run straight away
+		// instead of after the scan, and a write that fails stops it too.
 		string path = out;
 		if (path.empty() || all) {
 			string dir = outDir.empty() ? "." : outDir;
 			path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + ".json";
 		}
 		std::ofstream f(path, std::ios::binary);
-		f << json;
-		if (!f) { fprintf(stderr, "  can't write %s\n", path.c_str()); failures++; continue; }
+		if (!f) {
+			// (the full path: a Windows exe reads "/dir" as the root of the
+			// current drive, not as relative to the current directory)
+			std::error_code ec;
+			string full = std::filesystem::absolute(path, ec).string();
+			fprintf(stderr, "can't write %s (%s - does that directory exist?) - stopping\n", path.c_str(), ec ? path.c_str() : full.c_str());
+			return 1;
+		}
+		// Forms with the same radius and check height (Human / Deku) share a
+		// scan, listed once as "Human/Deku".
+		vector<FormResult> results;
+		for (const Variant& v : variants) {
+			auto same = std::find_if(results.begin(), results.end(),
+				[&](const FormResult& r) { return r.radius == v.radius && r.checkHeight == v.checkHeight; });
+			if (same != results.end()) {
+				fprintf(stderr, "%s - %s (%s): same radius and check height as %s, sharing its scan\n",
+					game.c_str(), e.name.c_str(), v.form.c_str(), same->form.c_str());
+				same->form += "/" + v.form;
+				continue;
+			}
+			fprintf(stderr, "%s - %s (%s, radius %g%s)\n", game.c_str(), e.name.c_str(), v.form.c_str(), v.radius, falling ? ", falling" : "");
+			Model m;
+			initColCtx(m.colCtx, game, e.name, ch);
+			initializeSubdivisions(m.colCtx, tris);
+			m.radius = F(v.radius);
+			m.checkHeight = F(v.checkHeight);
+			m.lowDrop = falling ? 30 : 0;
+			m.extendedOnly = extendedOnly;
+			m.build(tris, ch.numPolygons);
+			results.push_back({ v.form, v.radius, F(v.checkHeight), scan(m, threads, firstPerPair) });
+		}
+		f << toJson(game, e.name, ch.numPolygons, falling, extendedOnly, results);
+		f.close();
+		if (!f) {
+			fprintf(stderr, "can't write %s - stopping\n", path.c_str());
+			return 1;
+		}
 		fprintf(stderr, "  wrote %s\n", path.c_str());
 	}
 	return failures ? 1 : 0;

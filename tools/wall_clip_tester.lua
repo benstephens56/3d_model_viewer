@@ -22,7 +22,8 @@
 --      TESTS_FILE below).
 --   2. In BizHawk (N64 core: Mupen64Plus - the callback needs it), load the
 --      same map as the same form, with Link standing still anywhere and no
---      menus or text open. Unthrottled / fast-forward makes it much quicker.
+--      menus or text open. (Tests of several forms: the ones for the form
+--      Link is in run - see FORM below.) Unthrottled / fast-forward makes it much quicker.
 --   3. Run this script. Progress prints to the Lua console; the summary goes
 --      to the console and to wall_clip_results.txt next to the tests file.
 --      The game is put back to the starting savestate at the end.
@@ -61,6 +62,11 @@ if RECORD then FAST = false end
 --           (Player speedXZ) to move there himself - real movement, but his
 --           action code can still change the speed on the frame
 local MODE = "auto"
+-- Tests exported with several forms (clipfinder --form All, imported into the
+-- viewer): only the ones for this form run. nil = the form Link is in, read
+-- from RAM (OoT: "Crawlspace" if he has the crawling flag, else "Adult" /
+-- "Child"; MM: "Human", "Deku", "Zora", "Goron", "FierceDeity"), or set a name.
+local FORM = nil
 
 ---------------------------------------------------------------------------
 -- Game / memory (from collision_dump.lua)
@@ -105,6 +111,9 @@ if GAME == "OOT" then
 	K.skelAnime = 0x1A4
 	K.rideActor = 0x430
 	K.actorSpeed = 0x68                 -- Actor.speed
+	K.stateFlags2 = 0x670
+	K.crawling = 0x40000                -- PLAYER_STATE2_CRAWLING
+	K.linkAge = 0x11A5D4                -- gSaveContext.linkAge (0 adult, 1 child)
 else
 	K.play = 0x3E6B20
 	K.gameplayFrames = 0x18840
@@ -122,6 +131,7 @@ else
 	K.skelAnime = 0x240
 	K.rideActor = 0x390
 	K.actorSpeed = 0x70
+	K.transformation = 0x14B            -- Player.transformation (PlayerTransformation)
 end
 -- Player_UpdateCommon (both games) sets prevPos from home.pos at the start of
 -- the frame (and home.pos = world.pos at its end), so home.pos is Link's real
@@ -266,9 +276,10 @@ end
 ---------------------------------------------------------------------------
 
 -- Signed distance to a wall's plane (collision header normal / dist), at
--- Link's wall check height.
+-- Link's wall check height (the test's form's, with several forms).
+local checkHeight = T.checkHeight
 local function planeDist(w, p)
-	local y = p[2] + T.checkHeight
+	local y = p[2] + checkHeight
 	return (w.n[1] * p[1] + w.n[2] * y + w.n[3] * p[3]) / 32767 + w.d
 end
 
@@ -293,9 +304,47 @@ end
 
 local function fmt(v) return v and string.format("%.9g, %.9g, %.9g", v[1], v[2], v[3]) or "-" end
 
+-- The form Link is in now.
+local function currentForm()
+	if GAME == "OOT" then
+		if read_u32(K.player + K.stateFlags2) & K.crawling ~= 0 then return "Crawlspace" end
+		return read_u32(K.linkAge) == 0 and "Adult" or "Child"
+	end
+	local names = { [0] = "FierceDeity", "Goron", "Zora", "Deku", "Human" }
+	return names[mainmemory.read_u8(K.player + K.transformation)] or "?"
+end
+
+-- Tests with several forms: keep the ones for this form. A test's form can
+-- name several ("Human/Deku": the same radius and check height, one scan).
+local tests, runForm = T.tests, T.form
+if T.forms then
+	runForm = FORM or currentForm()
+	local function formMatches(label)
+		for part in tostring(label):gmatch("[^/]+") do
+			if part:lower() == runForm:lower() then return true end
+		end
+		return false
+	end
+	tests = {}
+	for _, t in ipairs(T.tests) do
+		if formMatches(t.form) then tests[#tests + 1] = t end
+	end
+	local names = {}
+	for label, f in pairs(T.forms) do
+		names[#names + 1] = label
+		if formMatches(label) then checkHeight = f.checkHeight end
+	end
+	table.sort(names)
+	if #tests == 0 then
+		error(string.format("no tests for %s (Link's form%s) - the tests have %s", runForm,
+			FORM and ", from FORM" or " in RAM", table.concat(names, ", ")))
+	end
+	print(string.format("Form: %s (%d of %d tests; the file has %s)", runForm, #tests, #T.tests, table.concat(names, ", ")))
+end
+
 -- Group the tests, and pick up to MAX_PER_GROUP spread over each group.
 local groups, order = {}, {}
-for _, t in ipairs(T.tests) do
+for _, t in ipairs(tests) do
 	if not groups[t.group] then
 		groups[t.group] = { tests = {}, first = t }
 		order[#order + 1] = t.group
@@ -317,7 +366,7 @@ for _, gi in ipairs(order) do
 end
 
 print(string.format("Wall clip tester: %s, %s, %s - %d tests (%d points exported)",
-	GAME, T.map, T.form, #queue, #T.tests))
+	GAME, T.map, runForm, #queue, #tests))
 
 local base = memorysavestate.savecorestate()
 print("Saved the starting state")
@@ -415,6 +464,7 @@ local function runTest(t, mode)
 			mainmemory.write_s16_be(K.player + K.shapeRotY, yaw)
 		end
 		writefloat(K.player + K.speedXZ, speed)
+		r.yaw, r.speed = yaw, speed
 		r.log = {}
 		local frames0 = read_u32(K.play + K.gameplayFrames)
 		-- Link's state too: what he's doing (actionFunc, stateFlags1), whether
@@ -551,7 +601,7 @@ cleanUp()
 local out = {}
 local function line(s) out[#out + 1] = s end
 
-line(string.format("Wall push clip test results: %s, %s, %s (mode: %s)", GAME, T.map, T.form, mode))
+line(string.format("Wall push clip test results: %s, %s, %s (mode: %s)", GAME, T.map, runForm, mode))
 line(string.format("%d tests; worked = Link ended up behind the clipped wall (clipped), fell out of the map (fell)", #results))
 line("or was moved far away (voided), " .. SETTLE_FRAMES .. " frames after the test frame.")
 line("")
@@ -569,6 +619,24 @@ for _, r in ipairs(results) do
 	end
 end
 
+-- How Link got there: where he stood, the yaw he faced and the speedXZ given.
+-- Move mode: what was actually used (the start read back from RAM). Hook modes
+-- write the frame's positions straight into the bg check, so it's the export's
+-- start, yaw and speed (the move the viewer found).
+local function setupStr(r)
+	local t = r.test
+	local yaw, speed = r.yaw or t.yaw, r.speed or t.speed
+	if not yaw then
+		local dx, dz = t.next[1] - t.prev[1], t.next[3] - t.prev[3]
+		if dx * dx + dz * dz >= 0.0001 then
+			yaw = yawTo(dx, dz)
+			speed = speed or math.sqrt(dx * dx + dz * dz) / 1.5
+		end
+	end
+	return string.format("start %s  angle %s  speedXZ %s", fmt(r.start or t.prev),
+		yaw and string.format("0x%04X", yaw % 0x10000) or "-", speed and string.format("%.9g", speed) or "-")
+end
+
 local totalWorked, groupsWorked = 0, 0
 line("WORKED")
 for _, gi in ipairs(order) do
@@ -582,6 +650,7 @@ for _, gi in ipairs(order) do
 		for _, r in ipairs(b.hits) do
 			line(string.format("    [%s] prev %s -> next %s  => after %s, final %s",
 				r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final)))
+			line("        " .. setupStr(r))
 		end
 		-- and the ones in the group that didn't
 		for _, r in ipairs(results) do
