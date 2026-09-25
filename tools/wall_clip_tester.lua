@@ -36,6 +36,7 @@ local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the test
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
 local SETTLE_FRAMES = 30          -- emulated frames to let run after the test frame (3 per game frame)
 local HOOK_TIMEOUT = 60           -- emulated frames to wait for the player's bg check
+local HOLD_FRAMES = 9             -- "move": emulated frames Link is held at the start first
 local BEHIND_MIN = 1.0            -- units behind the clipped wall that count as through it
 local FAST = true                 -- skip drawing while testing (client.invisibleemulation)
 -- How the test frame is set up:
@@ -72,6 +73,8 @@ local function writefloat(addr, val) mainmemory.writefloat(addr, val, true) end
 
 local K = {}
 if GAME == "OOT" then
+	K.play = 0x1C84A0                   -- globalContext
+	K.gameplayFrames = 0x11DE4
 	K.colCtx = 0x1C84A0 + 0x7C0         -- globalContext + 0x7C0
 	K.player = 0x1DAA30                 -- Player actor (RDRAM offset)
 	K.prevPos = 0x100                   -- Actor.prevPos
@@ -83,6 +86,8 @@ if GAME == "OOT" then
 	K.shapeRotY = 0xB6                  -- Actor.shape.rot.y
 	K.actorSpeed = 0x68                 -- Actor.speed
 else
+	K.play = 0x3E6B20
+	K.gameplayFrames = 0x18840
 	K.colCtx = 0x3E6B20 + 0x830
 	K.player = 0x3FFDB0
 	K.prevPos = 0x108
@@ -93,6 +98,10 @@ else
 	K.yaw = 0xAD4
 	K.shapeRotY = 0xBE
 	K.actorSpeed = 0x70
+	-- MM's Player_UpdateCommon sets prevPos from home.pos at the start of the
+	-- frame (and home.pos = world.pos at its end), so home.pos is Link's real
+	-- "where he was last frame"
+	K.home = 0x08
 end
 K.rotY = 0x32                           -- Actor.world.rot.y (both games)
 K.pos = 0x24                            -- Actor.world.pos (both games)
@@ -304,8 +313,18 @@ event.onexit(cleanUp)
 
 if FAST and client.invisibleemulation then client.invisibleemulation(true) end
 
+-- atan2(y, x) by hand: BizHawk's math.atan ignores a second argument (it
+-- returned atan(dx), sending Link off at the wrong yaw).
+local function atan2(y, x)
+	if x > 0 then return math.atan(y / x) end
+	if x < 0 then return math.atan(y / x) + (y >= 0 and math.pi or -math.pi) end
+	if y > 0 then return math.pi / 2 end
+	if y < 0 then return -math.pi / 2 end
+	return 0
+end
+
 local function yawTo(dx, dz)
-	local a = math.floor(math.atan(dx, dz) / math.pi * 0x8000 + 0.5)
+	local a = math.floor(atan2(dx, dz) / math.pi * 0x8000 + 0.5)
 	return ((a + 0x8000) % 0x10000) - 0x8000
 end
 
@@ -314,33 +333,70 @@ local function runTest(t, mode)
 	memorysavestate.loadcorestate(base)
 	local r = { test = t }
 	if mode == "move" then
-		-- Link at the start; speed and yaw toward `next`, rewritten every
-		-- emulated frame until the game frame moves him.
-		writeVec(K.player + K.pos, t.prev)
+		-- The way the manual setup / wall_clip_trace.lua does it, which works:
+		-- Link standing still at the start facing the test's yaw, then speedXZ
+		-- written once, just before a game frame, and nothing else touched.
 		local dx, dz = t.next[1] - t.prev[1], t.next[3] - t.prev[3]
 		local dist = math.sqrt(dx * dx + dz * dz)
-		local speed = dist < 0.01 and 0 or (dist + 2) / 1.5 + 1
-		local yaw = yawTo(dx, dz)
-		local moved = false
-		for _ = 1, HOOK_TIMEOUT do
-			writefloat(K.player + K.speedXZ, speed)
-			writefloat(K.player + K.actorSpeed, speed)
-			if dist >= 0.01 then
+		-- (the export's exact s16 yaw and f32 speed when it has them: the game
+		-- moves along the sine table, so the crossing is where the viewer
+		-- worked it out only for that exact move)
+		local yaw = t.yaw or (dist >= 0.01 and yawTo(dx, dz) or nil)
+		if yaw and yaw >= 0x8000 then yaw = yaw - 0x10000 end
+		-- Hold him at the start for a few game frames: world.pos, prevPos and
+		-- (MM) home.pos every emulated frame, no speed. A game frame spans 3
+		-- emulated frames and a write can land in the middle of one, so a
+		-- single write isn't enough.
+		for _ = 1, HOLD_FRAMES do
+			writeVec(K.player + K.pos, t.prev)
+			writeVec(K.player + K.prevPos, t.prev)
+			if K.home then writeVec(K.player + K.home, t.prev) end
+			writefloat(K.player + K.speedXZ, 0)
+			writefloat(K.player + K.actorSpeed, 0)
+			if yaw then
 				mainmemory.write_s16_be(K.player + K.yaw, yaw)
 				mainmemory.write_s16_be(K.player + K.rotY, yaw)
 				mainmemory.write_s16_be(K.player + K.shapeRotY, yaw)
 			end
 			emu.frameadvance()
-			local p = readVec(K.player + K.pos)
-			if dist < 0.01 or math.abs(p[1] - t.prev[1]) + math.abs(p[3] - t.prev[3]) > 0.001 then
-				moved = true
-				break
-			end
 		end
-		if not moved then
+		-- Let him stand there on his own until a game frame has just run,
+		-- then 2 more emulated frames: the next one runs the next game frame
+		-- (the same timing as the trace).
+		local frames = read_u32(K.play + K.gameplayFrames)
+		for _ = 1, 6 do
+			emu.frameadvance()
+			if read_u32(K.play + K.gameplayFrames) ~= frames then break end
+		end
+		for _ = 1, 2 do emu.frameadvance() end
+		-- (a standing point isn't somewhere Link stays: the pushes of the
+		-- first game frame from it are the test, and have already run)
+		if yaw then r.start = readVec(K.player + K.pos) end
+		-- Just enough speed to reach `next` (Actor_UpdatePos moves 1.5x speed).
+		local speed = t.speed or dist / 1.5
+		if yaw then
+			mainmemory.write_s16_be(K.player + K.yaw, yaw)
+			mainmemory.write_s16_be(K.player + K.shapeRotY, yaw)
+		end
+		writefloat(K.player + K.speedXZ, speed)
+		r.log = {}
+		local frames0 = read_u32(K.play + K.gameplayFrames)
+		for i = 1, 9 do
+			emu.frameadvance()
+			local p = readVec(K.player + K.pos)
+			r.log[#r.log + 1] = string.format("+%d gf+%d pos %s speedXZ %.3f speed %.3f yaw %04X",
+				i, read_u32(K.play + K.gameplayFrames) - frames0, fmt(p), readfloat(K.player + K.speedXZ),
+				readfloat(K.player + K.actorSpeed), mainmemory.read_u16_be(K.player + K.yaw))
+			if read_u32(K.play + K.gameplayFrames) ~= frames0 then break end
+		end
+		if read_u32(K.play + K.gameplayFrames) == frames0 then
 			r.status = "stuck"
 			return r
 		end
+		-- (the game frame ran in that emulated frame: `after` is right after it)
+		r.after = readVec(K.player + K.pos)
+		for _ = 1, 3 do emu.frameadvance() end
+		r.log[#r.log + 1] = "+1 game frame pos " .. fmt(readVec(K.player + K.pos))
 	else
 		pending = t
 		fired = false
@@ -355,11 +411,21 @@ local function runTest(t, mode)
 			return r
 		end
 	end
-	-- the rest of that game frame, then let it run
-	for _ = 1, 3 do emu.frameadvance() end
-	r.after = readVec(K.player + K.pos)
+	if mode ~= "move" then
+		-- the rest of that game frame
+		for _ = 1, 3 do emu.frameadvance() end
+		r.after = readVec(K.player + K.pos)
+	end
 	for _ = 1, SETTLE_FRAMES do emu.frameadvance() end
 	r.final = readVec(K.player + K.pos)
+	-- The test frame has to have started from `prev`: the frame's movement,
+	-- line check and pushes move Link a few tens of units at most.
+	local moveDist = math.sqrt((t.next[1] - t.prev[1]) ^ 2 + (t.next[3] - t.prev[3]) ^ 2)
+	if (r.start and dist3(r.start, t.prev) > 1) or
+		math.sqrt((r.after[1] - t.prev[1]) ^ 2 + (r.after[3] - t.prev[3]) ^ 2) > moveDist + 60 then
+		r.status = "setup"
+		return r
+	end
 	r.status = judge(t, r.after, r.final)
 	return r
 end
@@ -443,6 +509,14 @@ for _, gi in ipairs(order) do
 			line(string.format("    [%s] prev %s -> next %s  => after %s, final %s",
 				r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final)))
 		end
+		-- and the ones in the group that didn't
+		for _, r in ipairs(results) do
+			if r.test.group == gi and r.after and r.status ~= "clipped" and r.status ~= "fell" and r.status ~= "voided" then
+				line(string.format("    [%s] prev %s -> next %s  => after %s, final %s (expected %s)",
+					r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final), fmt(r.test.expect)))
+				for _, l in ipairs(r.log or {}) do line("        " .. l) end
+			end
+		end
 	end
 end
 if groupsWorked == 0 then line("  (none)") end
@@ -457,6 +531,13 @@ for _, gi in ipairs(order) do
 		for k, v in pairs(b.statuses) do st[#st + 1] = k .. " " .. v end
 		line(string.format("  %s %s: TRI %d through TRI %d - 0 of %d (%s)",
 			t.kind, t.type, t.pusher, t.crossed, b.tried, table.concat(st, ", ")))
+		for _, r in ipairs(results) do
+			if r.test.group == gi and r.after then
+				line(string.format("    [%s] prev %s -> next %s  => after %s, final %s (expected %s)",
+					r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final), fmt(r.test.expect)))
+				for _, l in ipairs(r.log or {}) do line("        " .. l) end
+			end
+		end
 	end
 end
 line("")

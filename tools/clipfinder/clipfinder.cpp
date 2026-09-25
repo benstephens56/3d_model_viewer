@@ -57,6 +57,31 @@ static inline int32_t toI32(double v) { return (int32_t)(int64_t)std::trunc(v); 
 
 struct V3 { double x = 0, y = 0, z = 0; };
 
+// wall_push_clips.js GROUND_DROP: walking, posNext is 7.5 below the floor
+// (velocity.y -4 after the floor check, -5 after gravity, x1.5)
+static const double GROUND_DROP = 7.5;
+static const double SPEED_RATE = 1.5;
+
+#include "sintable.h"
+
+// libultra sins() and Math_SinS / Math_CosS (js/libultra_sins.js)
+static int sins(int x) {
+	x = (x & 0xFFFF) >> 4;
+	int val = (x & 0x400) ? SINTABLE[0x3FF - (x & 0x3FF)] : SINTABLE[x & 0x3FF];
+	return (x & 0x800) ? -val : val;
+}
+static const double SHRT_INV = F(1.0 / 32767.0);
+static inline double sinS(int yaw) { return F(sins(yaw) * SHRT_INV); }
+static inline double cosS(int yaw) { return F(sins(yaw + 0x4000) * SHRT_INV); }
+// The s16 yaw along (dx, dz), as a u16 (JS Math.round(...) & 0xFFFF).
+static inline int yawOf(double dx, double dz) {
+	return (int)(int64_t)std::floor(std::atan2(dx, dz) / (2 * PI) * 65536 + 0.5) & 0xFFFF;
+}
+// Link walking on the ground for a frame (Actor_UpdateVelocityWithGravity + Actor_UpdatePos).
+static V3 moveStep(const V3& from, int yaw, double speed) {
+	return { F(from.x + F(F(speed * sinS(yaw)) * 1.5)), F(from.y - GROUND_DROP), F(from.z + F(F(speed * cosS(yaw)) * 1.5)) };
+}
+
 ////////////////////////////////////////
 // Scene / collision header (parse_model.js)
 ////////////////////////////////////////
@@ -546,11 +571,24 @@ struct Model {
 		return { rx, pos.y, rz };
 	}
 
-	std::optional<V3> lineVsPoly(const Poly& p, const V3& a, const V3& b, double chkDist) const {
+	// Where Link comes to rest standing at `pos` (pushes until they stop, at
+	// most 4 frames), or none.
+	std::optional<V3> restingSpot(const V3& pos) const {
+		V3 cur = pos;
+		for (int i = 0; i < 4; i++) {
+			V3 next = sphereStep(cur, LOOSE, nullptr);
+			if (std::fabs(next.x - cur.x) <= 0.01 && std::fabs(next.z - cur.z) <= 0.01) return cur;
+			cur = next;
+		}
+		return std::nullopt;
+	}
+
+	std::optional<V3> lineVsPoly(const Poly& p, const V3& a, const V3& b, double chkDist, bool oneFace) const {
 		double planeA = F(F(F(F(F(p.sx * a.x) + F(p.sy * a.y)) + F(p.sz * a.z)) * NORMAL_FRAC) + p.dist);
 		double planeB = F(F(F(F(F(p.sx * b.x) + F(p.sy * b.y)) + F(p.sz * b.z)) * NORMAL_FRAC) + p.dist);
 		double delta = F(planeA - planeB);
-		if ((planeA >= 0 && planeB >= 0) || (planeA < 0 && planeB < 0) || isZero(delta)) return std::nullopt;
+		if ((planeA >= 0 && planeB >= 0) || (planeA < 0 && planeB < 0) || (oneFace && planeA < 0 && planeB > 0) ||
+			isZero(delta)) return std::nullopt;
 		double t = F(planeA / delta);
 		V3 i = { F(F(F(b.x - a.x) * t) + a.x), F(F(F(b.y - a.y) * t) + a.y), F(F(F(b.z - a.z) * t) + a.z) };
 		if ((std::fabs(p.nx) > 0.5 && !isZero(p.nx) && triChkX(p, i.y, i.z, 0, chkDist)) ||
@@ -559,7 +597,7 @@ struct Model {
 		return std::nullopt;
 	}
 
-	std::optional<Hit> lineHit(Scratch& s, const V3& a, const V3& b, const Tol& tol, bool floors) const {
+	std::optional<Hit> lineHit(Scratch& s, const V3& a, const V3& b, const Tol& tol, bool floors, bool oneFace = false) const {
 		CellIdx ia = pointCell(colCtx, a.x, a.y, a.z), ib = pointCell(colCtx, b.x, b.y, b.z);
 		int cells[64];
 		int nCells = 0;
@@ -582,7 +620,7 @@ struct Model {
 				s.stamp[id] = st;
 				const Poly& p = polys[id];
 				if (a.y < p.sortY && end.y < p.sortY) break;
-				auto i = lineVsPoly(p, a, end, tol.lineChkDist);
+				auto i = lineVsPoly(p, a, end, tol.lineChkDist, oneFace);
 				if (!i) continue;
 				double d = F(F(sq(F(a.x - i->x)) + sq(F(a.y - i->y))) + sq(F(a.z - i->z)));
 				if (d < bestDistSq) {
@@ -920,7 +958,7 @@ static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, c
 				for (const auto& od : outDirs)
 					for (double y : m.floorsNear(s, x + d * od[0], z + d * od[1])) add(y);
 			for (double fy : ys) {
-				double h = fy + ch;
+				double h = fy - GROUND_DROP + ch;
 				if (h < lo || h > hi + m.lowDrop) continue;
 				double hTop = std::min(h, hi), hLow = std::max(lo, h - m.lowDrop);
 				if (!reachable(hTop) && !(m.lowDrop && (reachable(hLow) || reachable((hTop + hLow) / 2)))) continue;
@@ -991,7 +1029,7 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 		for (double y0 : seeds) {
 			for (double y : beside(onPlane(u, y0 + ch))) {
 				double h = y + ch;
-				if (h - m.lowDrop > A.maxY + 1 || h < A.minY - 1 || same(y)) continue;
+				if (h - std::max((double)m.lowDrop, GROUND_DROP) > A.maxY + 1 || h < A.minY - 1 || same(y)) continue;
 				ys.push_back(y);
 			}
 		}
@@ -1012,10 +1050,12 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 		for (double y : blockYs) {
 			for (int drop = 0; drop <= m.lowDrop; drop += drop == 0 ? 2 : 4) {
 				if (drop > 0 && (ui % 2)) break;
-				double h = F(F(y - drop) + ch);
+				// (walking, posNext is GROUND_DROP below the floor)
+				double low = F(y - (drop ? drop : GROUND_DROP));
+				double h = F(low + ch);
 				if (h < A.minY - 1 || h > A.maxY + 1) continue;
 				auto i = onPlane(u, h);
-				yield({ { F(i.first), F(y - drop), F(i.second) }, y, drop, u, y });
+				yield({ { F(i.first), low, F(i.second) }, y, drop, u, y });
 			}
 		}
 	}
@@ -1025,7 +1065,10 @@ struct LineFrameR { Hit hit; V3 res; PushList trace; };
 
 static std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3& prev, const V3& next, const Tol& tol) {
 	double h = F(next.y + m.checkHeight);
-	auto hit = m.lineHit(s, { prev.x, h, prev.z }, { next.x, h, next.z }, tol, false);
+	// one face only, and floors too when moving more than the radius
+	double dx = F(next.x - prev.x), dz = F(next.z - prev.z);
+	bool floors = sq(m.radius) < F(sq(dx) + sq(dz));
+	auto hit = m.lineHit(s, { prev.x, h, prev.z }, { next.x, h, next.z }, tol, floors, true);
 	if (!hit || isZero(m.polys[hit->poly].nXZ)) return std::nullopt;
 	const Poly& P = m.polys[hit->poly];
 	double k = F(m.radius * F(1 / P.nXZ));
@@ -1048,10 +1091,32 @@ static std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, doub
 	return end;
 }
 
-static std::optional<double> floorNear(const Model& m, double x, double z, double ref) {
+// The highest floor within 10 of ref, then the top one of the floors at most
+// 3 above that (wall_push_clips.js standSpot's floorAt).
+static std::optional<double> standFloor(const Model& m, double x, double z, double ref) {
+	FloorList ys = m.floorsAt(x, z);
 	std::optional<double> best;
-	for (double y : m.floorsAt(x, z)) if (std::fabs(y - ref) <= 10 && (!best || y > *best)) best = y;
-	return best;
+	for (double y : ys) if (std::fabs(y - ref) <= 10 && (!best || y > *best)) best = y;
+	if (!best) return best;
+	double top = -INFINITY;
+	for (double v : ys) if (v <= *best + 3 && v > top) top = v;
+	return top;
+}
+
+// wall_push_clips.js standSpot: where Link can stand still near (x, z).
+static std::optional<V3> standSpot(const Model& m, double x, double z, double floorY) {
+	auto y = standFloor(m, x, z, floorY);
+	if (!y) return std::nullopt;
+	double cy = *y;
+	for (int i = 0; i < 3; i++) {
+		auto rest = m.restingSpot({ x, cy, z });
+		if (!rest) return std::nullopt;
+		auto ry = standFloor(m, rest->x, rest->z, floorY);
+		if (!ry) return std::nullopt;
+		if (rest->x == x && rest->z == z && *ry == cy) return rest;
+		x = rest->x; z = rest->z; cy = *ry;
+	}
+	return std::nullopt;
 }
 
 struct Clip {
@@ -1063,25 +1128,37 @@ struct Clip {
 	bool hasNext = false, hasFloorY = false, endNoFloor = false;
 	double floorY = 0;
 	vector<int> yaws;
+	int yaw = 0;          // crossings: the exact move (s16 yaw, f32 speed)
+	double speed = 0;
 };
 
-struct CrossFound { ClipResult clip; V3 prev, next, res, at; bool noFloor = false; };
+struct CrossFound { ClipResult clip; V3 prev, next, res, at; bool noFloor = false; int yaw = 0; double speed = 0; };
 
 static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Model& m, Scratch& s, const Poly& A,
 	const CrossPoint& cp, const Tol& tol) {
 	vector<int> yaws;
 	std::optional<CrossFound> first;
+	std::set<std::pair<double, double>> tried;
 	for (int i = 0; i < 32; i++) {
-		int yaw = i * 0x800;
-		double dx = std::sin(yaw / 65536.0 * 2 * PI), dz = std::cos(yaw / 65536.0 * 2 * PI);
-		if (std::fabs(dx * A.nx + dz * A.nz) * A.invNXZ < 0.1) continue;
+		int yaw0 = i * 0x800;
+		double dx0 = std::sin(yaw0 / 65536.0 * 2 * PI), dz0 = std::cos(yaw0 / 65536.0 * 2 * PI);
+		if (std::fabs(dx0 * A.nx + dz0 * A.nz) * A.invNXZ < 0.1) continue;
 		std::optional<CrossFound> found;
 		for (double dist : MOVE_STEPS) {
-			double px = F(cp.p.x - dist * dx), pz = F(cp.p.z - dist * dz);
-			auto py = floorNear(m, px, pz, cp.floorY);
-			if (!py) continue;
-			V3 prev = { px, *py, pz };
-			V3 next = { F(cp.p.x + dx), cp.drop > 0 ? cp.p.y : *py, F(cp.p.z + dz) };
+			// standing still at the start, moving from there through the point
+			auto prevO = standSpot(m, F(cp.p.x - dist * dx0), F(cp.p.z - dist * dz0), cp.floorY);
+			if (!prevO) continue;
+			V3 prev = *prevO;
+			if (!tried.insert({ prev.x, prev.z }).second) continue;
+			double vx = cp.p.x - prev.x, vz = cp.p.z - prev.z, len = std::hypot(vx, vz);
+			if (len < 0.5) continue;
+			double dx = vx / len, dz = vz / len;
+			if (std::fabs(dx * A.nx + dz * A.nz) * A.invNXZ < 0.1) continue;
+			// the game's move: s16 yaw, speed 1 unit past the point, sine table
+			int yaw = yawOf(vx, vz);
+			double speed = F((len + 1) / SPEED_RATE);
+			V3 next = moveStep(prev, yaw, speed);
+			if (cp.drop > 0) next.y = cp.p.y;
 			auto f = lineFrame(m, s, prev, next, tol);
 			if (!f || f->hit.poly != A.id) continue;
 			auto clip = clipFromFrame(m, s, prev, f->res, f->trace, tol);
@@ -1094,11 +1171,11 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 			} else if (m.isInBounds(s, clip->end)) {
 				continue;
 			}
-			found = CrossFound{ *clip, prev, next, f->res, { f->hit.x, next.y, f->hit.z }, noFloor };
+			found = CrossFound{ *clip, prev, next, f->res, { f->hit.x, next.y, f->hit.z }, noFloor, yaw, speed };
 			break;
 		}
 		if (!found) continue;
-		yaws.push_back(yaw);
+		if (std::find(yaws.begin(), yaws.end(), found->yaw) == yaws.end()) yaws.push_back(found->yaw);
 		if (!first) first = found;
 	}
 	if (!first) return std::nullopt;
@@ -1110,32 +1187,34 @@ static std::optional<V3> reachFrom(const Model& m, Scratch& s, const V3& p, doub
 	for (double dist : MOVE_STEPS) {
 		for (int i = 0; i < 16; i++) {
 			double ang = i / 16.0 * 2 * PI;
-			double x = F(p.x - dist * std::sin(ang)), z = F(p.z - dist * std::cos(ang));
-			auto y = floorNear(m, x, z, floorY);
-			if (!y) continue;
-			V3 prev = { x, *y, z };
-			if (m.lineHit(s, { x, h, z }, { p.x, h, p.z }, LOOSE, false)) continue;
+			auto prevO = standSpot(m, F(p.x - dist * std::sin(ang)), F(p.z - dist * std::cos(ang)), floorY);
+			if (!prevO) continue;
+			V3 prev = *prevO;
+			double x = prev.x, z = prev.z;
+			if (std::hypot(p.x - x, p.z - z) > 30) continue; // REACH_DIST
+			if (m.lineHit(s, { x, h, z }, { p.x, h, p.z }, LOOSE, false, true)) continue;
 			if (m.isInBounds(s, prev)) return prev;
 		}
 	}
 	return std::nullopt;
 }
 
-static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& p) {
+static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& floorPt) {
+	const V3 p = { floorPt.x, F(floorPt.y - GROUND_DROP), floorPt.z };
 	PushList trace;
 	V3 res = m.sphereStep(p, LOOSE, &trace);
 	if (trace.empty()) return std::nullopt;
 	auto clip = clipFromFrame(m, s, p, res, trace, LOOSE);
 	if (!clip) return std::nullopt;
-	if (!m.isInBounds(s, p) || m.isInBounds(s, clip->end)) return std::nullopt;
-	auto prev = reachFrom(m, s, p, p.y);
+	if (!m.isInBounds(s, floorPt) || m.isInBounds(s, clip->end)) return std::nullopt;
+	auto prev = reachFrom(m, s, p, floorPt.y);
 	if (!prev) return std::nullopt;
 	PushList st;
 	V3 sres = m.sphereStep(p, STRICT, &st);
 	bool strict = (bool)clipFromFrame(m, s, p, sres, st, STRICT);
 	Clip c;
 	c.kind = strict ? 0 : 1;
-	c.from = p; c.prev = *prev; c.res = res; c.end = clip->end;
+	c.from = p; c.floorY = floorPt.y; c.hasFloorY = true; c.prev = *prev; c.res = res; c.end = clip->end;
 	c.crossed = clip->crossed; c.pusher = clip->pusher;
 	return c;
 }
@@ -1224,7 +1303,7 @@ static vector<Clip> scan(const Model& m, int threads) {
 			nextPositionsForPair(m, s, pairs[pi], [&](const NextPos& np) {
 				const V3& p = np.p;
 				double h = p.y + m.checkHeight;
-				if (h >= np.lo && h <= np.hi && seen.insert({ p.x, p.z, p.y, 0 })) {
+				if (h - GROUND_DROP >= np.lo && h - GROUND_DROP <= np.hi && seen.insert({ p.x, p.z, p.y, 0 })) {
 					if (auto c = standingClip(m, s, p)) { local.push_back(*c); return; }
 				}
 				for (int k = 2; k <= m.lowDrop; k += 2) {
@@ -1263,6 +1342,9 @@ static vector<Clip> scan(const Model& m, int threads) {
 			const vector<int>& partners = partnersOf[A.id];
 			double k = F(m.radius * F(1 / A.nXZ));
 			std::set<std::pair<double, double>> done;
+			// one point per (start, move) frame (JS crossFrames; the frame's
+			// line check has to hit A, so it can only come from this pusher)
+			std::set<std::array<double, 6>> frames;
 			crossingPointsForWall(m, s, A, pairsOf[A.id], [&](const CrossPoint& cp) {
 				if (done.count({ cp.spotU, cp.spotY })) return;
 				V3 snapped = { F(F(k * A.nx) + cp.p.x), cp.p.y, F(F(k * A.nz) + cp.p.z) };
@@ -1285,6 +1367,8 @@ static vector<Clip> scan(const Model& m, int threads) {
 				auto r = crossingClip(m, s, A, cp, LOOSE);
 				if (!r) return;
 				done.insert({ cp.spotU, cp.spotY });
+				const CrossFound& f0 = r->first;
+				if (!frames.insert({ f0.prev.x, f0.prev.y, f0.prev.z, f0.next.x, f0.next.y, f0.next.z }).second) return;
 				bool strict = cp.drop == 0 && (bool)crossingClip(m, s, A, cp, STRICT);
 				const CrossFound& f = r->first;
 				Clip c;
@@ -1293,6 +1377,7 @@ static vector<Clip> scan(const Model& m, int threads) {
 				c.from = f.at; c.floorY = cp.floorY; c.hasFloorY = true;
 				c.prev = f.prev; c.next = f.next; c.hasNext = true; c.res = f.res; c.end = f.clip.end; c.endNoFloor = f.noFloor;
 				c.yaws = r->second;
+				c.yaw = f.yaw; c.speed = f.speed;
 				c.crossed = f.clip.crossed; c.pusher = A.id;
 				local.push_back(c);
 			});
@@ -1382,7 +1467,7 @@ static string toJson(const string& game, const string& map, const string& form, 
 		if (c.cross) {
 			o << ",\"yaws\":[";
 			for (size_t k = 0; k < c.yaws.size(); k++) o << (k ? "," : "") << c.yaws[k];
-			o << "]";
+			o << "],\"yaw\":" << c.yaw << ",\"speed\":" << num(c.speed);
 		}
 		o << "}";
 	}

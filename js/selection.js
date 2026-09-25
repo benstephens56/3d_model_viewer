@@ -165,6 +165,19 @@ function removeSelectionMarker(tri, scene) {
 }
 
 function addPointMarker(pointObj, scene) {
+    // Screen-sized dots (wall push clip points) get a screen-sized marker the
+    // same size as the dot, not a world-space sphere.
+    if (pointObj.markerPx) {
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.Float32BufferAttribute([pointObj.pos.x, pointObj.pos.y, pointObj.pos.z], 3));
+        const pts = new THREE.Points(geom, new THREE.PointsMaterial({
+            color: 0x44ff44, size: pointObj.markerPx, sizeAttenuation: false, depthTest: false
+        }));
+        pts.renderOrder = 9999;
+        pts.name = `pointMarker_${pointObj.modelName}_${pointObj.index}_${pointObj.vertex}`;
+        scene.add(pts);
+        return;
+    }
     const geo = new THREE.SphereGeometry(pointObj.markerRadius ?? 0.08, 12, 12);
     const mat = new THREE.MeshBasicMaterial({
         color: 0x44ff44,
@@ -277,7 +290,7 @@ function pickClipSpot(camera, renderer) {
                 if (v.z < -1 || v.z > 1) continue;
                 const d = Math.hypot((v.x + 1) / 2 * rect.width - mx, (1 - v.y) / 2 * rect.height - my);
                 if (d <= CLIP_PICK_PX && (!best || d < best.d)) {
-                    best = { d, modelName: m.name, index: i, pos: world, info: spots[i], markerRadius: 3 };
+                    best = { d, modelName: m.name, index: i, pos: world, info: spots[i], markerPx: (obj.material.size || 12) + 2 };
                 }
             }
         });

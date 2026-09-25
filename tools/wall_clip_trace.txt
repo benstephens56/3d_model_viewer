@@ -1,0 +1,182 @@
+start frame 52818 (gameplayFrames 16519)
+  home    -1432.6104, -9.4297, 419.6203
+  prevPos -1432.6104, -9.4297, 419.6203
+  pos     -1432.6104, -9.4297, 419.6203
+  vel     0.0000, -4.0000, 0.0000  disp 0.0000, 0.0000, 0.0000
+  speedXZ 0.0000  actor.speed 0.0000  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly -  wallYaw 6FB3  floorPoly 137  floorY -9.4297  bgCheckFlags 0081
+after writes frame 52818 (gameplayFrames 16519)
+  home    -1432.6104, -9.4297, 419.6203
+  prevPos -1432.6104, -9.4297, 419.6203
+  pos     -1432.6104, -9.4297, 419.6203
+  vel     0.0000, -4.0000, 0.0000  disp 0.0000, 0.0000, 0.0000
+  speedXZ 9.7500  actor.speed 0.0000  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly -  wallYaw 6FB3  floorPoly 137  floorY -9.4297  bgCheckFlags 0081
++1 frame 52819 (gameplayFrames 16520)
+  home    -1445.0000, -16.9297, 434.1270
+  prevPos -1432.6104, -9.4297, 419.6203
+  pos     -1445.0000, -16.9297, 434.1270
+  vel     1.0757, 4.0000, 9.6902  disp 0.0000, 0.0000, 0.0000
+  speedXZ 9.3500  actor.speed 9.7500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 000C
++2 frame 52820 (gameplayFrames 16520)
+  home    -1445.0000, -16.9297, 434.1270
+  prevPos -1432.6104, -9.4297, 419.6203
+  pos     -1445.0000, -16.9297, 434.1270
+  vel     1.0757, 4.0000, 9.6902  disp 0.0000, 0.0000, 0.0000
+  speedXZ 9.3500  actor.speed 9.7500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 000C
++3 frame 52821 (gameplayFrames 16520)
+  home    -1445.0000, -16.9297, 434.1270
+  prevPos -1432.6104, -9.4297, 419.6203
+  pos     -1445.0000, -16.9297, 434.1270
+  vel     1.0757, 4.0000, 9.6902  disp 0.0000, 0.0000, 0.0000
+  speedXZ 9.3500  actor.speed 9.7500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 000C
++4 frame 52822 (gameplayFrames 16521)
+  home    -1445.0000, -12.4297, 448.0659
+  prevPos -1445.0000, -16.9297, 434.1270
+  pos     -1445.0000, -12.4297, 448.0659
+  vel     1.0315, 3.0000, 9.2926  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.9500  actor.speed 9.3500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++5 frame 52823 (gameplayFrames 16521)
+  home    -1445.0000, -12.4297, 448.0659
+  prevPos -1445.0000, -16.9297, 434.1270
+  pos     -1445.0000, -12.4297, 448.0659
+  vel     1.0315, 3.0000, 9.2926  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.9500  actor.speed 9.3500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++6 frame 52824 (gameplayFrames 16521)
+  home    -1445.0000, -12.4297, 448.0659
+  prevPos -1445.0000, -16.9297, 434.1270
+  pos     -1445.0000, -12.4297, 448.0659
+  vel     1.0315, 3.0000, 9.2926  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.9500  actor.speed 9.3500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++7 frame 52825 (gameplayFrames 16522)
+  home    -1445.0000, -9.4297, 461.4086
+  prevPos -1445.0000, -12.4297, 448.0659
+  pos     -1445.0000, -9.4297, 461.4086
+  vel     0.9874, 2.0000, 8.8951  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.8500  actor.speed 8.9500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++8 frame 52826 (gameplayFrames 16522)
+  home    -1445.0000, -9.4297, 461.4086
+  prevPos -1445.0000, -12.4297, 448.0659
+  pos     -1445.0000, -9.4297, 461.4086
+  vel     0.9874, 2.0000, 8.8951  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.8500  actor.speed 8.9500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++9 frame 52827 (gameplayFrames 16522)
+  home    -1445.0000, -9.4297, 461.4086
+  prevPos -1445.0000, -12.4297, 448.0659
+  pos     -1445.0000, -9.4297, 461.4086
+  vel     0.9874, 2.0000, 8.8951  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.8500  actor.speed 8.9500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++10 frame 52828 (gameplayFrames 16523)
+  home    -1445.0000, -7.9297, 474.6022
+  prevPos -1445.0000, -9.4297, 461.4086
+  pos     -1445.0000, -7.9297, 474.6022
+  vel     0.9764, 1.0000, 8.7957  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.7500  actor.speed 8.8500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++11 frame 52829 (gameplayFrames 16523)
+  home    -1445.0000, -7.9297, 474.6022
+  prevPos -1445.0000, -9.4297, 461.4086
+  pos     -1445.0000, -7.9297, 474.6022
+  vel     0.9764, 1.0000, 8.7957  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.7500  actor.speed 8.8500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++12 frame 52830 (gameplayFrames 16523)
+  home    -1445.0000, -7.9297, 474.6022
+  prevPos -1445.0000, -9.4297, 461.4086
+  pos     -1445.0000, -7.9297, 474.6022
+  vel     0.9764, 1.0000, 8.7957  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.7500  actor.speed 8.8500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++13 frame 52831 (gameplayFrames 16524)
+  home    -1445.0000, -7.9297, 487.6467
+  prevPos -1445.0000, -7.9297, 474.6022
+  pos     -1445.0000, -7.9297, 487.6467
+  vel     0.9653, 0.0000, 8.6963  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.6500  actor.speed 8.7500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++14 frame 52832 (gameplayFrames 16524)
+  home    -1445.0000, -7.9297, 487.6467
+  prevPos -1445.0000, -7.9297, 474.6022
+  pos     -1445.0000, -7.9297, 487.6467
+  vel     0.9653, 0.0000, 8.6963  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.6500  actor.speed 8.7500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++15 frame 52833 (gameplayFrames 16524)
+  home    -1445.0000, -7.9297, 487.6467
+  prevPos -1445.0000, -7.9297, 474.6022
+  pos     -1445.0000, -7.9297, 487.6467
+  vel     0.9653, 0.0000, 8.6963  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.6500  actor.speed 8.7500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++16 frame 52834 (gameplayFrames 16525)
+  home    -1445.0000, -9.4297, 500.5421
+  prevPos -1445.0000, -7.9297, 487.6467
+  pos     -1445.0000, -9.4297, 500.5421
+  vel     0.9543, -1.0000, 8.5969  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.5500  actor.speed 8.6500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++17 frame 52835 (gameplayFrames 16525)
+  home    -1445.0000, -9.4297, 500.5421
+  prevPos -1445.0000, -7.9297, 487.6467
+  pos     -1445.0000, -9.4297, 500.5421
+  vel     0.9543, -1.0000, 8.5969  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.5500  actor.speed 8.6500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++18 frame 52836 (gameplayFrames 16525)
+  home    -1445.0000, -9.4297, 500.5421
+  prevPos -1445.0000, -7.9297, 487.6467
+  pos     -1445.0000, -9.4297, 500.5421
+  vel     0.9543, -1.0000, 8.5969  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.5500  actor.speed 8.6500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++19 frame 52837 (gameplayFrames 16526)
+  home    -1445.0000, -12.4297, 513.2884
+  prevPos -1445.0000, -9.4297, 500.5421
+  pos     -1445.0000, -12.4297, 513.2884
+  vel     0.9433, -2.0000, 8.4976  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.4500  actor.speed 8.5500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++20 frame 52838 (gameplayFrames 16526)
+  home    -1445.0000, -12.4297, 513.2884
+  prevPos -1445.0000, -9.4297, 500.5421
+  pos     -1445.0000, -12.4297, 513.2884
+  vel     0.9433, -2.0000, 8.4976  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.4500  actor.speed 8.5500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++21 frame 52839 (gameplayFrames 16526)
+  home    -1445.0000, -12.4297, 513.2884
+  prevPos -1445.0000, -9.4297, 500.5421
+  pos     -1445.0000, -12.4297, 513.2884
+  vel     0.9433, -2.0000, 8.4976  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.4500  actor.speed 8.5500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++22 frame 52840 (gameplayFrames 16527)
+  home    -1445.0000, -16.9297, 525.8856
+  prevPos -1445.0000, -12.4297, 513.2884
+  pos     -1445.0000, -16.9297, 525.8856
+  vel     0.9322, -3.0000, 8.3982  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.3500  actor.speed 8.4500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++23 frame 52841 (gameplayFrames 16527)
+  home    -1445.0000, -16.9297, 525.8856
+  prevPos -1445.0000, -12.4297, 513.2884
+  pos     -1445.0000, -16.9297, 525.8856
+  vel     0.9322, -3.0000, 8.3982  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.3500  actor.speed 8.4500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
++24 frame 52842 (gameplayFrames 16527)
+  home    -1445.0000, -16.9297, 525.8856
+  prevPos -1445.0000, -12.4297, 513.2884
+  pos     -1445.0000, -16.9297, 525.8856
+  vel     0.9322, -3.0000, 8.3982  disp 0.0000, 0.0000, 0.0000
+  speedXZ 8.3500  actor.speed 8.4500  gravity -1.000  yaw 0484  rot.y 0484  shape.rot.y 0484
+  wallPoly 27  wallYaw C000  floorPoly -  floorY -32000.0000  bgCheckFlags 0008
