@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { addModelCheckbox, getModelGroup, resetGroupModelState } from './render.js';
+import { addModelCheckbox, getModelGroup, resetGroupModelState, applyGroupMasterState } from './render.js';
 import { isTexturedMode, VIEW_CONTROLS } from './bk_textured.js';
 
 ////////////////////////////////////////
@@ -1241,6 +1241,7 @@ export function renderZeldaSceneTextured(scene, sceneBuffer, rooms, sceneName, o
         loadedModels.push({ name: roomGroup.name, root: roomGroup, mesh: roomGroup, edges: null });
         addModelCheckbox(scene, roomGroup.name, roomGroup, null, false, true, null, false, false, group.body);
     }
+    applyGroupMasterState(ROOM_GROUP_KEY);
     console.log(`${sceneName}: ${rooms.length} rooms, ${totalTriangles} textured triangles, ${caches.textures.size} textures` +
                 (totalMissing ? `, ${totalMissing} texture loads from unmapped segments` : ''));
 }

@@ -85,6 +85,10 @@ export function updateSelectionUI() {
     }
 
     for (const p of selectedPoints) {
+        if (p.info) {
+            lines.push(p.info);
+            continue;
+        }
         const v = p.pos;
         lines.push(`PT:  ${formatNumber(v.x)}, ${formatNumber(v.y)}, ${formatNumber(v.z)}`);
     }
@@ -161,7 +165,7 @@ function removeSelectionMarker(tri, scene) {
 }
 
 function addPointMarker(pointObj, scene) {
-    const geo = new THREE.SphereGeometry(0.08, 12, 12);
+    const geo = new THREE.SphereGeometry(pointObj.markerRadius ?? 0.08, 12, 12);
     const mat = new THREE.MeshBasicMaterial({
         color: 0x44ff44,
         transparent: true,
@@ -250,6 +254,37 @@ function removeWaterboxMarker(sel, scene) {
     }
 }
 
+// The wall push clip dot (a THREE.Points carrying userData.clipSpots) within
+// CLIP_PICK_PX of the cursor, nearest the cursor, or null.
+const CLIP_PICK_PX = 14;
+function pickClipSpot(camera, renderer) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    const mx = (mouse.x + 1) / 2 * rect.width;
+    const my = (1 - mouse.y) / 2 * rect.height;
+    const v = new THREE.Vector3();
+    let best = null;
+
+    for (const m of loadedModels) {
+        if (!m.mesh || !m.mesh.visible) continue;
+        m.mesh.traverseVisible(obj => {
+            const spots = obj.userData.clipSpots;
+            if (!spots) return;
+            const pos = obj.geometry.attributes.position;
+            for (let i = 0; i < pos.count; i++) {
+                v.fromBufferAttribute(pos, i).applyMatrix4(obj.matrixWorld);
+                const world = v.clone();
+                v.project(camera);
+                if (v.z < -1 || v.z > 1) continue;
+                const d = Math.hypot((v.x + 1) / 2 * rect.width - mx, (1 - v.y) / 2 * rect.height - my);
+                if (d <= CLIP_PICK_PX && (!best || d < best.d)) {
+                    best = { d, modelName: m.name, index: i, pos: world, info: spots[i], markerRadius: 3 };
+                }
+            }
+        });
+    }
+    return best;
+}
+
 // Handle triangle/point selection
 export function performSelection(ev, renderer, camera, scene) {
     if (!loadedModels.length) return;
@@ -266,6 +301,27 @@ export function performSelection(ev, renderer, camera, scene) {
     }
 
     raycaster.setFromCamera(mouse, camera);
+
+    // ----- WALL PUSH CLIP SPOT PASS -----
+    // wall_push_clips.js's dots are fixed-size screen points, so they're
+    // picked in screen space rather than by a world-space ray distance.
+    const clipSpot = pickClipSpot(camera, renderer);
+    if (clipSpot) {
+        const idx = selectedPoints.findIndex(
+            q => q.modelName === clipSpot.modelName && q.index === clipSpot.index
+        );
+        if (idx !== -1) {
+            removePointMarker(selectedPoints[idx], scene);
+            selectedPoints.splice(idx, 1);
+        } else {
+            if (!multiSelectCheckbox.checked)
+                clearSelection(scene);
+            selectedPoints.push(clipSpot);
+            addPointMarker(clipSpot, scene);
+        }
+        updateSelectionUI();
+        return;
+    }
     
     // ----- POINT SELECTION PASS -----
     // Collect every visible vertex of every model

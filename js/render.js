@@ -418,9 +418,12 @@ export function getModelGroup(key, label) {
     });
 
     // Native change events from the rows bubble up to here, so the master
-    // stays in sync no matter how a row was toggled.
+    // stays in sync no matter how a row was toggled. Switching every row on
+    // (or off) one at a time counts as a choice for the group too.
     body.addEventListener('change', () => {
-        if (!group.syncing) syncGroupMaster(group);
+        if (group.syncing) return;
+        syncGroupMaster(group);
+        if (!master.indeterminate) groupMasterState.set(key, master.checked);
     });
 
     syncGroupMaster(group);
@@ -441,8 +444,9 @@ export function getModelGroup(key, label) {
  *
  * Colours are left alone; only `visible` is dropped.
  */
-// Master-checkbox choice per group key, kept across scene loads. Only set by
-// a click on the master itself: the per-row visibility lives in modelState
+// Master-checkbox choice per group key, kept across scene loads. Set by a
+// click on the master, or by rows being switched all on / all off by hand;
+// the per-row visibility lives in modelState
 // and is deliberately NOT carried between scenes (see resetGroupModelState).
 const groupMasterState = new Map();
 

@@ -20,6 +20,7 @@ import { loadBTTextureBank, getBTTextureBank } from './bt_textures.js';
 import { renderZeldaSceneTextured, parseZeldaSceneInfo, zeldaRoomFileName, zeldaAreaTextureFileName } from './zelda_textured.js';
 import { renderOOTActors } from './oot_actors.js';
 import { addModelCheckbox, buildTest } from './render.js';
+import { setupWallPushClipUI } from './wall_push_clips.js';
 
 ////////////////////////////////////////
 // System: DOM / Static UI Elements
@@ -84,6 +85,7 @@ renderer.shadowMap.enabled = false;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b1220);
+setupWallPushClipUI(scene);
 
 // Depth precision goes as near / distance^2, and the meshes use polygonOffset
 // so their wireframes draw on top: with a 0.1 near plane, one depth-buffer

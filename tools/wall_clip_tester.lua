@@ -1,0 +1,474 @@
+-- Wall push clip tester (BizHawk, N64 OoT US 1.0 / MM US, Mupen64Plus core)
+--
+-- Tries, in the game, every clip point exported from the 3d_model_viewer
+-- ("Find wall push clips" -> "Export test script" -> wall_clip_tests.lua) and
+-- writes a summary of the ones that worked.
+--
+-- How a test runs: the game's own wall check does the work. A callback on
+-- Actor_UpdateBgCheckInfo (code segment, so its address is fixed) catches the
+-- player's call, and just before it runs sets his prevPos and world.pos (his
+-- position after this frame's movement) to the test's `prev` and `next`:
+--   standing points: prev = next = the point (no movement, so no line check;
+--                    only the wall pushes), falling ones start from the floor
+--                    height so only y changes;
+--   crossing points: prev = the start, next = just past the crossing (the line
+--                    check stops him on the wall, then the pushes).
+-- Then the game runs on for SETTLE_FRAMES with no input and the script looks
+-- at where Link is. Every test starts from the same savestate.
+--
+-- Setup:
+--   1. Scan the map in the viewer with the right form, click "Export test
+--      script", and put wall_clip_tests.lua next to this script (or set
+--      TESTS_FILE below).
+--   2. In BizHawk (N64 core: Mupen64Plus - the callback needs it), load the
+--      same map as the same form, with Link standing still anywhere and no
+--      menus or text open. Unthrottled / fast-forward makes it much quicker.
+--   3. Run this script. Progress prints to the Lua console; the summary goes
+--      to the console and to wall_clip_results.txt next to the tests file.
+--      The game is put back to the starting savestate at the end.
+
+---------------------------------------------------------------------------
+-- Settings
+---------------------------------------------------------------------------
+
+local TESTS_FILE = nil            -- nil: wall_clip_tests.lua next to this script
+local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
+local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
+local SETTLE_FRAMES = 30          -- emulated frames to let run after the test frame (3 per game frame)
+local HOOK_TIMEOUT = 60           -- emulated frames to wait for the player's bg check
+local BEHIND_MIN = 1.0            -- units behind the clipped wall that count as through it
+local FAST = true                 -- skip drawing while testing (client.invisibleemulation)
+-- How the test frame is set up:
+--   "auto": "exec", falling back to "read", then "move" if a hook never fires
+--   "exec": execute callback on Actor_UpdateBgCheckInfo (exact prevPos/posNext)
+--   "read": read callback on Link's world.pos.y, taken when the PC is inside
+--           Actor_UpdateBgCheckInfo (exact, for cores without exec callbacks)
+--   "move": no callbacks: Link is put at the start and given the yaw and speed
+--           (Player speedXZ) to move there himself - real movement, but his
+--           action code can still change the speed on the frame
+local MODE = "auto"
+
+---------------------------------------------------------------------------
+-- Game / memory (from collision_dump.lua)
+---------------------------------------------------------------------------
+
+console.clear()
+
+local GAME
+local hash = gameinfo.getromhash()
+if hash == 'AD69C91157F6705E8AB06C79FE08AAD47BB57BA7' then
+	GAME = "OOT" -- OoT US 1.0
+elseif hash == 'D6133ACE5AFAA0882CF214CF88DABA39E266C078' then
+	GAME = "MM" -- MM US
+else
+	error("wall_clip_tester: needs OoT US 1.0 or MM US (rom hash " .. hash .. ")")
+end
+
+local function read_u16(addr) return mainmemory.read_u16_be(addr) end
+local function read_s16(addr) return mainmemory.read_s16_be(addr) end
+local function read_u32(addr) return mainmemory.read_u32_be(addr) end
+local function readfloat(addr) return mainmemory.readfloat(addr, true) end
+local function writefloat(addr, val) mainmemory.writefloat(addr, val, true) end
+
+local K = {}
+if GAME == "OOT" then
+	K.colCtx = 0x1C84A0 + 0x7C0         -- globalContext + 0x7C0
+	K.player = 0x1DAA30                 -- Player actor (RDRAM offset)
+	K.prevPos = 0x100                   -- Actor.prevPos
+	K.velocity = 0x5C                   -- Actor.velocity
+	K.bgCheckInfo = 0x8001DFB4          -- Actor_UpdateBgCheckInfo (oot-ntsc-1.0.map)
+	K.bgCheckInfoEnd = 0x8001E2D4       -- (next function)
+	K.speedXZ = 0x838                   -- Player.speedXZ
+	K.yaw = 0x83C                       -- Player.yaw
+	K.shapeRotY = 0xB6                  -- Actor.shape.rot.y
+	K.actorSpeed = 0x68                 -- Actor.speed
+else
+	K.colCtx = 0x3E6B20 + 0x830
+	K.player = 0x3FFDB0
+	K.prevPos = 0x108
+	K.velocity = 0x64
+	K.bgCheckInfo = 0x800AFE10          -- Actor_UpdateBgCheckInfo (mm-n64-us.map)
+	K.bgCheckInfoEnd = 0x800B02B0
+	K.speedXZ = 0xAD0                   -- Player.speedXZ (0x400880)
+	K.yaw = 0xAD4
+	K.shapeRotY = 0xBE
+	K.actorSpeed = 0x70
+end
+K.rotY = 0x32                           -- Actor.world.rot.y (both games)
+K.pos = 0x24                            -- Actor.world.pos (both games)
+
+local function readVec(addr)
+	return { readfloat(addr), readfloat(addr + 4), readfloat(addr + 8) }
+end
+local function writeVec(addr, v)
+	writefloat(addr, v[1]); writefloat(addr + 4, v[2]); writefloat(addr + 8, v[3])
+end
+
+-- Static collision header of the loaded scene: polygon count and a reader for
+-- one polygon's vertices, to check the tests belong to this map.
+local function staticCollision()
+	local header = read_u32(K.colCtx) - 0x80000000
+	local numPolygons = read_u16(header + 0x14)
+	local vtxList = read_u32(header + 0x10) - 0x80000000
+	local polyList = read_u32(header + 0x18) - 0x80000000
+	local function polyVerts(id)
+		local poly = polyList + id * 0x10
+		local out = {}
+		for i, off in ipairs({ 0x2, 0x4, 0x6 }) do
+			local vi = read_u16(poly + off) % 0x2000
+			out[i] = { read_s16(vtxList + vi * 6), read_s16(vtxList + vi * 6 + 2), read_s16(vtxList + vi * 6 + 4) }
+		end
+		return out
+	end
+	return numPolygons, polyVerts
+end
+
+---------------------------------------------------------------------------
+-- Tests file
+---------------------------------------------------------------------------
+
+local scriptDir = (debug.getinfo(1, "S").source:match("^@?(.*[/\\])")) or ""
+local testsPath = TESTS_FILE or (scriptDir .. "wall_clip_tests.lua")
+local T = dofile(testsPath)
+local resultsPath = RESULTS_FILE or (testsPath:match("^(.*[/\\])") or scriptDir) .. "wall_clip_results.txt"
+
+if T.game ~= GAME then
+	error(string.format("tests are for %s, the loaded game is %s", tostring(T.game), GAME))
+end
+
+local numPolygons, polyVerts = staticCollision()
+if numPolygons ~= T.numPolygons then
+	error(string.format("tests are for %s (%d static polys); the loaded scene has %d - load that map first",
+		T.map, T.numPolygons, numPolygons))
+end
+for id, w in pairs(T.walls) do
+	local v = polyVerts(id)
+	for i = 1, 3 do
+		for j = 1, 3 do
+			if v[i][j] ~= w.v[i][j] then
+				error(string.format("TRI %d in RAM doesn't match the export - wrong map or version?", id))
+			end
+		end
+	end
+end
+
+---------------------------------------------------------------------------
+-- Hook: set prevPos / posNext right before the player's bg check
+---------------------------------------------------------------------------
+
+-- Registers are looked up once here in the emu.getregisters() table (looking
+-- a name up there can't throw), since cores don't all name them the same.
+-- No pcall around API calls anywhere in this script: an error thrown by one
+-- inside pcall after the script has yielded makes BizHawk's NLua panic
+-- ("unprotected error in call to Lua API").
+local function findRegister(candidates)
+	local regs = emu.getregisters()
+	for _, name in ipairs(candidates) do
+		if regs[name] ~= nil then return name end
+	end
+	return nil
+end
+local a1Reg = findRegister({ "a1_lo", "a1", "A1", "r5_lo", "r5", "R5", "gpr5", "GPR5" })
+local pcReg = findRegister({ "pc", "PC", "pc_lo", "PC_lo" })
+do
+	local names = {}
+	for k in pairs(emu.getregisters()) do names[#names + 1] = tostring(k) end
+	table.sort(names)
+	print("Registers: a1 = " .. tostring(a1Reg) .. ", pc = " .. tostring(pcReg) ..
+		((a1Reg and pcReg) and "" or ("  (the core has: " .. table.concat(names, ", ") .. ")")))
+end
+
+local pending = nil   -- the test to apply on the player's next bg check
+local fired = false
+local calls, seenActors = 0, {}  -- callbacks seen, for diagnosing a hook that never catches Link
+
+local function applyPending()
+	writeVec(K.player + K.prevPos, pending.prev)
+	writeVec(K.player + K.pos, pending.next)
+	pending = nil
+	fired = true
+end
+
+-- "exec": Actor_UpdateBgCheckInfo(play, actor, ...) is starting; a1 = actor.
+local function onBgCheckExec()
+	calls = calls + 1
+	if not pending or not a1Reg then return end
+	local actor = emu.getregister(a1Reg) % 0x1000000
+	if #seenActors < 8 then seenActors[#seenActors + 1] = string.format("%06X", actor) end
+	if actor == K.player then applyPending() end
+end
+
+-- "read": something is reading Link's world.pos.y; take it if that's
+-- Actor_UpdateBgCheckInfo (its first statement reads it).
+local function onPosRead()
+	calls = calls + 1
+	if not pending or not pcReg then return end
+	local pc = emu.getregister(pcReg) % 0x20000000
+	if #seenActors < 8 then seenActors[#seenActors + 1] = string.format("pc %06X", pc) end
+	if pc >= K.bgCheckInfo % 0x20000000 and pc < K.bgCheckInfoEnd % 0x20000000 then applyPending() end
+end
+
+local hookIds = {}
+local function unhook()
+	for _, id in ipairs(hookIds) do event.unregisterbyid(id) end
+	hookIds = {}
+end
+-- Each at the KSEG0 address and without the segment bits, in case the core
+-- reports physical addresses.
+local function hook(mode)
+	unhook()
+	calls, seenActors = 0, {}
+	if mode == "exec" then
+		hookIds[1] = event.onmemoryexecute(onBgCheckExec, K.bgCheckInfo, "wall_clip_exec")
+		hookIds[2] = event.onmemoryexecute(onBgCheckExec, K.bgCheckInfo % 0x20000000, "wall_clip_exec_phys")
+	elseif mode == "read" then
+		local y = 0x80000000 + K.player + K.pos + 4
+		hookIds[1] = event.onmemoryread(onPosRead, y, "wall_clip_read")
+		hookIds[2] = event.onmemoryread(onPosRead, y % 0x20000000, "wall_clip_read_phys")
+	end
+end
+
+---------------------------------------------------------------------------
+-- Judging a result
+---------------------------------------------------------------------------
+
+-- Signed distance to a wall's plane (collision header normal / dist), at
+-- Link's wall check height.
+local function planeDist(w, p)
+	local y = p[2] + T.checkHeight
+	return (w.n[1] * p[1] + w.n[2] * y + w.n[3] * p[3]) / 32767 + w.d
+end
+
+local function dist3(a, b)
+	return math.sqrt((a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2 + (a[3] - b[3]) ^ 2)
+end
+
+-- "clipped": behind the clipped wall at the end; "fell": dropped a long way
+-- (out of bounds with no floor); "voided": moved far away (void out /
+-- respawn); "no": still in front of it.
+local function judge(test, after, final)
+	local w = T.walls[test.crossed]
+	if dist3(final, test.next) > 300 then return "voided" end
+	if final[2] < test.next[2] - 150 then return "fell" end
+	if planeDist(w, final) < -BEHIND_MIN and planeDist(w, after) < -BEHIND_MIN then return "clipped" end
+	return "no"
+end
+
+---------------------------------------------------------------------------
+-- Run
+---------------------------------------------------------------------------
+
+local function fmt(v) return string.format("%.9g, %.9g, %.9g", v[1], v[2], v[3]) end
+
+-- Group the tests, and pick up to MAX_PER_GROUP spread over each group.
+local groups, order = {}, {}
+for _, t in ipairs(T.tests) do
+	if not groups[t.group] then
+		groups[t.group] = { tests = {}, first = t }
+		order[#order + 1] = t.group
+	end
+	table.insert(groups[t.group].tests, t)
+end
+local queue = {}
+for _, gi in ipairs(order) do
+	local list = groups[gi].tests
+	local n = #list
+	local pick = (MAX_PER_GROUP > 0 and n > MAX_PER_GROUP) and MAX_PER_GROUP or n
+	groups[gi].picked = {}
+	for k = 1, pick do
+		local idx = (pick == n) and k or (1 + math.floor((k - 1) * (n - 1) / (pick - 1) + 0.5))
+		local t = list[idx]
+		table.insert(groups[gi].picked, t)
+		queue[#queue + 1] = t
+	end
+end
+
+print(string.format("Wall clip tester: %s, %s, %s - %d tests (%d points exported)",
+	GAME, T.map, T.form, #queue, #T.tests))
+
+local base = memorysavestate.savecorestate()
+print("Saved the starting state")
+
+-- Put things back however the script ends (finished, error, or stopped).
+local cleanedUp = false
+local function cleanUp()
+	if cleanedUp then return end
+	cleanedUp = true
+	pending = nil
+	unhook()
+	if FAST and client.invisibleemulation then client.invisibleemulation(false) end
+	memorysavestate.loadcorestate(base)
+	memorysavestate.removestate(base)
+end
+event.onexit(cleanUp)
+
+if FAST and client.invisibleemulation then client.invisibleemulation(true) end
+
+local function yawTo(dx, dz)
+	local a = math.floor(math.atan(dx, dz) / math.pi * 0x8000 + 0.5)
+	return ((a + 0x8000) % 0x10000) - 0x8000
+end
+
+-- One test: sets up the frame, lets it run, and says where Link ended up.
+local function runTest(t, mode)
+	memorysavestate.loadcorestate(base)
+	local r = { test = t }
+	if mode == "move" then
+		-- Link at the start; speed and yaw toward `next`, rewritten every
+		-- emulated frame until the game frame moves him.
+		writeVec(K.player + K.pos, t.prev)
+		local dx, dz = t.next[1] - t.prev[1], t.next[3] - t.prev[3]
+		local dist = math.sqrt(dx * dx + dz * dz)
+		local speed = dist < 0.01 and 0 or (dist + 2) / 1.5 + 1
+		local yaw = yawTo(dx, dz)
+		local moved = false
+		for _ = 1, HOOK_TIMEOUT do
+			writefloat(K.player + K.speedXZ, speed)
+			writefloat(K.player + K.actorSpeed, speed)
+			if dist >= 0.01 then
+				mainmemory.write_s16_be(K.player + K.yaw, yaw)
+				mainmemory.write_s16_be(K.player + K.rotY, yaw)
+				mainmemory.write_s16_be(K.player + K.shapeRotY, yaw)
+			end
+			emu.frameadvance()
+			local p = readVec(K.player + K.pos)
+			if dist < 0.01 or math.abs(p[1] - t.prev[1]) + math.abs(p[3] - t.prev[3]) > 0.001 then
+				moved = true
+				break
+			end
+		end
+		if not moved then
+			r.status = "stuck"
+			return r
+		end
+	else
+		pending = t
+		fired = false
+		local waited = 0
+		while not fired and waited < HOOK_TIMEOUT do
+			emu.frameadvance()
+			waited = waited + 1
+		end
+		if not fired then
+			pending = nil
+			r.status = "hook"
+			return r
+		end
+	end
+	-- the rest of that game frame, then let it run
+	for _ = 1, 3 do emu.frameadvance() end
+	r.after = readVec(K.player + K.pos)
+	for _ = 1, SETTLE_FRAMES do emu.frameadvance() end
+	r.final = readVec(K.player + K.pos)
+	r.status = judge(t, r.after, r.final)
+	return r
+end
+
+-- Pick the mode on the first test: a hook that never catches Link's bg check
+-- falls through to the next one.
+local mode = MODE
+local first
+if MODE == "auto" then
+	for _, m in ipairs({ "exec", "read", "move" }) do
+		if (m == "exec" and not a1Reg) or (m == "read" and not pcReg) then
+			print("  " .. m .. ": skipped (register not found)")
+		else
+			hook(m)
+			first = runTest(queue[1], m)
+			if first.status ~= "hook" then
+				mode = m
+				break
+			end
+			print(string.format("  %s: callback ran %d times, never for Link's bg check%s", m, calls,
+				#seenActors > 0 and (" (seen: " .. table.concat(seenActors, ", ") .. ")") or ""))
+		end
+	end
+	unhook()
+	if mode ~= "move" then hook(mode) end
+else
+	hook(MODE)
+	first = runTest(queue[1], MODE)
+	if first.status == "hook" then
+		cleanUp()
+		error(string.format("the %s hook never caught Link's bg check (callback ran %d times)", MODE, calls))
+	end
+end
+print("Mode: " .. mode)
+
+local results = {}
+for i, t in ipairs(queue) do
+	local r = i == 1 and first or runTest(t, mode)
+	results[i] = r
+	print(string.format("  %d / %d: %s %s TRI %d -> %d: %s", i, #queue, t.kind, t.type, t.pusher, t.crossed, r.status))
+end
+
+cleanUp()
+
+---------------------------------------------------------------------------
+-- Summary
+---------------------------------------------------------------------------
+
+local out = {}
+local function line(s) out[#out + 1] = s end
+
+line(string.format("Wall push clip test results: %s, %s, %s (mode: %s)", GAME, T.map, T.form, mode))
+line(string.format("%d tests; worked = Link ended up behind the clipped wall (clipped), fell out of the map (fell)", #results))
+line("or was moved far away (voided), " .. SETTLE_FRAMES .. " frames after the test frame.")
+line("")
+
+local byGroup = {}
+for _, r in ipairs(results) do
+	local g = r.test.group
+	byGroup[g] = byGroup[g] or { worked = 0, tried = 0, hits = {}, statuses = {} }
+	local b = byGroup[g]
+	b.tried = b.tried + 1
+	b.statuses[r.status] = (b.statuses[r.status] or 0) + 1
+	if r.status == "clipped" or r.status == "fell" or r.status == "voided" then
+		b.worked = b.worked + 1
+		b.hits[#b.hits + 1] = r
+	end
+end
+
+local totalWorked, groupsWorked = 0, 0
+line("WORKED")
+for _, gi in ipairs(order) do
+	local b = byGroup[gi]
+	if b and b.worked > 0 then
+		local t = groups[gi].first
+		groupsWorked = groupsWorked + 1
+		totalWorked = totalWorked + b.worked
+		line(string.format("  %s %s: TRI %d through TRI %d - %d of %d tried (%d points in the group)",
+			t.kind, t.type, t.pusher, t.crossed, b.worked, b.tried, #groups[gi].tests))
+		for _, r in ipairs(b.hits) do
+			line(string.format("    [%s] prev %s -> next %s  => after %s, final %s",
+				r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final)))
+		end
+	end
+end
+if groupsWorked == 0 then line("  (none)") end
+line("")
+
+line("DIDN'T WORK")
+for _, gi in ipairs(order) do
+	local b = byGroup[gi]
+	if b and b.worked == 0 then
+		local t = groups[gi].first
+		local st = {}
+		for k, v in pairs(b.statuses) do st[#st + 1] = k .. " " .. v end
+		line(string.format("  %s %s: TRI %d through TRI %d - 0 of %d (%s)",
+			t.kind, t.type, t.pusher, t.crossed, b.tried, table.concat(st, ", ")))
+	end
+end
+line("")
+line(string.format("%d of %d wall pairs had a point that worked (%d points)", groupsWorked, #order, totalWorked))
+
+local text = table.concat(out, "\n")
+print(text)
+local f = io.open(resultsPath, "w")
+if f then
+	f:write(text, "\n")
+	f:close()
+	print("Written to " .. resultsPath)
+else
+	print("Couldn't write " .. resultsPath)
+end
