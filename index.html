@@ -63,8 +63,9 @@
           <button id="wallClipScan">Find wall push clips</button>
           <select id="wallClipRadius"></select>
           <label title="Also search for clips with Link falling (feet up to 30 below the floor, so the wall check runs lower and can hit low walls). Much slower."><input id="wallClipFalling" type="checkbox"> Falling</label>
+          <label title="Only look for (and show) clips that need the extended planes: points that also clip with the walls' extended planes removed (acute angle clips, and falling ones like them) are left out."><input id="wallClipExtendedOnly" type="checkbox"> Extended plane only</label>
           <label title="Only show points Link can get to from a standable in-bounds spot in one frame, at this speed or less (actor speed; he moves 1.5x that a frame). Defaults to the form's run speed."><input id="wallClipReachable" type="checkbox"> Reachable only, speed &le; <input id="wallClipMaxSpeed" type="number" min="0" max="20" step="0.5" value="6" style="width:4em"></label>
-          <button id="wallClipImport" title="Load results from tools/clipfinder (the same scan as a native program, much faster): clipfinder.exe --game OOT|MM --map &quot;map name&quot; --form Adult|Child|Human|Deku|Zora|Goron|FierceDeity [--falling]. Load the same map first.">Import results</button><input id="wallClipImportFile" type="file" accept=".json,application/json" style="display:none">
+          <button id="wallClipImport" title="Load results from tools/clipfinder (the same scan as a native program, much faster): clipfinder.exe --game OOT|MM --map &quot;map name&quot; --form Adult|Child|Human|Deku|Zora|Goron|FierceDeity [--falling] [--extended-only]. Load the same map first.">Import results</button><input id="wallClipImportFile" type="file" accept=".json,application/json" style="display:none">
           <button id="wallClipExport" title="Save the shown points as wall_clip_tests.lua, for tools/wall_clip_tester.lua to try each one in the game (BizHawk).">Export test script</button>
           <span id="wallClipStatus" style="font-size:12px"></span>
         </div>

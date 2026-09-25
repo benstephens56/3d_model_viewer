@@ -26,6 +26,10 @@
 --   3. Run this script. Progress prints to the Lua console; the summary goes
 --      to the console and to wall_clip_results.txt next to the tests file.
 --      The game is put back to the starting savestate at the end.
+--   Recording a video: set RECORD = true below, run BizHawk at normal speed
+--   (not unthrottled) and start BizHawk's AVI/video recording before the
+--   script. Each test then gets the camera behind Link and a pause before and
+--   after it (RECORD_BUFFER).
 
 ---------------------------------------------------------------------------
 -- Settings
@@ -39,6 +43,15 @@ local HOOK_TIMEOUT = 60           -- emulated frames to wait for the player's bg
 local HOLD_FRAMES = 9             -- "move": emulated frames Link is held at the start first
 local BEHIND_MIN = 1.0            -- units behind the clipped wall that count as through it
 local FAST = true                 -- skip drawing while testing (client.invisibleemulation)
+-- Recording a video of the tests: draws every frame (FAST is ignored), turns
+-- the camera to behind Link before each test ("move" mode: he's already
+-- facing the way he'll go, and Z is tapped - Z-targeting nothing swings the
+-- camera behind him), and pauses RECORD_BUFFER emulated frames (60 a second)
+-- before and after each one. Off by default.
+local RECORD = true
+local RECORD_BUFFER = 90
+local RECORD_ONE_PER_PAIR = true  -- recording: once a wall pair's test works, skip the rest of that pair's
+if RECORD then FAST = false end
 -- How the test frame is set up:
 --   "auto": "exec", falling back to "read", then "move" if a hook never fires
 --   "exec": execute callback on Actor_UpdateBgCheckInfo (exact prevPos/posNext)
@@ -81,9 +94,16 @@ if GAME == "OOT" then
 	K.velocity = 0x5C                   -- Actor.velocity
 	K.bgCheckInfo = 0x8001DFB4          -- Actor_UpdateBgCheckInfo (oot-ntsc-1.0.map)
 	K.bgCheckInfoEnd = 0x8001E2D4       -- (next function)
-	K.speedXZ = 0x838                   -- Player.speedXZ
-	K.yaw = 0x83C                       -- Player.yaw
+	-- Player's own fields: the decomp's offsets (include/player.h) are for
+	-- the debug build, whose Actor has an extra 0x10 bytes (dbgPad), so on
+	-- retail they're 0x10 lower. Actor fields before that are the same.
+	K.speedXZ = 0x828                   -- Player.speedXZ
+	K.yaw = 0x82C                       -- Player.yaw
 	K.shapeRotY = 0xB6                  -- Actor.shape.rot.y
+	K.actionFunc = 0x664                -- Player.actionFunc (for the move log)
+	K.stateFlags1 = 0x66C
+	K.skelAnime = 0x1A4
+	K.rideActor = 0x430
 	K.actorSpeed = 0x68                 -- Actor.speed
 else
 	K.play = 0x3E6B20
@@ -97,12 +117,16 @@ else
 	K.speedXZ = 0xAD0                   -- Player.speedXZ (0x400880)
 	K.yaw = 0xAD4
 	K.shapeRotY = 0xBE
+	K.actionFunc = 0x748
+	K.stateFlags1 = 0xA6C
+	K.skelAnime = 0x240
+	K.rideActor = 0x390
 	K.actorSpeed = 0x70
-	-- MM's Player_UpdateCommon sets prevPos from home.pos at the start of the
-	-- frame (and home.pos = world.pos at its end), so home.pos is Link's real
-	-- "where he was last frame"
-	K.home = 0x08
 end
+-- Player_UpdateCommon (both games) sets prevPos from home.pos at the start of
+-- the frame (and home.pos = world.pos at its end), so home.pos is Link's real
+-- "where he was last frame"
+K.home = 0x08                           -- Actor.home.pos (both games)
 K.rotY = 0x32                           -- Actor.world.rot.y (both games)
 K.pos = 0x24                            -- Actor.world.pos (both games)
 
@@ -267,7 +291,7 @@ end
 -- Run
 ---------------------------------------------------------------------------
 
-local function fmt(v) return string.format("%.9g, %.9g, %.9g", v[1], v[2], v[3]) end
+local function fmt(v) return v and string.format("%.9g, %.9g, %.9g", v[1], v[2], v[3]) or "-" end
 
 -- Group the tests, and pick up to MAX_PER_GROUP spread over each group.
 local groups, order = {}, {}
@@ -341,13 +365,25 @@ local function runTest(t, mode)
 		-- (the export's exact s16 yaw and f32 speed when it has them: the game
 		-- moves along the sine table, so the crossing is where the viewer
 		-- worked it out only for that exact move)
+		-- (a yaw with nowhere to move: exported by an older viewer, where
+		-- `prev` was the point itself - tested standing on it instead)
+		if t.yaw and dist < 0.01 then
+			print("  old export (standing test with no start to walk from): re-export with the current viewer (Ctrl+F5 first)")
+			t = { group = t.group, kind = t.kind, type = t.type, pusher = t.pusher, crossed = t.crossed,
+				prev = t.prev, next = t.next, expect = t.expect }
+			r.test = t
+		end
 		local yaw = t.yaw or (dist >= 0.01 and yawTo(dx, dz) or nil)
 		if yaw and yaw >= 0x8000 then yaw = yaw - 0x10000 end
 		-- Hold him at the start for a few game frames: world.pos, prevPos and
 		-- (MM) home.pos every emulated frame, no speed. A game frame spans 3
 		-- emulated frames and a write can land in the middle of one, so a
 		-- single write isn't enough.
-		for _ = 1, HOLD_FRAMES do
+		-- (recording: longer, with Z tapped early on for the camera, then
+		-- let go for the rest so he's back to standing normally)
+		local hold = HOLD_FRAMES + (RECORD and RECORD_BUFFER or 0)
+		for i = 1, hold do
+			if RECORD and i >= 4 and i < 10 then joypad.set({ Z = true }, 1) end
 			writeVec(K.player + K.pos, t.prev)
 			writeVec(K.player + K.prevPos, t.prev)
 			if K.home then writeVec(K.player + K.home, t.prev) end
@@ -381,12 +417,21 @@ local function runTest(t, mode)
 		writefloat(K.player + K.speedXZ, speed)
 		r.log = {}
 		local frames0 = read_u32(K.play + K.gameplayFrames)
+		-- Link's state too: what he's doing (actionFunc, stateFlags1), whether
+		-- his animation moves him itself (skelAnime.movementFlags) and whether
+		-- he's riding something
+		local function logLine(tag)
+			r.log[#r.log + 1] = string.format(
+				"%s gf+%d pos %s speedXZ %.3f speed %.3f yaw %04X action %08X flags1 %08X animMove %02X ride %08X",
+				tag, read_u32(K.play + K.gameplayFrames) - frames0, fmt(readVec(K.player + K.pos)),
+				readfloat(K.player + K.speedXZ), readfloat(K.player + K.actorSpeed), mainmemory.read_u16_be(K.player + K.yaw),
+				read_u32(K.player + K.actionFunc), read_u32(K.player + K.stateFlags1),
+				mainmemory.read_u8(K.player + K.skelAnime + 0x35), read_u32(K.player + K.rideActor))
+		end
+		logLine("write")
 		for i = 1, 9 do
 			emu.frameadvance()
-			local p = readVec(K.player + K.pos)
-			r.log[#r.log + 1] = string.format("+%d gf+%d pos %s speedXZ %.3f speed %.3f yaw %04X",
-				i, read_u32(K.play + K.gameplayFrames) - frames0, fmt(p), readfloat(K.player + K.speedXZ),
-				readfloat(K.player + K.actorSpeed), mainmemory.read_u16_be(K.player + K.yaw))
+			logLine("+" .. i)
 			if read_u32(K.play + K.gameplayFrames) ~= frames0 then break end
 		end
 		if read_u32(K.play + K.gameplayFrames) == frames0 then
@@ -396,7 +441,17 @@ local function runTest(t, mode)
 		-- (the game frame ran in that emulated frame: `after` is right after it)
 		r.after = readVec(K.player + K.pos)
 		for _ = 1, 3 do emu.frameadvance() end
-		r.log[#r.log + 1] = "+1 game frame pos " .. fmt(readVec(K.player + K.pos))
+		local later = readVec(K.player + K.pos)
+		logLine("+1 game frame")
+		-- Given speed but didn't move at all in two game frames: Link's state
+		-- ignores speedXZ (riding Epona, or an animation that moves him itself
+		-- - ANIM_FLAG_OVERRIDE_MOVEMENT). The savestate needs him standing
+		-- still on foot.
+		if yaw and r.start and dist3(later, r.start) < 0.01 then
+			r.status = "no move"
+			r.log[#r.log + 1] = "Link didn't move with speedXZ set: use a savestate with him standing still on foot"
+			return r
+		end
 	else
 		pending = t
 		fired = false
@@ -418,12 +473,20 @@ local function runTest(t, mode)
 	end
 	for _ = 1, SETTLE_FRAMES do emu.frameadvance() end
 	r.final = readVec(K.player + K.pos)
+	-- (recording: let the end show before the next test resets everything)
+	if RECORD then for _ = 1, RECORD_BUFFER do emu.frameadvance() end end
 	-- The test frame has to have started from `prev`: the frame's movement,
 	-- line check and pushes move Link a few tens of units at most.
 	local moveDist = math.sqrt((t.next[1] - t.prev[1]) ^ 2 + (t.next[3] - t.prev[3]) ^ 2)
 	if (r.start and dist3(r.start, t.prev) > 1) or
 		math.sqrt((r.after[1] - t.prev[1]) ^ 2 + (r.after[3] - t.prev[3]) ^ 2) > moveDist + 60 then
 		r.status = "setup"
+		-- (where he actually was when the move started: not standing still
+		-- at `prev` means the viewer's resting spot is off)
+		if r.start then
+			r.log = r.log or {}
+			table.insert(r.log, 1, "start (should be prev) " .. fmt(r.start))
+		end
 		return r
 	end
 	r.status = judge(t, r.after, r.final)
@@ -462,10 +525,21 @@ end
 print("Mode: " .. mode)
 
 local results = {}
+local pairDone = {}  -- recording: wall pairs (pusher:crossed) that already have a clip on video
+local skipped = 0
 for i, t in ipairs(queue) do
-	local r = i == 1 and first or runTest(t, mode)
-	results[i] = r
-	print(string.format("  %d / %d: %s %s TRI %d -> %d: %s", i, #queue, t.kind, t.type, t.pusher, t.crossed, r.status))
+	local pairKey = t.pusher .. ":" .. t.crossed
+	if RECORD and RECORD_ONE_PER_PAIR and pairDone[pairKey] then
+		skipped = skipped + 1
+	else
+		local r = i == 1 and first or runTest(t, mode)
+		results[#results + 1] = r
+		print(string.format("  %d / %d: %s %s TRI %d -> %d: %s", i, #queue, t.kind, t.type, t.pusher, t.crossed, r.status))
+		if r.status == "clipped" or r.status == "fell" or r.status == "voided" then pairDone[pairKey] = true end
+	end
+end
+if skipped > 0 then
+	print(string.format("  (recording: skipped %d tests of wall pairs that had already clipped)", skipped))
 end
 
 cleanUp()
@@ -540,8 +614,32 @@ for _, gi in ipairs(order) do
 		end
 	end
 end
+-- (recording: groups never run because their wall pair had already clipped)
+local skippedGroups = {}
+for _, gi in ipairs(order) do
+	if not byGroup[gi] then
+		local t = groups[gi].first
+		skippedGroups[#skippedGroups + 1] = string.format("  %s %s: TRI %d through TRI %d - skipped (the pair already clipped)",
+			t.kind, t.type, t.pusher, t.crossed)
+	end
+end
+if #skippedGroups > 0 then
+	line("")
+	line("SKIPPED")
+	for _, l in ipairs(skippedGroups) do line(l) end
+end
 line("")
-line(string.format("%d of %d wall pairs had a point that worked (%d points)", groupsWorked, #order, totalWorked))
+-- Wall pairs (pushing wall, clipped wall), not groups: a pair can have both
+-- standing and crossing points.
+local pairsAll, pairsWorked, nAll, nWorked = {}, {}, 0, 0
+for _, gi in ipairs(order) do
+	local t = groups[gi].first
+	local k = t.pusher .. ":" .. t.crossed
+	if not pairsAll[k] then pairsAll[k] = true; nAll = nAll + 1 end
+	local b = byGroup[gi]
+	if b and b.worked > 0 and not pairsWorked[k] then pairsWorked[k] = true; nWorked = nWorked + 1 end
+end
+line(string.format("%d of %d wall pairs had a point that worked (%d points)", nWorked, nAll, totalWorked))
 
 local text = table.concat(out, "\n")
 print(text)

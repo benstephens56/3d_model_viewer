@@ -1,0 +1,7 @@
+{
+  "format": "wall-push-clips-1",
+  "game": "OOT", "map": "Spot 01 - Kakariko Village", "form": "Adult",
+  "radius": 18, "checkHeight": 26, "falling": false, "extendedOnly": true, "numPolygons": 863,
+  "clips": [
+  ]
+}

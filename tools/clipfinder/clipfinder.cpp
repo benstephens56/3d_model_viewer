@@ -10,7 +10,7 @@
 //
 // Build (MSYS2 mingw64):  see build.sh next to this file.
 // Usage:
-//   clipfinder --game MM --map "Laundry Pool" --form Human [--falling] [-o out.json]
+//   clipfinder --game MM --map "Laundry Pool" --form Human [--falling] [--extended-only] [-o out.json]
 //   clipfinder --game OOT --all --form Adult [--falling] --out-dir results/
 // Options: --root <viewer dir> (default: two levels up from the exe's dir, or
 // the current dir if it has models/), --threads N, --radius R (overrides --form).
@@ -440,6 +440,7 @@ struct Model {
 	ColCtx colCtx;
 	double radius, checkHeight;
 	int lowDrop;
+	bool extendedOnly = false; // leave out clips that also work without the extended planes
 	vector<Poly> polys;
 	vector<vector<int>> cellWallsL, cellFloorsL; // sorted, per subdivision
 	std::unordered_map<int64_t, vector<int>> floorGrid;
@@ -573,12 +574,41 @@ struct Model {
 
 	// Where Link comes to rest standing at `pos` (pushes until they stop, at
 	// most 4 frames), or none.
+	// (standing still, posNext is GROUND_DROP below his feet: the pushes run there)
 	std::optional<V3> restingSpot(const V3& pos) const {
 		V3 cur = pos;
 		for (int i = 0; i < 4; i++) {
-			V3 next = sphereStep(cur, LOOSE, nullptr);
+			V3 next = sphereStep({ cur.x, F(pos.y - GROUND_DROP), cur.z }, LOOSE, nullptr);
 			if (std::fabs(next.x - cur.x) <= 0.01 && std::fabs(next.z - cur.z) <= 0.01) return cur;
-			cur = next;
+			cur = { next.x, pos.y, next.z };
+		}
+		return std::nullopt;
+	}
+
+	// wall_push_clips.js floorCheck (BgCheck_RaycastFloorImpl, flags 0x1C):
+	// the highest static floor, or wall whose normal doesn't point down, under
+	// (x, z) and below y, stepping down a subdivision at a time.
+	std::optional<double> floorCheck(double x, double z, double y) const {
+		const double* mn = colCtx.minB;
+		const double* mx = colCtx.maxB;
+		if (x < mn[0] || x > mx[0] || z < mn[2] || z > mx[2]) return std::nullopt;
+		for (double cy = y; cy >= mn[1]; cy = F(cy - colCtx.len[1])) {
+			if (cy > mx[1]) continue;
+			int idx = pointCell(colCtx, x, cy, z).index;
+			std::optional<double> best;
+			auto scan = [&](const vector<int>& list, bool walls) {
+				for (int id : list) {
+					const Poly& p = polys[id];
+					if (y < p.minY) break;
+					if (walls && p.sy < 0) continue;
+					if (isZero(p.ny) || !triChkY(p, z, x, 0, 1)) continue;
+					double yi = F(F(F(F(-p.nx * x) - F(p.nz * z)) - p.dist) / p.ny);
+					if (yi < y && (!best || yi > *best)) best = yi;
+				}
+			};
+			scan(cellFloorsL[idx], false);
+			scan(cellWallsL[idx], true);
+			if (best) return best;
 		}
 		return std::nullopt;
 	}
@@ -714,22 +744,38 @@ struct Model {
 static const double NEXT_STEP = 0.5;
 static const double CROSS_STEP = 0.25;
 static const double FLOOR_BLOCK = 4;
-static const double MOVE_STEPS[] = { 2, 4, 6, 8, 12, 16, 20 };
+static const double MOVE_STEPS[] = { 2, 4, 6, 8, 12, 16, 20, 24, 28, 32 };
 static const double REACH = 14;
 
 struct ClipResult { int crossed, pusher; V3 end; };
 
+// rayFromY (prevPos.y, walking; NAN = none): the frame's floor check first
+// (wall_push_clips.js clipFromFrame).
 static std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const V3& prev, const V3& res,
-	const PushList& trace, const Tol& tol) {
+	const PushList& trace, const Tol& tol, double rayFromY = NAN) {
 	if (trace.empty()) return std::nullopt;
-	int crossed = m.crossedWall(s, prev, res);
+	const V3 from = { prev.x, res.y, prev.z };
+	int crossed = m.crossedWall(s, from, res);
 	if (crossed < 0) return std::nullopt;
-	V3 s1 = m.sphereStep(res, tol, nullptr);
+	V3 at = res;
+	bool landed = false;
+	double landY = 0;
+	if (!std::isnan(rayFromY)) {
+		auto fy = m.floorCheck(res.x, res.z, F(rayFromY + 50));
+		if (fy && F(*fy - res.y) >= -11) {
+			landed = true;
+			landY = *fy;
+			at = { res.x, F(*fy - GROUND_DROP), res.z };
+		}
+	}
+	V3 s1 = m.sphereStep(at, tol, nullptr);
 	V3 s2 = m.sphereStep(s1, tol, nullptr);
-	if (m.crossedWall(s, prev, s2) != crossed) return std::nullopt;
-	if (m.crossedWall(s, prev, s2, true) >= 0) return std::nullopt;
+	const V3 from2 = { prev.x, at.y, prev.z };
+	if (m.crossedWall(s, from2, s2) != crossed) return std::nullopt;
+	if (m.crossedWall(s, from2, s2, true) >= 0) return std::nullopt;
+	V3 end = landed ? V3{ s2.x, landY, s2.z } : s2;
 	const Poly& C = m.polys[crossed];
-	double sphY = prev.y + m.checkHeight;
+	double sphY = res.y + m.checkHeight;
 	int pusher = -1;
 	for (const Push& t : trace) {
 		if (t.poly == crossed) continue;
@@ -740,7 +786,7 @@ static std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const
 		for (int i = trace.size() - 1; i >= 0; i--) if (trace[i].poly != crossed) { pusher = trace[i].poly; break; }
 	}
 	if (pusher < 0) return std::nullopt;
-	return ClipResult{ crossed, pusher, s2 };
+	return ClipResult{ crossed, pusher, end };
 }
 
 struct Pair { int A, B; double cosAB, lo, hi, x0, x1, z0, z1; };
@@ -835,7 +881,7 @@ static vector<Pair> wallPairCandidates(const Model& m) {
 	vector<Pair> pairs;
 	std::unordered_set<int64_t> seen;
 	const double R = m.radius, E = R + REACH;
-	const double reach = 2 * m.radius + 30; // wall_push_clips.js pairReach
+	const double reach = 2 * m.radius + 42; // wall_push_clips.js pairReach
 	for (const auto& sub : m.colCtx.subWalls) {
 		if (sub.size() < 2) continue;
 		vector<int> walls;
@@ -1082,11 +1128,10 @@ static std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3&
 
 static std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor) {
 	noFloor = false;
-	double land = -INFINITY;
-	bool any = false;
-	for (double y : m.floorsAt(res.x, res.z)) if (y <= floorY + 50 && (!any || y > land)) { land = y; any = true; }
-	if (!any) { noFloor = true; return res; }
-	V3 end = m.sphereStep(m.sphereStep({ res.x, land, res.z }, LOOSE, nullptr), LOOSE, nullptr);
+	auto land = m.floorCheck(res.x, res.z, F(floorY + 50));
+	if (!land) { noFloor = true; return res; }
+	V3 st = m.sphereStep(m.sphereStep({ res.x, F(*land - GROUND_DROP), res.z }, LOOSE, nullptr), LOOSE, nullptr);
+	V3 end = { st.x, *land, st.z };
 	if (m.isInBounds(s, end)) return std::nullopt;
 	return end;
 }
@@ -1128,7 +1173,9 @@ struct Clip {
 	bool hasNext = false, hasFloorY = false, endNoFloor = false;
 	double floorY = 0;
 	vector<int> yaws;
-	int yaw = 0;          // crossings: the exact move (s16 yaw, f32 speed)
+	bool strict = false;  // low: also clips without the extended planes (checked with extendedOnly)
+	int yaw = 0;          // crossings and standing points: the exact move (s16 yaw, f32 speed)
+	bool hasMove = false;
 	double speed = 0;
 };
 
@@ -1161,7 +1208,7 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 			if (cp.drop > 0) next.y = cp.p.y;
 			auto f = lineFrame(m, s, prev, next, tol);
 			if (!f || f->hit.poly != A.id) continue;
-			auto clip = clipFromFrame(m, s, prev, f->res, f->trace, tol);
+			auto clip = clipFromFrame(m, s, prev, f->res, f->trace, tol, cp.drop > 0 ? NAN : prev.y);
 			if (!clip || !m.isInBounds(s, prev)) continue;
 			bool noFloor = false;
 			if (cp.drop > 0) {
@@ -1191,7 +1238,7 @@ static std::optional<V3> reachFrom(const Model& m, Scratch& s, const V3& p, doub
 			if (!prevO) continue;
 			V3 prev = *prevO;
 			double x = prev.x, z = prev.z;
-			if (std::hypot(p.x - x, p.z - z) > 30) continue; // REACH_DIST
+			if (std::hypot(p.x - x, p.z - z) > 45) continue; // REACH_DIST
 			if (m.lineHit(s, { x, h, z }, { p.x, h, p.z }, LOOSE, false, true)) continue;
 			if (m.isInBounds(s, prev)) return prev;
 		}
@@ -1204,19 +1251,39 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 	PushList trace;
 	V3 res = m.sphereStep(p, LOOSE, &trace);
 	if (trace.empty()) return std::nullopt;
-	auto clip = clipFromFrame(m, s, p, res, trace, LOOSE);
+	auto clip = clipFromFrame(m, s, p, res, trace, LOOSE, floorPt.y);
 	if (!clip) return std::nullopt;
 	if (!m.isInBounds(s, floorPt) || m.isInBounds(s, clip->end)) return std::nullopt;
-	auto prev = reachFrom(m, s, p, floorPt.y);
-	if (!prev) return std::nullopt;
-	PushList st;
-	V3 sres = m.sphereStep(p, STRICT, &st);
-	bool strict = (bool)clipFromFrame(m, s, p, sres, st, STRICT);
-	Clip c;
-	c.kind = strict ? 0 : 1;
-	c.from = p; c.floorY = floorPt.y; c.hasFloorY = true; c.prev = *prev; c.res = res; c.end = clip->end;
-	c.crossed = clip->crossed; c.pusher = clip->pusher;
-	return c;
+	// Link walks there himself (wall_push_clips.js walkInto): the game's move
+	// stops a hair off p, so the frame is checked again where he ends up.
+	for (double dist : MOVE_STEPS) {
+		for (int i = 0; i < 16; i++) {
+			double ang = i / 16.0 * 2 * PI;
+			auto prevO = standSpot(m, F(p.x - dist * std::sin(ang)), F(p.z - dist * std::cos(ang)), floorPt.y);
+			if (!prevO) continue;
+			V3 prev = *prevO;
+			double vx = p.x - prev.x, vz = p.z - prev.z, len = std::hypot(vx, vz);
+			if (len < 0.01 || len > 45) continue; // REACH_DIST
+			int yaw = yawOf(vx, vz);
+			double speed = F(len / SPEED_RATE);
+			V3 next = moveStep(prev, yaw, speed);
+			if (lineFrame(m, s, prev, next, LOOSE)) continue;
+			PushList tr;
+			V3 wres = m.sphereStep(next, LOOSE, &tr);
+			auto wclip = clipFromFrame(m, s, prev, wres, tr, LOOSE, prev.y);
+			if (!wclip || m.isInBounds(s, wclip->end) || !m.isInBounds(s, prev)) continue;
+			PushList st;
+			V3 sres = m.sphereStep(next, STRICT, &st);
+			bool strict = (bool)clipFromFrame(m, s, prev, sres, st, STRICT, prev.y);
+			Clip c;
+			c.kind = strict ? 0 : 1;
+			c.from = next; c.floorY = prev.y; c.hasFloorY = true; c.prev = prev; c.res = wres; c.end = wclip->end;
+			c.next = next; c.hasNext = true; c.yaw = yaw; c.speed = speed; c.hasMove = true;
+			c.crossed = wclip->crossed; c.pusher = wclip->pusher;
+			return c;
+		}
+	}
+	return std::nullopt;
 }
 
 static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int drop) {
@@ -1233,6 +1300,11 @@ static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int 
 	auto prev = reachFrom(m, s, low, p.y);
 	if (!prev) return std::nullopt;
 	Clip c;
+	if (m.extendedOnly) {
+		PushList st;
+		V3 sres = m.sphereStep(low, STRICT, &st);
+		c.strict = (bool)clipFromFrame(m, s, low, sres, st, STRICT);
+	}
 	c.kind = 2; c.drop = drop;
 	c.from = low; c.floorY = p.y; c.hasFloorY = true; c.prev = *prev; c.res = res; c.end = *end; c.endNoFloor = noFloor;
 	c.crossed = clip->crossed; c.pusher = clip->pusher;
@@ -1304,13 +1376,20 @@ static vector<Clip> scan(const Model& m, int threads) {
 				const V3& p = np.p;
 				double h = p.y + m.checkHeight;
 				if (h - GROUND_DROP >= np.lo && h - GROUND_DROP <= np.hi && seen.insert({ p.x, p.z, p.y, 0 })) {
-					if (auto c = standingClip(m, s, p)) { local.push_back(*c); return; }
+					if (auto c = standingClip(m, s, p)) {
+						// (extended plane only: an acute one still ends the point, it's just not kept)
+						if (!(m.extendedOnly && c->kind == 0)) local.push_back(*c);
+						return;
+					}
 				}
 				for (int k = 2; k <= m.lowDrop; k += 2) {
 					double hk = h - k;
 					if (hk < np.lo || hk > np.hi) continue;
 					if (!seen.insert({ p.x, p.z, p.y, k })) continue;
-					if (auto c = lowClip(m, s, p, k)) { local.push_back(*c); break; }
+					if (auto c = lowClip(m, s, p, k)) {
+						if (!(m.extendedOnly && c->strict)) local.push_back(*c);
+						break;
+					}
 				}
 			});
 			progress("wall pairs", ++pairsDone, pairs.size());
@@ -1369,7 +1448,10 @@ static vector<Clip> scan(const Model& m, int threads) {
 				done.insert({ cp.spotU, cp.spotY });
 				const CrossFound& f0 = r->first;
 				if (!frames.insert({ f0.prev.x, f0.prev.y, f0.prev.z, f0.next.x, f0.next.y, f0.next.z }).second) return;
-				bool strict = cp.drop == 0 && (bool)crossingClip(m, s, A, cp, STRICT);
+				// (extended plane only: falling ones are checked without the
+				// extended planes too, and the ones that still clip left out)
+				bool strict = (cp.drop == 0 || m.extendedOnly) && (bool)crossingClip(m, s, A, cp, STRICT);
+				if (m.extendedOnly && strict) return;
 				const CrossFound& f = r->first;
 				Clip c;
 				c.kind = cp.drop > 0 ? 2 : strict ? 0 : 1;
@@ -1377,7 +1459,7 @@ static vector<Clip> scan(const Model& m, int threads) {
 				c.from = f.at; c.floorY = cp.floorY; c.hasFloorY = true;
 				c.prev = f.prev; c.next = f.next; c.hasNext = true; c.res = f.res; c.end = f.clip.end; c.endNoFloor = f.noFloor;
 				c.yaws = r->second;
-				c.yaw = f.yaw; c.speed = f.speed;
+				c.yaw = f.yaw; c.speed = f.speed; c.hasMove = true;
 				c.crossed = f.clip.crossed; c.pusher = A.id;
 				local.push_back(c);
 			});
@@ -1452,7 +1534,7 @@ static string toJson(const string& game, const string& map, const string& form, 
 	o << "{\n  \"format\": \"wall-push-clips-1\",\n";
 	o << "  \"game\": " << jsonStr(game) << ", \"map\": " << jsonStr(map) << ", \"form\": " << jsonStr(form) << ",\n";
 	o << "  \"radius\": " << num(m.radius) << ", \"checkHeight\": " << num(m.checkHeight)
-		<< ", \"falling\": " << (falling ? "true" : "false") << ", \"numPolygons\": " << numPolygons << ",\n";
+		<< ", \"falling\": " << (falling ? "true" : "false") << ", \"extendedOnly\": " << (m.extendedOnly ? "true" : "false") << ", \"numPolygons\": " << numPolygons << ",\n";
 	o << "  \"clips\": [";
 	for (size_t i = 0; i < clips.size(); i++) {
 		const Clip& c = clips[i];
@@ -1467,8 +1549,9 @@ static string toJson(const string& game, const string& map, const string& form, 
 		if (c.cross) {
 			o << ",\"yaws\":[";
 			for (size_t k = 0; k < c.yaws.size(); k++) o << (k ? "," : "") << c.yaws[k];
-			o << "],\"yaw\":" << c.yaw << ",\"speed\":" << num(c.speed);
+			o << "]";
 		}
+		if (c.hasMove) o << ",\"yaw\":" << c.yaw << ",\"speed\":" << num(c.speed);
 		o << "}";
 	}
 	o << "\n  ]\n}\n";
@@ -1516,7 +1599,7 @@ static string safeName(const string& s) {
 int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root;
 	double radius = 0;
-	bool falling = false, all = false;
+	bool falling = false, all = false, extendedOnly = false;
 	int threads = (int)std::max(1u, std::thread::hardware_concurrency());
 	for (int i = 1; i < argc; i++) {
 		string a = argv[i];
@@ -1526,6 +1609,7 @@ int main(int argc, char** argv) {
 		else if (a == "--form") form = val();
 		else if (a == "--radius") radius = std::stod(val());
 		else if (a == "--falling") falling = true;
+		else if (a == "--extended-only") extendedOnly = true;
 		else if (a == "--all") all = true;
 		else if (a == "-o" || a == "--out") out = val();
 		else if (a == "--out-dir") outDir = val();
@@ -1537,7 +1621,7 @@ int main(int argc, char** argv) {
 	if ((game != "OOT" && game != "MM") || (mapName.empty() && !all)) {
 		fprintf(stderr,
 			"usage: clipfinder --game OOT|MM (--map \"<name in the viewer's map list>\" | --all)\n"
-			"                  [--form Adult|Child|Human|Deku|Zora|Goron|FierceDeity] [--radius R] [--falling]\n"
+			"                  [--form Adult|Child|Crawlspace|Human|Deku|Zora|Goron|FierceDeity] [--radius R] [--falling] [--extended-only]\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -1545,6 +1629,7 @@ int main(int argc, char** argv) {
 	static const std::map<string, double> radii = {
 		{ "ADULT", 18 }, { "CHILD", 14 }, { "HUMAN", 14 }, { "DEKU", 14 }, { "ZORA", 18 }, { "GORON", 19.5 },
 		{ "FIERCEDEITY", 27 }, { "FIERCE_DEITY", 27 }, { "FD", 27 },
+		{ "CRAWLSPACE", 10 }, { "CRAWL", 10 },
 	};
 	if (form.empty()) form = game == "OOT" ? "Adult" : "Human";
 	if (radius == 0) {
@@ -1565,7 +1650,11 @@ int main(int argc, char** argv) {
 	for (const MapEntry& e : maps) if (all || e.name == mapName) todo.push_back(e);
 	if (todo.empty()) { fprintf(stderr, "no map named \"%s\" in the %s list\n", mapName.c_str(), game.c_str()); return 1; }
 
-	const double checkHeight = game == "OOT" ? 26.0 : F(F(268 * F(0.1)));
+	// OoT's PLAYER_STATE2_CRAWLING checks walls at 15 instead of 26 (z_player.c)
+	string formUp = form;
+	for (auto& ch : formUp) ch = (char)toupper((unsigned char)ch);
+	const bool crawl = game == "OOT" && (formUp == "CRAWLSPACE" || formUp == "CRAWL");
+	const double checkHeight = crawl ? 15.0 : game == "OOT" ? 26.0 : F(F(268 * F(0.1)));
 	int failures = 0;
 	for (const MapEntry& e : todo) {
 		fprintf(stderr, "%s - %s (%s, radius %g%s)\n", game.c_str(), e.name.c_str(), form.c_str(), radius, falling ? ", falling" : "");
@@ -1582,13 +1671,14 @@ int main(int argc, char** argv) {
 		m.radius = F(radius);
 		m.checkHeight = F(checkHeight);
 		m.lowDrop = falling ? 30 : 0;
+		m.extendedOnly = extendedOnly;
 		m.build(tris, ch.numPolygons);
 		vector<Clip> clips = scan(m, threads);
 		string json = toJson(game, e.name, form, m, ch.numPolygons, falling, clips);
 		string path = out;
 		if (path.empty() || all) {
 			string dir = outDir.empty() ? "." : outDir;
-			path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + ".json";
+			path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + ".json";
 		}
 		std::ofstream f(path, std::ios::binary);
 		f << json;
