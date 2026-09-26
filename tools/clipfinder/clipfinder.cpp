@@ -793,12 +793,17 @@ struct ClipResult { int crossed, pusher; V3 end; bool onFace; };
 // Link standing past its end, in front of its extended plane - as far past as
 // he is in front of it at 45 degrees - on top of the 1 unit / detMax 300
 // tolerance. A line test's snap is on the triangle already.
+// The distance is measured from a vertex, not with the poly's stored plane
+// distance: that's a whole number, so the plane can sit up to 0.5 off the
+// triangle, enough to put a point on the edge two walls share (OoT Hyrule
+// Field TRI 1286 / 1288, 0.006 inside 1286) past it. The 0.1 slack covers the
+// rest (the normal is stored as s16s).
 static bool pushOnFace(const Model& m, const Push& t) {
 	if (t.line) return true;
 	const Poly& P = m.polys[t.poly];
 	double y = t.from.y + m.checkHeight;
-	double k = planeDist(P, t.from.x, y, t.from.z) / P.nMag;
-	return pointInTri3D(P, t.from.x - k * P.nx, y - k * P.ny, t.from.z - k * P.nz, 0);
+	double k = ((t.from.x - P.ax) * P.nx + (y - P.ay) * P.ny + (t.from.z - P.az) * P.nz) / (P.nMag * P.nMag);
+	return pointInTri3D(P, t.from.x - k * P.nx, y - k * P.ny, t.from.z - k * P.nz, 0.1);
 }
 
 // rayFromY (prevPos.y, walking; NAN = none): the frame's floor check first
