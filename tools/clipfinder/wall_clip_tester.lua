@@ -1,8 +1,8 @@
 -- Wall push clip tester (BizHawk, N64 OoT US 1.0 / MM US, Mupen64Plus core)
 --
--- Tries, in the game, every clip point exported from the 3d_model_viewer
--- ("Find wall push clips" -> "Export test script" -> wall_clip_tests.lua) and
--- writes a summary of the ones that worked.
+-- Tries, in the game, every clip point in a results JSON - from
+-- tools/clipfinder, or from the 3d_model_viewer ("Find wall push clips" ->
+-- "Export JSON") - and writes a summary of the ones that worked.
 --
 -- How a test runs: the game's own wall check does the work. A callback on
 -- Actor_UpdateBgCheckInfo (code segment, so its address is fixed) catches the
@@ -17,9 +17,9 @@
 -- at where Link is. Every test starts from the same savestate.
 --
 -- Setup:
---   1. Scan the map in the viewer with the right form, click "Export test
---      script", and put wall_clip_tests.lua next to this script (or set
---      TESTS_FILE below).
+--   1. Get a results JSON: run tools/clipfinder, or scan the map in the viewer
+--      and click "Export JSON". Set TESTS_FILE below to it (or save it as
+--      wall_clip_tests.json next to this script).
 --   2. In BizHawk (N64 core: Mupen64Plus - the callback needs it), load the
 --      same map as the same form, with Link standing still anywhere and no
 --      menus or text open. (Tests of several forms: the ones for the form
@@ -36,10 +36,11 @@
 -- Settings
 ---------------------------------------------------------------------------
 
--- nil: wall_clip_tests.lua next to this script. Can also be a .json from
--- tools/clipfinder (e.g. [[C:\...\results\OOT_Spot_01_-_Kakariko_Village_All.json]]):
--- its clips are turned into tests the way the viewer's export does, with the
--- walls read from RAM (load that map first).
+-- The results JSON (tools/clipfinder or the viewer's "Export JSON"), e.g.
+-- [[C:\...\results\OOT_Spot_01_-_Kakariko_Village_All.json]]; nil:
+-- wall_clip_tests.json next to this script. Its clips are turned into tests,
+-- with the walls read from RAM (load that map first). (A .lua test file from
+-- an older viewer still works too.)
 local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\tcs_50_90.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
@@ -74,7 +75,7 @@ local MODE = "auto"
 local FORM = nil
 
 ---------------------------------------------------------------------------
--- Game / memory (from collision_dump.lua)
+-- Game / memory
 ---------------------------------------------------------------------------
 
 console.clear()
@@ -250,10 +251,13 @@ local function parseJson(text)
 	return v
 end
 
--- clipfinder's results (wall-push-clips-1 / -2) as a tests table, the same as
--- the viewer's "Export test script" (js/wall_push_clips.js exportLua) would
--- make from them: every clip, grouped by form, wall pair, crossing/standing
--- and kind. Walls are filled in from RAM later (T.fromJson).
+-- A results JSON (wall-push-clips-1 / -2, from clipfinder or the viewer's
+-- "Export JSON") as a tests table: every clip, grouped by form, wall pair,
+-- crossing/standing and kind. For the frame being tested, Link's prevPos and
+-- posNext are `prev` and `next`: standing points move nowhere (falling ones
+-- from the floor height, so only y changes), crossing points and standing
+-- points with a move go from their start to `next`. Walls are filled in from
+-- RAM later (T.fromJson).
 local function testsFromJson(path)
 	local f = io.open(path, "rb")
 	if not f then error("can't read " .. path) end
@@ -314,7 +318,7 @@ end
 ---------------------------------------------------------------------------
 
 local scriptDir = (debug.getinfo(1, "S").source:match("^@?(.*[/\\])")) or ""
-local testsPath = TESTS_FILE or (scriptDir .. "wall_clip_tests.lua")
+local testsPath = TESTS_FILE or (scriptDir .. "wall_clip_tests.json")
 local T = testsPath:lower():match("%.json$") and testsFromJson(testsPath) or dofile(testsPath)
 local resultsPath = RESULTS_FILE or (testsPath:match("^(.*[/\\])") or scriptDir) .. "wall_clip_results.txt"
 
@@ -582,7 +586,7 @@ local function runTest(t, mode)
 	memorysavestate.loadcorestate(base)
 	local r = { test = t }
 	if mode == "move" then
-		-- The way the manual setup / wall_clip_trace.lua does it, which works:
+		-- The way a manual setup that works in-game does it:
 		-- Link standing still at the start facing the test's yaw, then speedXZ
 		-- written once, just before a game frame, and nothing else touched.
 		local dx, dz = t.next[1] - t.prev[1], t.next[3] - t.prev[3]

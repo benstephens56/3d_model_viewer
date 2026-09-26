@@ -5,7 +5,7 @@ A native, multithreaded version of the viewer's wall push clip scan
 builds the same collision model the viewer does, and runs the same search in
 the same f32 arithmetic. It writes the clip points as JSON, which you can load
 with the viewer's **Import results** button or run in game with
-`tools/wall_clip_tester.lua`.
+`tools/clipfinder/wall_clip_tester.lua`.
 
 It also has tools for studying a single clip: the lowest speed that does it,
 the angles that work, and a step-by-step single-frame simulation.
@@ -138,7 +138,7 @@ and the tester.
 - **Viewer:** load the map, then **Import results** in the wall clip panel.
   With several forms there's a marker row per form and kind. Clicking a
   point describes it.
-- **In game:** set `TESTS_FILE` in `tools/wall_clip_tester.lua` to the JSON.
+- **In game:** set `TESTS_FILE` in `tools/clipfinder/wall_clip_tester.lua` to the JSON.
   It reads the walls from RAM, runs the tests for the form Link is in, and
   writes `wall_clip_results.txt`. See the settings at the top of that script
   (`SKIP_FALLING`, `MAX_PER_GROUP`, `FORM`, …).

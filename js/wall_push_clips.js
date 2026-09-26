@@ -1539,61 +1539,50 @@ function removeMarkerModels(scene) {
     }
 }
 
-// The shown points as a Lua table for tools/wall_clip_tester.lua, which runs
-// each one in the game: for the frame being tested, Link's prevPos and his
-// position after moving (posNext) are set to `prev` and `next` just before
-// Actor_UpdateBgCheckInfo. Standing points move nowhere (prev = next; falling
-// ones start from the floor height so only y changes); crossing points move
-// from their start to just past the crossing. Numbers are the exact f32s.
-function exportLua(groups, info) {
-    const num = v => f32Str(v).split(" ")[0];
-    const vec = p => `{${num(p.x)}, ${num(p.y)}, ${num(p.z)}}`;
-    const walls = new Map();
-    const lines = [];
-    const seen = new Set();
-    groups.forEach((g, gi) => {
-        walls.set(g.pusher.id, g.pusher);
-        walls.set(g.crossed.id, g.crossed);
-        for (const c of g.clips) {
-            let prev, next;
-            if (c.cross || c.speed !== undefined) {
-                // (a standing point Link walks onto: the same kind of move)
-                prev = c.prev;
-                next = c.next;
-            } else {
-                next = c.from;
-                // Link stands on the floor; the game's own movement puts
-                // posNext below it (walking or falling)
-                prev = { x: c.from.x, y: c.floorY ?? c.from.y, z: c.from.z };
-            }
-            const key = (g.form ?? "") + vec(prev) + vec(next);
-            if (seen.has(key)) continue;
-            seen.add(key);
-            lines.push(`    {group=${gi + 1}, ${g.form ? `form=${JSON.stringify(g.form)}, ` : ""}kind="${g.kind}", type="${c.cross ? "cross" : "stand"}", ` +
-                `pusher=${g.pusher.id}, crossed=${g.crossed.id}, prev=${vec(prev)}, next=${vec(next)}, ` +
-                // the exact move (s16 yaw, f32 speedXZ) that makes `next`
-                (c.speed !== undefined ? `yaw=${hex4(c.yaw)}, speed=${num(c.speed)}, ` : "") +
-                `expect=${vec(c.end)}},`);
-        }
-    });
-    const wallLines = [...walls.values()].map(p =>
-        `    [${p.id}] = {v={{${p.ax}, ${p.ay}, ${p.az}}, {${p.bx}, ${p.by}, ${p.bz}}, {${p.cx}, ${p.cy}, ${p.cz}}}, ` +
-        `n={${p.sx}, ${p.sy}, ${p.sz}}, d=${p.dist}},`);
-    // Imported results: each test's form, and each form's radius / check height
-    // (the tester runs the tests of the form Link is in)
+// The shown points in tools/clipfinder's JSON format (wall-push-clips-2), for
+// tools/clipfinder/wall_clip_tester.lua (set its TESTS_FILE to the file) and for
+// importing again. `info.form`: the form of a scan made here ({form, model}),
+// used for groups without their own (imported ones have theirs). Numbers are
+// the exact f32s, written the shortest way that reads back the same.
+function exportJson(groups, info) {
+    const num = v => (Number.isInteger(v) || F(v) !== v) ? String(v) : f32Str(v).split(" ")[0];
+    const vec = p => `[${num(p.x)},${num(p.y)},${num(p.z)}]`;
     const forms = new Map();
-    for (const g of groups) if (g.form) forms.set(g.form, g.model);
-    const formLines = forms.size === 0 ? [] : [`  forms = {`, ...[...forms].map(([f, m]) =>
-        `    [${JSON.stringify(f)}] = {radius=${num(m.radius)}, checkHeight=${num(m.checkHeight)}},`), `  },`];
+    for (const g of groups) {
+        const name = g.form ?? info.form.form;
+        if (!forms.has(name)) forms.set(name, g.model ?? info.form.model);
+    }
+    const clips = [];
+    for (const g of groups) {
+        for (const c of g.clips) {
+            const f = [
+                `"form":${JSON.stringify(g.form ?? info.form.form)}`, `"kind":"${g.kind}"`, `"cross":${!!c.cross}`,
+                `"drop":${c.drop ?? 0}`, `"pusher":${g.pusher.id}`, `"crossed":${g.crossed.id}`,
+                `"from":${vec(c.from)}`, `"prev":${vec(c.prev)}`,
+            ];
+            if (c.next) f.push(`"next":${vec(c.next)}`);
+            f.push(`"res":${vec(c.res)}`, `"end":${vec(c.end)}`);
+            if (c.end.noFloor) f.push(`"endNoFloor":true`);
+            if (c.floorY !== undefined) f.push(`"floorY":${num(c.floorY)}`);
+            if (c.yaws) f.push(`"yaws":[${c.yaws.join(",")}]`);
+            if (c.speed !== undefined) f.push(`"yaw":${c.yaw & 0xFFFF}`, `"speed":${num(c.speed)}`);
+            if (c.strict) f.push(`"strict":true`);
+            if (c.reach === null) f.push(`"reach":null`);
+            else if (c.reach) f.push(`"reach":{"speed":${num(c.reach.speed)},"yaw":${c.reach.yaw & 0xFFFF},"start":${vec(c.reach.start)}}`);
+            clips.push(`    {${f.join(",")}}`);
+        }
+    }
     return [
-        `-- Wall push clip tests exported from 3d_model_viewer (js/wall_push_clips.js).`,
-        `-- Run with tools/wall_clip_tester.lua in BizHawk.`,
-        `return {`,
-        `  game = "${info.game}", map = ${JSON.stringify(info.map)}, form = ${JSON.stringify(info.form)},`,
-        `  radius = ${num(info.radius)}, checkHeight = ${num(info.checkHeight)}, numPolygons = ${info.numPolygons},`,
-        ...formLines,
-        `  walls = {`, ...wallLines, `  },`,
-        `  tests = {`, ...lines, `  },`,
+        `{`,
+        `  "format": "wall-push-clips-2",`,
+        `  "game": ${JSON.stringify(info.game)}, "map": ${JSON.stringify(info.map)}, "falling": ${info.falling}, ` +
+            `"extendedOnly": ${info.extendedOnly}, "numPolygons": ${info.numPolygons},`,
+        `  "forms": [`,
+        [...forms].map(([name, m]) => `    {"form":${JSON.stringify(name)},"radius":${num(m.radius)},"checkHeight":${num(m.checkHeight)}}`).join(",\n"),
+        `  ],`,
+        `  "clips": [`,
+        clips.join(",\n"),
+        `  ]`,
         `}`,
         ``,
     ].join("\n");
@@ -1741,14 +1730,18 @@ export function setupWallPushClipUI(scene) {
             return;
         }
         const map = document.getElementById("mapDropdown").value;
-        const text = exportLua(window.wallPushClips, {
-            game, map, form: last.formLabel ?? radiusSel.selectedOptions[0]?.textContent ?? "",
-            radius: last.model.radius, checkHeight: last.model.checkHeight,
+        // A scan made here: the form's name as the tester reads Link's form
+        // ("Fierce Deity (27)" -> "FierceDeity", "Crawlspace (10, child)" -> "Crawlspace")
+        const scanForm = (last.scanForm ?? "").replace(/\s*\(.*\)\s*$/, "").replace(/\s+/g, "");
+        const text = exportJson(window.wallPushClips, {
+            game, map, form: { form: scanForm, model: last.model },
+            falling: last.model.lowDrop > 0, extendedOnly: extendedOnlyChk.checked,
             numPolygons: last.model.colCtx.colHeader.numPolygons,
         });
+        const label = last.formLabel ?? scanForm;
         const a = document.createElement("a");
-        a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
-        a.download = "wall_clip_tests.lua";
+        a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+        a.download = `${game}_${map}_${label}`.replace(/[^A-Za-z0-9_-]/g, "_") + ".json";
         a.click();
         URL.revokeObjectURL(a.href);
     });
@@ -1776,7 +1769,10 @@ export function setupWallPushClipUI(scene) {
         if (!clips) return;
 
         const groups = groupClips(clips);
-        last = { groups, model, checkHeight: model.checkHeight, note: ((performance.now() - t0) / 1000).toFixed(1) + "s" };
+        last = {
+            groups, model, checkHeight: model.checkHeight, note: ((performance.now() - t0) / 1000).toFixed(1) + "s",
+            scanForm: radiusSel.selectedOptions[0]?.textContent ?? "",
+        };
         render();
         logGroups(groups);
     });
