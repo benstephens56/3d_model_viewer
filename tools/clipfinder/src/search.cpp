@@ -1,0 +1,736 @@
+#include "search.h"
+
+////////////////////////////////////////
+// Search
+////////////////////////////////////////
+
+static const double NEXT_STEP = 0.5;
+static const double CROSS_STEP = 0.25;
+static const double FLOOR_BLOCK = 4;
+
+static const double REACH = 14;
+
+
+
+
+struct Pair { int A, B; double cosAB, lo, hi, x0, x1, z0, z1; };
+
+// Triangle-triangle distance: 0 if an edge of one passes through the other,
+// else the smallest vertex-triangle / edge-edge distance.
+using D3 = std::array<double, 3>;
+static D3 sub3(const D3& a, const D3& b) { return { a[0] - b[0], a[1] - b[1], a[2] - b[2] }; }
+static double dot3(const D3& a, const D3& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+static D3 cross3(const D3& a, const D3& b) { return { a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] }; }
+
+static D3 closestOnTri(const D3& p, const D3& a, const D3& b, const D3& c) {
+	D3 ab = sub3(b, a), ac = sub3(c, a), ap = sub3(p, a);
+	double d1 = dot3(ab, ap), d2 = dot3(ac, ap);
+	if (d1 <= 0 && d2 <= 0) return a;
+	D3 bp = sub3(p, b);
+	double d3 = dot3(ab, bp), d4 = dot3(ac, bp);
+	if (d3 >= 0 && d4 <= d3) return b;
+	double vc = d1 * d4 - d3 * d2;
+	if (vc <= 0 && d1 >= 0 && d3 <= 0) { double v = d1 / (d1 - d3); return { a[0] + v * ab[0], a[1] + v * ab[1], a[2] + v * ab[2] }; }
+	D3 cp = sub3(p, c);
+	double d5 = dot3(ab, cp), d6 = dot3(ac, cp);
+	if (d6 >= 0 && d5 <= d6) return c;
+	double vb = d5 * d2 - d1 * d6;
+	if (vb <= 0 && d2 >= 0 && d6 <= 0) { double w = d2 / (d2 - d6); return { a[0] + w * ac[0], a[1] + w * ac[1], a[2] + w * ac[2] }; }
+	double va = d3 * d6 - d5 * d4;
+	if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+		double w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+		return { b[0] + w * (c[0] - b[0]), b[1] + w * (c[1] - b[1]), b[2] + w * (c[2] - b[2]) };
+	}
+	double denom = 1 / (va + vb + vc), v = vb * denom, w = vc * denom;
+	return { a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w };
+}
+
+static double segSegDistSq(const D3& p1, const D3& q1, const D3& p2, const D3& q2) {
+	D3 d1 = sub3(q1, p1), d2 = sub3(q2, p2), r = sub3(p1, p2);
+	double a = dot3(d1, d1), e = dot3(d2, d2), f = dot3(d2, r), s, t;
+	auto clamp01 = [](double v) { return std::min(std::max(v, 0.0), 1.0); };
+	if (a <= 1e-12 && e <= 1e-12) return dot3(r, r);
+	if (a <= 1e-12) { s = 0; t = clamp01(f / e); }
+	else {
+		double c = dot3(d1, r);
+		if (e <= 1e-12) { t = 0; s = clamp01(-c / a); }
+		else {
+			double b = dot3(d1, d2), denom = a * e - b * b;
+			s = denom != 0 ? clamp01((b * f - c * e) / denom) : 0;
+			t = (b * s + f) / e;
+			if (t < 0) { t = 0; s = clamp01(-c / a); }
+			else if (t > 1) { t = 1; s = clamp01((b - c) / a); }
+		}
+	}
+	D3 c1 = { p1[0] + d1[0] * s, p1[1] + d1[1] * s, p1[2] + d1[2] * s };
+	D3 c2 = { p2[0] + d2[0] * t, p2[1] + d2[1] * t, p2[2] + d2[2] * t };
+	D3 d = sub3(c1, c2);
+	return dot3(d, d);
+}
+
+static bool segHitsTri(const D3& p, const D3& q, const D3& a, const D3& b, const D3& c) {
+	D3 n = cross3(sub3(b, a), sub3(c, a));
+	double dp = dot3(n, sub3(p, a)), dq = dot3(n, sub3(q, a));
+	if ((dp > 0 && dq > 0) || (dp < 0 && dq < 0) || dp == dq) return false;
+	double t = dp / (dp - dq);
+	D3 x = { p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t };
+	double s1 = dot3(n, cross3(sub3(b, a), sub3(x, a)));
+	double s2 = dot3(n, cross3(sub3(c, b), sub3(x, b)));
+	double s3 = dot3(n, cross3(sub3(a, c), sub3(x, c)));
+	return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
+}
+
+static double triTriDist(const Poly& A, const Poly& B) {
+	D3 ta[3] = { { A.ax, A.ay, A.az }, { A.bx, A.by, A.bz }, { A.cx, A.cy, A.cz } };
+	D3 tb[3] = { { B.ax, B.ay, B.az }, { B.bx, B.by, B.bz }, { B.cx, B.cy, B.cz } };
+	for (int i = 0; i < 3; i++) {
+		if (segHitsTri(ta[i], ta[(i + 1) % 3], tb[0], tb[1], tb[2])) return 0;
+		if (segHitsTri(tb[i], tb[(i + 1) % 3], ta[0], ta[1], ta[2])) return 0;
+	}
+	double best = INFINITY;
+	for (int k = 0; k < 3; k++) {
+		D3 d = sub3(ta[k], closestOnTri(ta[k], tb[0], tb[1], tb[2]));
+		best = std::min(best, dot3(d, d));
+		d = sub3(tb[k], closestOnTri(tb[k], ta[0], ta[1], ta[2]));
+		best = std::min(best, dot3(d, d));
+	}
+	for (int i = 0; i < 3; i++)
+		for (int j = 0; j < 3; j++)
+			best = std::min(best, segSegDistSq(ta[i], ta[(i + 1) % 3], tb[j], tb[(j + 1) % 3]));
+	return std::sqrt(best);
+}
+
+static vector<Pair> wallPairCandidates(const Model& m) {
+	vector<Pair> pairs;
+	std::unordered_set<int64_t> seen;
+	const double R = m.radius, E = R + REACH;
+	const double reach = 2 * m.radius + 42;
+	for (const auto& sub : m.colCtx.subWalls) {
+		if (sub.size() < 2) continue;
+		vector<int> walls;
+		for (int id : sub) { const Poly& p = m.polys[id]; if (p.exists && p.isWall && p.nXZ > 0) walls.push_back(id); }
+		for (size_t i = 0; i < walls.size(); i++) {
+			for (size_t j = 0; j < walls.size(); j++) {
+				if (i == j) continue;
+				const Poly& A = m.polys[walls[i]];
+				const Poly& B = m.polys[walls[j]];
+				int64_t key = (int64_t)A.id * 65536 + B.id;
+				if (seen.count(key)) continue;
+				double cosAB = (A.nx * B.nx + A.nz * B.nz) * A.invNXZ * B.invNXZ;
+				if (cosAB > -0.02) continue;
+				double lo = std::max(A.minY, B.minY) - 1, hi = std::min(A.maxY, B.maxY) + 1;
+				if (hi < lo) continue;
+				double x0 = std::max(A.minX, B.minX) - E, x1 = std::min(A.maxX, B.maxX) + E;
+				double z0 = std::max(A.minZ, B.minZ) - E, z1 = std::min(A.maxZ, B.maxZ) + E;
+				if (x1 < x0 || z1 < z0) continue;
+				seen.insert(key);
+				if (triTriDist(A, B) > reach) continue;
+				pairs.push_back({ A.id, B.id, cosAB, lo, hi, x0, x1, z0, z1 });
+			}
+		}
+	}
+	return pairs;
+}
+
+struct NextPos { V3 p; double lo, hi; };
+
+// Where walls A and B's planes meet (top down) at check height h, offset to
+// signed distances a from A and b from B. False for walls under ~3 degrees apart.
+static bool planesMeet(const Poly& A, const Poly& B, double h, double a, double b, double& x, double& z) {
+	double det = A.nx * B.nz - A.nz * B.nx;
+	if (std::fabs(det) < 0.05 * A.nXZ * B.nXZ) return false;
+	double ra = a * A.nMag - A.ny * h - A.dist, rb = b * B.nMag - B.ny * h - B.dist;
+	x = (ra * B.nz - A.nz * rb) / det;
+	z = (A.nx * rb - ra * B.nx) / det;
+	return true;
+}
+
+// cornerBox: the bounding box of the parallelogram (within
+// radius in front of A or 4 behind it, at most radius + 4 in front of B)
+// around where the planes meet, over check heights [lo, hi], plus a unit.
+static bool cornerBox(const Poly& A, const Poly& B, double R, double lo, double hi, double box[4]) {
+	double x0 = INFINITY, x1 = -INFINITY, z0 = INFINITY, z1 = -INFINITY;
+	for (double h : { lo, hi })
+		for (double a : { -(4 / A.nXZ) - 1, R })
+			for (double b : { 0.0, R + 4 }) {
+				double x, z;
+				if (!planesMeet(A, B, h, a, b, x, z)) return false;
+				x0 = std::min(x0, x); x1 = std::max(x1, x);
+				z0 = std::min(z0, z); z1 = std::max(z1, z);
+			}
+	box[0] = x0 - 1; box[1] = x1 + 1; box[2] = z0 - 1; box[3] = z1 + 1;
+	return true;
+}
+
+static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, const std::function<void(const NextPos&)>& yield) {
+	const Poly& A = m.polys[pair.A];
+	const Poly& B = m.polys[pair.B];
+	const double R = m.radius, ch = m.checkHeight, lo = pair.lo, hi = pair.hi, cosAB = pair.cosAB;
+	double x0 = std::max(pair.x0, std::min(A.minX, B.minX) - R), x1 = std::min(pair.x1, std::max(A.maxX, B.maxX) + R);
+	double z0 = std::max(pair.z0, std::min(A.minZ, B.minZ) - R), z1 = std::min(pair.z1, std::max(A.maxZ, B.maxZ) + R);
+	double cb[4];
+	if (cornerBox(A, B, R, lo, hi, cb)) {
+		x0 = std::max(x0, cb[0]); x1 = std::min(x1, cb[1]);
+		z0 = std::max(z0, cb[2]); z1 = std::min(z1, cb[3]);
+		if (x1 < x0 || z1 < z0) return;
+	}
+	double step = NEXT_STEP;
+	while (((x1 - x0) / step) * ((z1 - z0) / step) > 40000) step *= 1.25;
+	double x = 0, z = 0;
+	auto reachable = [&](double h) {
+		double dA = planeDist(A, x, h, z);
+		if (dA > R || dA < -(4 / A.nXZ) - 1) return false;
+		double dB = planeDist(B, x, h, z);
+		if (dB < 0 || dB > R + 4) return false;
+		if (dB + (R - dA) * cosAB > -3) return false;
+		// near the triangles themselves, not just their planes (slack: the
+		// extended plane and pushes from walls before A in the list)
+		const double slack = R;
+		double kA = dA / A.nMag;
+		if (!pointInTri3D(A, x - kA * A.nx, h - kA * A.ny, z - kA * A.nz, slack)) return false;
+		double disp = (R - dA) * A.invNXZ;
+		double qx = x + disp * A.nx, qz = z + disp * A.nz;
+		double dBq = planeDist(B, qx, h, qz);
+		if (dBq >= 0) return true;
+		double t = dB / (dB - dBq);
+		return pointInTri3D(B, x + (qx - x) * t, h, z + (qz - z) * t, slack);
+	};
+	double aX = A.nx * A.invNXZ, aZ = A.nz * A.invNXZ, bX = B.nx * B.invNXZ, bZ = B.nz * B.invNXZ;
+	double mLen = std::hypot(aX + bX, aZ + bZ);
+	if (mLen == 0) mLen = 1;
+	const double outDirs[3][2] = { { aX, aZ }, { bX, bZ }, { (aX + bX) / mLen, (aZ + bZ) / mLen } };
+	auto anyHeight = [&]() {
+		double hMin = lo, hMax = hi;
+		double dA0 = planeDist(A, x, 0, z), dA1 = planeDist(A, x, 1, z) - dA0;
+		double dB0 = planeDist(B, x, 0, z), dB1 = planeDist(B, x, 1, z) - dB0;
+		auto le = [&](double k, double mm) {
+			if (std::fabs(mm) < 1e-9) { if (k > 0) hMax = -INFINITY; return; }
+			double root = -k / mm;
+			if (mm > 0) hMax = std::min(hMax, root); else hMin = std::max(hMin, root);
+		};
+		le(dA0 - R, dA1);
+		le(-dA0 - (4 / A.nXZ) - 1, -dA1);
+		le(-dB0, -dB1);
+		le(dB0 - R - 4, dB1);
+		le(dB0 + (R - dA0) * cosAB + 3, dB1 - dA1 * cosAB);
+		return hMin <= hMax;
+	};
+	vector<double> ys;
+	for (x = std::ceil(x0 / step) * step; x <= x1; x += step) {
+		for (z = std::ceil(z0 / step) * step; z <= z1; z += step) {
+			if (!anyHeight()) continue;
+			// floor heights around the point, in the order first found
+			ys.clear();
+			auto add = [&](double y) { if (std::find(ys.begin(), ys.end(), y) == ys.end()) ys.push_back(y); };
+			for (double y : m.floorsAt(x, z)) add(y);
+			for (double d : { 8.0, 16.0, 24.0 })
+				for (const auto& od : outDirs)
+					for (double y : m.floorsNear(s, x + d * od[0], z + d * od[1])) add(y);
+			for (double fy : ys) {
+				double h = fy - GROUND_DROP + ch;
+				if (h < lo || h > hi + m.lowDrop) continue;
+				double hTop = std::min(h, hi), hLow = std::max(lo, h - m.lowDrop);
+				if (!reachable(hTop) && !(m.lowDrop && (reachable(hLow) || reachable((hTop + hLow) / 2)))) continue;
+				yield({ { F(x), fy, F(z) }, lo, hi });
+			}
+		}
+	}
+}
+
+struct CrossPoint { V3 p; double floorY; int drop; double spotU, spotY; };
+
+static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, const vector<const Pair*>& pairsA,
+	const std::function<void(const CrossPoint&)>& yield) {
+	const double ch = m.checkHeight;
+	double nx = A.nx * A.invNXZ, nz = A.nz * A.invNXZ;
+	double tx = -nz, tz = nx;
+	double us[3] = { A.ax * tx + A.az * tz, A.bx * tx + A.bz * tz, A.cx * tx + A.cz * tz };
+	double u0 = std::min({ us[0], us[1], us[2] }) - 2, u1 = std::max({ us[0], us[1], us[2] }) + 2;
+	vector<std::pair<double, double>> nearR;
+	for (const Pair* pr : pairsA) {
+		const Poly& B = m.polys[pr->B];
+		double bu[3] = { B.ax * tx + B.az * tz, B.bx * tx + B.bz * tz, B.cx * tx + B.cz * tz };
+		double pad = m.radius + 30;
+		double a = std::min({ bu[0], bu[1], bu[2] }) - pad, b = std::max({ bu[0], bu[1], bu[2] }) + pad;
+		// Snapped radius in front of A, Link is only behind B near where the
+		// planes meet: within (5 radius + 25) / sin(angle) of it along A.
+		double xl, zl, xh, zh;
+		if (planesMeet(A, B, pr->lo, 0, 0, xl, zl) && planesMeet(A, B, pr->hi, 0, 0, xh, zh)) {
+			double sinAB = std::fabs(A.nx * B.nz - A.nz * B.nx) / (A.nXZ * B.nXZ);
+			double w = (5 * m.radius + 25) / sinAB;
+			double ul = xl * tx + zl * tz, uh = xh * tx + zh * tz;
+			a = std::max(a, std::min(ul, uh) - w);
+			b = std::min(b, std::max(ul, uh) + w);
+			if (b < a) continue;
+		}
+		nearR.push_back({ a, b });
+	}
+	auto isNear = [&](double u) { for (auto& r : nearR) if (u >= r.first && u <= r.second) return true; return false; };
+	auto onPlane = [&](double u, double h) {
+		double c = -(A.dist + A.ny * h) / (A.nXZ * A.nXZ);
+		return std::pair<double, double>(c * A.nx + u * tx, c * A.nz + u * tz);
+	};
+	const double c45 = SQRT1_2;
+	const double outDirs[3][2] = { { nx, nz }, { (nx - nz) * c45, (nz + nx) * c45 }, { (nx + nz) * c45, (nz - nx) * c45 } };
+	auto floorsBeside = [&](std::pair<double, double> q) {
+		vector<double> out;
+		for (double side : { -12.0, -2.0, 4.0, 14.0, 28.0 })
+			for (const auto& od : outDirs)
+				for (double y : m.floorsNear(s, q.first + side * od[0], q.second + side * od[1]))
+					if (std::find(out.begin(), out.end(), y) == out.end()) out.push_back(y);
+		return out;
+	};
+	const double seedHeights[3] = { A.minY, (A.minY + A.maxY) / 2, A.maxY };
+	auto floorsFor = [&](double u) {
+		// floorsBeside of a position already looked up in this block (on a
+		// vertical wall the plane is in the same place at every height)
+		vector<std::tuple<double, double, vector<double>>> memo;
+		auto beside = [&](std::pair<double, double> q) {
+			for (auto& e : memo) if (std::get<0>(e) == q.first && std::get<1>(e) == q.second) return std::get<2>(e);
+			memo.emplace_back(q.first, q.second, floorsBeside(q));
+			return std::get<2>(memo.back());
+		};
+		vector<double> ys, seeds;
+		for (double hs : seedHeights)
+			for (double y : beside(onPlane(u, hs)))
+				if (std::find(seeds.begin(), seeds.end(), y) == seeds.end()) seeds.push_back(y);
+		auto same = [&](double y) { for (double v : ys) if (std::fabs(v - y) < 0.5) return true; return false; };
+		for (double y0 : seeds) {
+			for (double y : beside(onPlane(u, y0 + ch))) {
+				double h = y + ch;
+				if (h - std::max((double)m.lowDrop, GROUND_DROP) > A.maxY + 1 || h < A.minY - 1 || same(y)) continue;
+				ys.push_back(y);
+			}
+		}
+		return ys;
+	};
+	bool haveBlock = false;
+	double block = 0;
+	vector<double> blockYs;
+	int ui = 0;
+	for (double u = u0; u <= u1; ui++, u += CROSS_STEP) {
+		if (!isNear(u)) continue;
+		double b = std::floor(u / FLOOR_BLOCK);
+		if (!haveBlock || b != block) {
+			haveBlock = true;
+			block = b;
+			blockYs = floorsFor((b + 0.5) * FLOOR_BLOCK);
+		}
+		for (double y : blockYs) {
+			for (int drop = 0; drop <= m.lowDrop; drop += drop == 0 ? 2 : 4) {
+				if (drop > 0 && (ui % 2)) break;
+				// (walking, posNext is GROUND_DROP below the floor)
+				double low = F(y - (drop ? drop : GROUND_DROP));
+				// checkHeight + dy < 5 makes the game's line
+				// test run at the feet with floors, which stops Link on the
+				// floor he starts from - bigger drops can't clip crossing
+				if (F(ch + F(low - y)) < 5) break;
+				double h = F(low + ch);
+				if (h < A.minY - 1 || h > A.maxY + 1) continue;
+				auto i = onPlane(u, h);
+				yield({ { F(i.first), low, F(i.second) }, y, drop, u, y });
+			}
+		}
+	}
+}
+
+
+
+
+
+
+
+
+struct CrossFound { ClipResult clip; V3 prev, next, res, at; bool noFloor = false; int yaw = 0; double speed = 0; };
+
+static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Model& m, Scratch& s, const Poly& A,
+	const CrossPoint& cp, const Tol& tol) {
+	vector<int> yaws;
+	std::optional<CrossFound> first;
+	std::set<std::pair<double, double>> tried;
+	for (int i = 0; i < 32; i++) {
+		int yaw0 = i * 0x800;
+		double dx0 = std::sin(yaw0 / 65536.0 * 2 * PI), dz0 = std::cos(yaw0 / 65536.0 * 2 * PI);
+		if (std::fabs(dx0 * A.nx + dz0 * A.nz) * A.invNXZ < 0.1) continue;
+		std::optional<CrossFound> found;
+		for (double dist : MOVE_STEPS) {
+			// standing still at the start, moving from there through the point
+			// (cached for falling points only: a walking point's starts are
+			// hardly ever tried again, so the cache just costs time there)
+			double sx = F(cp.p.x - dist * dx0), sz = F(cp.p.z - dist * dz0);
+			auto prevO = cp.drop > 0 ? standSpotCached(m, s, sx, sz, cp.floorY) : standSpot(m, sx, sz, cp.floorY);
+			if (!prevO) continue;
+			V3 prev = *prevO;
+			if (!tried.insert({ prev.x, prev.z }).second) continue;
+			double vx = cp.p.x - prev.x, vz = cp.p.z - prev.z, len = std::hypot(vx, vz);
+			if (len < 0.5) continue;
+			double dx = vx / len, dz = vz / len;
+			if (std::fabs(dx * A.nx + dz * A.nz) * A.invNXZ < 0.1) continue;
+			// the game's move: s16 yaw, speed 1 unit past the point, sine table
+			int yaw = yawOf(vx, vz);
+			double speed = F((len + 1) / SPEED_RATE);
+			V3 next = moveStep(prev, yaw, speed);
+			if (cp.drop > 0) next.y = cp.p.y;
+			auto f = lineFrame(m, s, prev, next, tol);
+			if (!f || f->hit.poly != A.id) continue;
+			auto clip = clipFromFrame(m, s, prev, f->res, f->trace, tol, cp.drop > 0 ? NAN : prev.y);
+			if (!clip || !m.isInBounds(s, prev)) continue;
+			bool noFloor = false;
+			if (cp.drop > 0) {
+				auto end = landing(m, s, f->res, cp.floorY, noFloor);
+				if (!end) continue;
+				clip->end = *end;
+			} else if (m.isInBounds(s, clip->end)) {
+				continue;
+			}
+			found = CrossFound{ *clip, prev, next, f->res, { f->hit.x, next.y, f->hit.z }, noFloor, yaw, speed };
+			break;
+		}
+		if (!found) continue;
+		if (std::find(yaws.begin(), yaws.end(), found->yaw) == yaws.end()) yaws.push_back(found->yaw);
+		if (!first) first = found;
+	}
+	if (!first) return std::nullopt;
+	return std::make_pair(*first, yaws);
+}
+
+static std::optional<V3> reachFrom(const Model& m, Scratch& s, const V3& p, double floorY) {
+	double h = F(p.y + m.checkHeight);
+	for (double dist : MOVE_STEPS) {
+		for (int i = 0; i < 16; i++) {
+			double ang = i / 16.0 * 2 * PI;
+			auto prevO = standSpot(m, F(p.x - dist * std::sin(ang)), F(p.z - dist * std::cos(ang)), floorY);
+			if (!prevO) continue;
+			V3 prev = *prevO;
+			double x = prev.x, z = prev.z;
+			if (std::hypot(p.x - x, p.z - z) > REACH_DIST) continue;
+			if (m.lineHit(s, { x, h, z }, { p.x, h, p.z }, LOOSE, false, true)) continue;
+			if (m.isInBounds(s, prev)) return prev;
+		}
+	}
+	return std::nullopt;
+}
+
+static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& floorPt) {
+	const V3 p = { floorPt.x, F(floorPt.y - GROUND_DROP), floorPt.z };
+	PushList trace;
+	V3 res = m.sphereStep(p, LOOSE, &trace);
+	if (trace.empty()) return std::nullopt;
+	auto clip = clipFromFrame(m, s, p, res, trace, LOOSE, floorPt.y);
+	if (!clip) return std::nullopt;
+	if (!m.isInBounds(s, floorPt) || m.isInBounds(s, clip->end)) return std::nullopt;
+	// Link walks there himself: the game's move
+	// stops a hair off p, so the frame is checked again where he ends up.
+	for (double dist : MOVE_STEPS) {
+		for (int i = 0; i < 16; i++) {
+			double ang = i / 16.0 * 2 * PI;
+			auto prevO = standSpot(m, F(p.x - dist * std::sin(ang)), F(p.z - dist * std::cos(ang)), floorPt.y);
+			if (!prevO) continue;
+			V3 prev = *prevO;
+			double vx = p.x - prev.x, vz = p.z - prev.z, len = std::hypot(vx, vz);
+			if (len < 0.01 || len > REACH_DIST) continue;
+			int yaw = yawOf(vx, vz);
+			double speed = F(len / SPEED_RATE);
+			V3 next = moveStep(prev, yaw, speed);
+			if (lineFrame(m, s, prev, next, LOOSE)) continue;
+			PushList tr;
+			V3 wres = m.sphereStep(next, LOOSE, &tr);
+			auto wclip = clipFromFrame(m, s, prev, wres, tr, LOOSE, prev.y);
+			if (!wclip || m.isInBounds(s, wclip->end) || !m.isInBounds(s, prev)) continue;
+			PushList st;
+			V3 sres = m.sphereStep(next, STRICT, &st);
+			// acute: it clips without the extended planes, and the push starts
+			// in front of the pusher's face (not beside it, see pushOnFace)
+			auto sclip = clipFromFrame(m, s, prev, sres, st, STRICT, prev.y);
+			Clip c;
+			c.acutePoint = sclip && sclip->onFace;
+			c.from = next; c.floorY = prev.y; c.hasFloorY = true; c.prev = prev; c.res = wres; c.end = wclip->end;
+			c.next = next; c.hasNext = true; c.yaw = yaw; c.speed = speed; c.hasMove = true;
+			c.crossed = wclip->crossed; c.pusher = wclip->pusher;
+			return c;
+		}
+	}
+	return std::nullopt;
+}
+
+static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int drop) {
+	V3 low = { p.x, F(p.y - drop), p.z };
+	PushList trace;
+	V3 res = m.sphereStep(low, LOOSE, &trace);
+	if (trace.empty()) return std::nullopt;
+	auto clip = clipFromFrame(m, s, low, res, trace, LOOSE);
+	if (!clip) return std::nullopt;
+	if (!m.isInBounds(s, p)) return std::nullopt;
+	bool noFloor = false;
+	auto end = landing(m, s, res, p.y, noFloor);
+	if (!end) return std::nullopt;
+	auto prev = reachFrom(m, s, low, p.y);
+	if (!prev) return std::nullopt;
+	Clip c;
+	PushList st;
+	V3 sres = m.sphereStep(low, STRICT, &st);
+	auto sclip = clipFromFrame(m, s, low, sres, st, STRICT);
+	c.acutePoint = sclip && sclip->onFace;
+	c.drop = drop;
+	c.from = low; c.floorY = p.y; c.hasFloorY = true; c.prev = *prev; c.res = res; c.end = *end; c.endNoFloor = noFloor;
+	c.crossed = clip->crossed; c.pusher = clip->pusher;
+	return c;
+}
+
+
+// A point (and falling drop) seen by any thread, sharded to keep lock
+// contention down.
+struct SeenKey {
+	double x, z, y;
+	int drop;
+	bool operator==(const SeenKey& o) const { return x == o.x && z == o.z && y == o.y && drop == o.drop; }
+};
+struct SeenHash {
+	size_t operator()(const SeenKey& k) const {
+		uint64_t h = 1469598103934665603ull;
+		for (double v : { k.x, k.z, k.y }) {
+			uint64_t b;
+			memcpy(&b, &v, 8);
+			h = (h ^ b) * 1099511628211ull;
+		}
+		return (size_t)(h ^ (uint64_t)k.drop * 0x9E3779B97F4A7C15ull);
+	}
+};
+struct SharedSet {
+	static const int N = 64;
+	std::mutex mu[N];
+	std::unordered_set<SeenKey, SeenHash> sets[N];
+	bool insert(const SeenKey& k) {
+		size_t h = SeenHash{}(k) % N;
+		std::lock_guard<std::mutex> g(mu[h]);
+		return sets[h].insert(k).second;
+	}
+};
+
+static string keyOf(double a, double b, double c) {
+	char buf[96];
+	snprintf(buf, sizeof buf, "%.9g,%.9g,%.9g", a, b, c);
+	return buf;
+}
+
+// firstPerPair: stop looking at a wall pair (pushing wall, clipped wall) once
+// one clip through it is found (like wall_clip_tester.lua's
+// RECORD_ONE_PER_PAIR) - one point per pair, much faster.
+vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
+	auto t0 = std::chrono::steady_clock::now();
+	vector<Pair> pairs = wallPairCandidates(m);
+	SharedSet seen;
+	std::mutex outMu;
+	vector<Clip> clips;
+	std::mutex foundMu;
+	std::set<std::pair<int, int>> foundPairs;
+	auto pairFound = [&](int a, int b) {
+		if (!firstPerPair) return false;
+		std::lock_guard<std::mutex> g(foundMu);
+		return foundPairs.count({ a, b }) > 0;
+	};
+	// Records a clip's pair; false if another thread got there first.
+	auto claimPair = [&](int a, int b) {
+		if (!firstPerPair) return true;
+		std::lock_guard<std::mutex> g(foundMu);
+		return foundPairs.insert({ a, b }).second;
+	};
+	std::atomic<size_t> nextPair{ 0 }, pairsDone{ 0 };
+	// --extended-only: wall pairs (pusher, crossed) with an acute point found
+	// (not kept). That makes the pair acute, so all its points are left out,
+	// extended ones included.
+	std::mutex acuteMu;
+	std::set<std::pair<int, int>> acutePairs;
+	auto markAcute = [&](int a, int b) {
+		std::lock_guard<std::mutex> g(acuteMu);
+		acutePairs.insert({ a, b });
+	};
+
+	auto progress = [&](const char* phase, size_t done, size_t total) {
+		static std::mutex pm;
+		static auto last = std::chrono::steady_clock::now();
+		std::lock_guard<std::mutex> g(pm);
+		auto now = std::chrono::steady_clock::now();
+		if (std::chrono::duration<double>(now - last).count() < 0.5 && done != total) return;
+		last = now;
+		fprintf(stderr, "\r  %s %zu / %zu (%.0fs)   ", phase, done, total, std::chrono::duration<double>(now - t0).count());
+	};
+
+	auto worker1 = [&]() {
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		vector<Clip> local;
+		for (;;) {
+			size_t pi = nextPair++;
+			if (pi >= pairs.size()) break;
+			s.clearCache();
+			const Pair& pr = pairs[pi];
+			nextPositionsForPair(m, s, pr, [&](const NextPos& np) {
+				if (pairFound(pr.A, pr.B)) return;
+				const V3& p = np.p;
+				double h = p.y + m.checkHeight;
+				if (h - GROUND_DROP >= np.lo && h - GROUND_DROP <= np.hi && seen.insert({ p.x, p.z, p.y, 0 })) {
+					if (auto c = standingClip(m, s, p)) {
+						// (extended plane only: an acute one still ends the point, it's just not kept)
+						if (m.extendedOnly && c->acutePoint) markAcute(c->pusher, c->crossed);
+						else if (claimPair(c->pusher, c->crossed)) local.push_back(*c);
+						return;
+					}
+				}
+				for (int k = 2; k <= m.lowDrop; k += 2) {
+					double hk = h - k;
+					if (hk < np.lo || hk > np.hi) continue;
+					if (!seen.insert({ p.x, p.z, p.y, k })) continue;
+					if (auto c = lowClip(m, s, p, k)) {
+						if (m.extendedOnly && c->acutePoint) markAcute(c->pusher, c->crossed);
+						else if (claimPair(c->pusher, c->crossed)) local.push_back(*c);
+						break;
+					}
+				}
+			});
+			progress("wall pairs", ++pairsDone, pairs.size());
+		}
+		std::lock_guard<std::mutex> g(outMu);
+		clips.insert(clips.end(), local.begin(), local.end());
+	};
+
+	// Pushers and the walls each pushes against.
+	std::map<int, vector<int>> partnersOf;
+	std::map<int, vector<const Pair*>> pairsOf;
+	vector<int> pushers;
+	for (const Pair& p : pairs) {
+		if (!partnersOf.count(p.A)) pushers.push_back(p.A);
+		partnersOf[p.A].push_back(p.B);
+		pairsOf[p.A].push_back(&p);
+	}
+	std::atomic<size_t> nextPusher{ 0 }, pushersDone{ 0 };
+
+	auto worker2 = [&]() {
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		vector<Clip> local;
+		for (;;) {
+			size_t ai = nextPusher++;
+			if (ai >= pushers.size()) break;
+			s.clearCache();
+			s.standSpots.clear();
+			const Poly& A = m.polys[pushers[ai]];
+			const vector<int>& partners = partnersOf[A.id];
+			double k = F(m.radius * F(1 / A.nXZ));
+			std::set<std::pair<double, double>> done;
+			// one point per (start, move) frame (the frame's
+			// line check has to hit A, so it can only come from this pusher)
+			std::set<std::array<double, 6>> frames;
+			crossingPointsForWall(m, s, A, pairsOf[A.id], [&](const CrossPoint& cp) {
+				if (done.count({ cp.spotU, cp.spotY })) return;
+				V3 snapped = { F(F(k * A.nx) + cp.p.x), cp.p.y, F(F(k * A.nz) + cp.p.z) };
+				V3 res = m.sphereStep(snapped, LOOSE, nullptr);
+				double h = cp.p.y + m.checkHeight;
+				bool behind = false;
+				for (int bid : partners) {
+					const Poly& B = m.polys[bid];
+					double d = planeDist(B, res.x, h, res.z);
+					if (d >= -3.5 || d < -4 * m.radius) continue;
+					double t = d / B.nMag;
+					if (pointInTri3D(B, res.x - t * B.nx, h - t * B.ny, res.z - t * B.nz, 1) && !pairFound(A.id, bid)) {
+						behind = true;
+						break;
+					}
+				}
+				if (!behind) return;
+				double nx = A.nx * A.invNXZ, nz = A.nz * A.invNXZ;
+				bool anyIn = false;
+				for (double sd : { 3.0, -3.0, 12.0, -12.0 })
+					if (m.isInBounds(s, { cp.p.x + sd * nx, cp.floorY, cp.p.z + sd * nz })) { anyIn = true; break; }
+				if (!anyIn) return;
+				// Falling, he has to land out of bounds: where the snap onto A
+				// and the pushes put him is about where the real frame does (the
+				// move is aimed through the point), so if he lands in bounds from
+				// there and from 2 units around it, don't search for the move.
+				// (About 90% of the falling points; in Kakariko / Kokiri Forest
+				// it lost 1 point of ~7400, one that a 0.01 unit change flips.)
+				if (cp.drop > 0) {
+					bool landsOut = false, noFloor;
+					const double offs[5][2] = { { 0, 0 }, { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 } };
+					for (const auto& o : offs) {
+						V3 q = { res.x + o[0] * nx - o[1] * nz, res.y, res.z + o[0] * nz + o[1] * nx };
+						if (landing(m, s, q, cp.floorY, noFloor)) { landsOut = true; break; }
+					}
+					if (!landsOut) return;
+				}
+				auto r = crossingClip(m, s, A, cp, LOOSE);
+				if (!r) return;
+				done.insert({ cp.spotU, cp.spotY });
+				const CrossFound& f0 = r->first;
+				if (!frames.insert({ f0.prev.x, f0.prev.y, f0.prev.z, f0.next.x, f0.next.y, f0.next.z }).second) return;
+				// the same point without the extended planes
+				auto sr = crossingClip(m, s, A, cp, STRICT);
+				bool strict = sr && sr->first.clip.onFace;
+				if (m.extendedOnly && strict) { markAcute(A.id, r->first.clip.crossed); return; }
+				if (!claimPair(A.id, r->first.clip.crossed)) return;
+				const CrossFound& f = r->first;
+				Clip c;
+				c.acutePoint = strict;
+				c.cross = true; c.drop = cp.drop;
+				c.from = f.at; c.floorY = cp.floorY; c.hasFloorY = true;
+				c.prev = f.prev; c.next = f.next; c.hasNext = true; c.res = f.res; c.end = f.clip.end; c.endNoFloor = f.noFloor;
+				c.yaws = r->second;
+				c.yaw = f.yaw; c.speed = f.speed; c.hasMove = true;
+				c.crossed = f.clip.crossed; c.pusher = A.id;
+				local.push_back(c);
+			});
+			progress("crossing walls", ++pushersDone, pushers.size());
+		}
+		std::lock_guard<std::mutex> g(outMu);
+		clips.insert(clips.end(), local.begin(), local.end());
+	};
+
+	fprintf(stderr, "  %zu wall pairs, %zu pushing walls, %d threads\n", pairs.size(), pushers.size(), threads);
+	{
+		vector<std::thread> ts;
+		for (int i = 0; i < threads; i++) ts.emplace_back(worker1);
+		for (auto& t : ts) t.join();
+	}
+	fprintf(stderr, "\n  standing points: %.1fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+	{
+		vector<std::thread> ts;
+		for (int i = 0; i < threads; i++) ts.emplace_back(worker2);
+		for (auto& t : ts) t.join();
+	}
+	fprintf(stderr, "\n");
+	// Deterministic order: standing points first, then crossings, by position.
+	std::sort(clips.begin(), clips.end(), [](const Clip& a, const Clip& b) {
+		if (a.cross != b.cross) return !a.cross;
+		if (a.pusher != b.pusher) return a.pusher < b.pusher;
+		if (a.from.x != b.from.x) return a.from.x < b.from.x;
+		if (a.from.z != b.from.z) return a.from.z < b.from.z;
+		if (a.from.y != b.from.y) return a.from.y < b.from.y;
+		if (a.drop != b.drop) return a.drop < b.drop;
+		if (a.crossed != b.crossed) return a.crossed < b.crossed;
+		if (a.floorY != b.floorY) return a.floorY < b.floorY;
+		if (a.prev.x != b.prev.x) return a.prev.x < b.prev.x;
+		if (a.prev.z != b.prev.z) return a.prev.z < b.prev.z;
+		return a.acutePoint > b.acutePoint;
+	});
+	// Low standing points can be found through more than one wall pair; keep
+	// one per position.
+	vector<Clip> out;
+	std::unordered_set<string> keep;
+	size_t acuteDropped = 0;
+	for (const Clip& c : clips) {
+		if (m.extendedOnly && acutePairs.count({ c.pusher, c.crossed })) { acuteDropped++; continue; }
+		string k = (c.cross ? "c" : "s") + std::to_string(c.pusher) + ":" + keyOf(c.from.x, c.from.z, c.hasFloorY ? c.floorY : c.from.y);
+		if (!c.cross && !keep.insert(k).second) continue;
+		out.push_back(c);
+	}
+	// One category per wall pair: acute if any of its points is
+	std::set<std::pair<int, int>> acute;
+	for (const Clip& c : out) if (c.acutePoint) acute.insert({ c.pusher, c.crossed });
+	for (Clip& c : out) c.kind = acute.count({ c.pusher, c.crossed }) ? 0 : 1;
+	double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	fprintf(stderr, "  %zu clip points in %.1fs\n", out.size(), secs);
+	if (m.extendedOnly && !acutePairs.empty())
+		fprintf(stderr, "  (extended only: left out %zu acute wall pairs, and their %zu points that aren't acute on their own)\n",
+			acutePairs.size(), acuteDropped);
+	return out;
+}

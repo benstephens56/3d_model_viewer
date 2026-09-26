@@ -21,7 +21,12 @@ so it runs without the MSYS2 DLLs. `-ffp-contract=off` keeps the f32 maths
 from being fused into multiply-adds, which would change the results.
 
 A rebuild fails at the link step (`ld returned 1 exit status`) while
-`clipfinder.exe` is running. Wait for the run to finish first.
+`clipfinder.exe` is running. Wait for the run to finish first, or build a
+copy somewhere else with `OUT=path/to/other.exe sh tools/clipfinder/build.sh`.
+
+The source is in `src/`, split by layer; `src/main.cpp`'s header comment
+lists what each file holds. `-flto=auto` lets the hot collision checks inline across files, so
+the split costs no speed.
 
 ## Examples
 
@@ -71,8 +76,8 @@ the radius, so scan each form you care about.
 
 | Option | Meaning |
 |---|---|
-| `--falling` | Also look for clips while falling ("low" clips). Link's post-move position (posNext) is 2–30 below the floor, so the wall check runs lower than when walking. Slower. Falling crossings are only generated for drops where `checkHeight + dy >= 5`. Beyond that, the game's line test runs from Link's feet with floors included and stops him on his own floor (MM Human: drop over 21.8, OoT: over 21, Crawlspace: over 10). |
-| `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) A point is **acute** when it still clips without the tolerance *and* the push that does it starts with Link in front of the pusher's actual face (projected along its normal onto the triangle); every other walking point is **extended**. A pair with even one acute point is an acute angle clip, so all its points are left out, extended ones included. Falling points that are acute by the same test count too. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
+| `--falling` | Also look for clips while falling ("low" clips, `drop` > 0). Link's post-move position (posNext) is 2–30 below the floor, so the wall check runs lower than when walking. Slower. Falling crossings are only generated for drops where `checkHeight + dy >= 5`. Beyond that, the game's line test runs from Link's feet with floors included and stops him on his own floor (MM Human: drop over 21.8, OoT: over 21, Crawlspace: over 10). |
+| `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) See **Acute or extended** below for how a wall pair is categorised; this leaves out every acute pair, all its points included. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
 | `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them). Needed for `--refine` / `--angles`. |
 
@@ -112,9 +117,10 @@ the radius, so scan each form you care about.
   ],
   "clips": [
     {"form": "Human",
-     "kind": "acute" | "extended" | "low", // low = falling
+     "kind": "acute" | "extended",         // the wall pair's category (below), the same for all its points
+                                           // (files from before 2026-09-26: per point, and "low" for falling ones)
      "cross": true,                        // crossing (moving through the pusher's plane) vs standing point
-     "drop": 0,                            // falling: how far below the floor posNext is
+     "drop": 0,                            // falling: how far below the floor posNext is (0 = walking)
      "pusher": 50, "crossed": 90,          // TRI ids: the wall that pushes, the wall Link ends up behind
      "from": [x, y, z],                    // the clip point (posNext, or where the line test hits)
      "prev": [x, y, z],                    // where Link stands before the frame
@@ -143,6 +149,28 @@ and the tester.
   It reads the walls from RAM, runs the tests for the form Link is in, and
   writes `wall_clip_results.txt`. See the settings at the top of that script
   (`SKIP_FALLING`, `MAX_PER_GROUP`, `FORM`, …).
+
+## Acute or extended
+
+Every wall pair (pushing wall, clipped wall) gets one category, per form, and
+all its points carry it (`kind`), falling ones included:
+
+- **acute** if at least one of its points is acute on its own: it still clips
+  with the extended planes removed (no 1-unit / `detMax 300` tolerance), *and*
+  the push that does it starts with Link in front of the pusher's actual face
+  (his check point projected along the wall's normal lands on the triangle,
+  0.1 of slack for rounding).
+- **extended** otherwise: every point needs the pusher's extended plane.
+
+The face test is there because the game's wall check projects Link onto a
+wall along the Z or X axis, not the wall's normal, so a diagonal wall also
+pushes Link standing beside it, past its end (at 45 degrees as far past as he
+is in front of its plane), with no tolerance at all. `--sim` prints both
+triangles and the verdict for that one frame.
+
+The viewer shows walking and falling clips of each category as separate rows.
+Older result files are made per pair when imported: a pair with any acute
+point is acute.
 
 ## Keeping it in sync
 

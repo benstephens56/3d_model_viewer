@@ -52,7 +52,9 @@ const SPEED_RATE = 1.5;
 
 const ACUTE_COLOR = 0xff3030;
 const EXTENDED_COLOR = 0xff40ff;
-const LOW_COLOR = 0x30c8ff;
+const LOW_ACUTE_COLOR = 0x3070ff;
+const LOW_EXTENDED_COLOR = 0x30e0ff;
+const LOW_COLOR = 0x30c8ff; // falling clips from older files, not split by category
 const PUSHER_COLOR = 0xffd000;
 
 const SNORMAL_FLOOR = Math.trunc(0.5 * 32767);   // COLPOLY_SNORMAL(0.5f)
@@ -660,16 +662,17 @@ const nextTask = () => new Promise(resolve => {
     yieldChannel.port2.postMessage(null);
 });
 
-// One group per (form, pusher, clipped wall, standing / crossing, kind): a
-// pair's points that only clip thanks to the extended planes are their own
-// group. Clips carry their `form` and the `model` (radius, check height) they
-// were found with.
+// One group per (form, pusher, clipped wall, standing / crossing, cat).
+// `cat` is how a clip is shown: its wall pair's category (`kind`, acute or
+// extended), with falling ones ("low-acute" / "low-extended") apart; "low" for
+// falling clips from files older than the per-pair categories. Clips carry
+// their `form` and the `model` (radius, check height) they were found with.
 function groupClips(clips) {
     const groups = new Map();
     for (const c of clips) {
-        const key = [c.form ?? "", c.pusher.id, c.crossed.id, c.cross ? "cross" : "stand", c.kind].join(":");
+        const key = [c.form ?? "", c.pusher.id, c.crossed.id, c.cross ? "cross" : "stand", c.cat].join(":");
         let g = groups.get(key);
-        if (!g) groups.set(key, g = { pusher: c.pusher, crossed: c.crossed, cross: !!c.cross, kind: c.kind, clips: [], form: c.form, model: c.model });
+        if (!g) groups.set(key, g = { pusher: c.pusher, crossed: c.crossed, cross: !!c.cross, cat: c.cat, clips: [], form: c.form, model: c.model });
         g.clips.push(c);
     }
     return [...groups.values()];
@@ -706,10 +709,23 @@ function describeClip(g, c, checkHeight) {
     return [lines[0], form + lines.slice(1).join("\n")].join("\n") + "\n" + describeReach(c);
 }
 
+const CAT_TITLES = {
+    acute: "acute angle", extended: "extended plane only",
+    "low-acute": "falling, acute angle", "low-extended": "falling, extended plane only", low: "falling",
+};
+
+// What the wall pair's category means (none for older files' falling clips).
+function pairLine(g) {
+    if (g.cat === "low") return [];
+    return [g.cat.endsWith("acute")
+        ? `  wall pair: acute angle (at least one of its points clips with the extended planes removed)`
+        : `  wall pair: extended plane only (every point needs TRI ${g.pusher.id}'s extended plane: its 1 unit tolerance, or Link beside it, past its edge)`];
+}
+
 function describeClipLines(g, c, checkHeight) {
     const behind = -planeDist(g.crossed, c.end.x, F(c.from.y + checkHeight), c.end.z);
+    const title = CAT_TITLES[g.cat];
     if (c.cross) {
-        const title = { acute: "acute angle", extended: "extended plane only", low: "falling" }[g.kind];
         return [
             `WALL CROSSING CLIP (${title}): crossing TRI ${g.pusher.id} puts Link through TRI ${g.crossed.id}`,
             `  move through: ${fmt(c.from)} (feet; the crossing is ${+checkHeight.toPrecision(7)} above)`,
@@ -722,20 +738,21 @@ function describeClipLines(g, c, checkHeight) {
             c.drop > 0
                 ? (c.end.noFloor ? `  no floor under where he's pushed to: falls out of bounds` : `  lands at: ${fmt(c.end)} (out of bounds)`)
                 : `  after 2 more frames: ${fmt(c.end)} (${behind.toFixed(3)} units behind TRI ${g.crossed.id})`,
-            ...(c.drop > 0 ? [] : [`  this point ${c.kind === "acute" ? "also clips with the extended planes removed" : `needs TRI ${g.pusher.id}'s extended plane (no clip without the tolerance, or Link is beside it, past its edge)`}`]),
+            ...pairLine(g),
         ].join("\n");
     }
-    if (c.kind === "low") {
+    if (c.drop > 0) {
         return [
-            `LOW WALL CLIP (falling): TRI ${g.pusher.id} pushes Link through TRI ${g.crossed.id}`,
+            `LOW WALL CLIP (${title}): TRI ${g.pusher.id} pushes Link through TRI ${g.crossed.id}`,
             `  Link at:   ${fmt(c.from)} (after moving there, e.g. from ${fmt(c.prev)})`,
             `  that's ${c.drop} below the floor (y ${f32Str(c.floorY)}): falling at y velocity ${(-c.drop / 1.5).toFixed(2)} or faster this frame`,
             `  pushed to: ${fmt(c.res)}`,
             c.end.noFloor ? `  no floor under where he's pushed to: falls out of bounds` : `  lands at:  ${fmt(c.end)} (out of bounds)`,
+            ...pairLine(g),
         ].join("\n");
     }
     return [
-        `WALL PUSH CLIP (${g.kind === "acute" ? "acute angle" : "extended plane only"}): ` +
+        `WALL PUSH CLIP (${title}): ` +
             `TRI ${g.pusher.id} pushes Link through TRI ${g.crossed.id}`,
         ...(c.speed !== undefined ? [
             `  stand still at ${fmt(c.prev)} (feet), move at yaw ${hex4(c.yaw)} with speed ${f32Str(c.speed).split(" ")[0]}`,
@@ -743,7 +760,7 @@ function describeClipLines(g, c, checkHeight) {
         ] : [`  Link at:   ${fmt(c.from)} (after moving there, e.g. from ${fmt(c.prev)})`]),
         `  pushed to: ${fmt(c.res)}`,
         `  after 2 more frames: ${fmt(c.end)} (${behind.toFixed(3)} units behind TRI ${g.crossed.id})`,
-        `  this point ${c.kind === "acute" ? "also clips with the extended planes removed" : `needs TRI ${g.pusher.id}'s extended plane (no clip without the tolerance, or Link is beside it, past its edge)`}`,
+        ...pairLine(g),
     ].join("\n");
 }
 
@@ -822,7 +839,15 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
     return group;
 }
 
-const MODEL_NAMES = { acute: "Acute Angle Clips", extended: "Extended Plane Clips", low: "Low Wall Clips (falling)" };
+const MODEL_NAMES = {
+    acute: "Acute Angle Clips", extended: "Extended Plane Clips",
+    "low-acute": "Low Wall Clips (falling, acute)", "low-extended": "Low Wall Clips (falling, extended)",
+    low: "Low Wall Clips (falling)",
+};
+const CAT_COLORS = {
+    acute: ACUTE_COLOR, extended: EXTENDED_COLOR,
+    "low-acute": LOW_ACUTE_COLOR, "low-extended": LOW_EXTENDED_COLOR, low: LOW_COLOR,
+};
 
 // The marker rows added (one per kind, or per kind and form for imported
 // results with several forms), to take away again.
@@ -858,7 +883,7 @@ function exportJson(groups, info) {
     for (const g of groups) {
         for (const c of g.clips) {
             const f = [
-                `"form":${JSON.stringify(g.form)}`, `"kind":"${g.kind}"`, `"cross":${!!c.cross}`,
+                `"form":${JSON.stringify(g.form)}`, `"kind":"${c.kind}"`, `"cross":${!!c.cross}`,
                 `"drop":${c.drop ?? 0}`, `"pusher":${g.pusher.id}`, `"crossed":${g.crossed.id}`,
                 `"from":${vec(c.from)}`, `"prev":${vec(c.prev)}`,
             ];
@@ -868,7 +893,6 @@ function exportJson(groups, info) {
             if (c.floorY !== undefined) f.push(`"floorY":${num(c.floorY)}`);
             if (c.yaws) f.push(`"yaws":[${c.yaws.join(",")}]`);
             if (c.speed !== undefined) f.push(`"yaw":${c.yaw & 0xFFFF}`, `"speed":${num(c.speed)}`);
-            if (c.strict) f.push(`"strict":true`);
             if (c.reach === null) f.push(`"reach":null`);
             else if (c.reach) f.push(`"reach":{"speed":${num(c.reach.speed)},"yaw":${c.reach.yaw & 0xFFFF},"start":${vec(c.reach.start)}}`);
             clips.push(`    {${f.join(",")}}`);
@@ -894,9 +918,9 @@ function exportJson(groups, info) {
 function logGroups(groups) {
     const xyz = p => [p.x, p.y, p.z].map(v => f32Str(v).split(" ")[0]).join(", ");
     const rows = groups.map(g => {
-        const c = g.clips.find(c => c.kind === g.kind);
+        const c = g.clips[0];
         return {
-            kind: g.kind,
+            kind: g.cat,
             type: g.cross ? "crossing" : "standing",
             pusherPoly: g.pusher.id,
             clippedPoly: g.crossed.id,
@@ -971,8 +995,8 @@ export function setupWallPushClipUI(scene) {
                 .filter(g => g.clips.length > 0)
             : last.groups;
         const byKind = {};
-        for (const kind of Object.keys(MODEL_NAMES)) byKind[kind] = shown.filter(g => g.kind === kind);
-        const colors = { acute: ACUTE_COLOR, extended: EXTENDED_COLOR, low: LOW_COLOR };
+        for (const cat of Object.keys(MODEL_NAMES)) byKind[cat] = shown.filter(g => g.cat === cat);
+        const colors = CAT_COLORS;
         // Several forms: a row per kind and form, each drawn with its own
         // form's radius and check height
         const several = last.forms.length > 1;
@@ -989,7 +1013,9 @@ export function setupWallPushClipUI(scene) {
             }
         }
         const points = kind => byKind[kind].reduce((n, g) => n + g.clips.length, 0);
-        status.textContent = `${points("acute")} acute, ${points("extended")} extended-plane, ${points("low")} low (falling) ` +
+        const low = points("low-acute") + points("low-extended") + points("low");
+        status.textContent = `${points("acute")} acute, ${points("extended")} extended-plane, ${low} low (falling` +
+            (points("low") ? "" : `: ${points("low-acute")} acute, ${points("low-extended")} extended`) + `) ` +
             `clip points${reachableChk.checked ? ` reachable at speed ${maxSpeed}` : ""} (${last.note})`;
         window.wallPushClips = shown;
     };
@@ -1091,10 +1117,20 @@ export function setupWallPushClipUI(scene) {
             if (c.floorY !== undefined) clip.floorY = c.floorY;
             if (c.yaws) clip.yaws = c.yaws;
             if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
-            if (c.strict) clip.strict = true;
             // clipfinder --min-speed: the reachability already worked out
             if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
             clips.push(clip);
+        }
+        // One category per wall pair: files from before that could give a
+        // pair's points different ones (and "low" for all falling points), so a
+        // pair with any acute point is acute; their falling points too, and
+        // falling points of other pairs stay "low" (category not known)
+        const acutePairs = new Set(clips.filter(c => c.kind === "acute").map(c => `${c.form}:${c.pusher.id}:${c.crossed.id}`));
+        for (const c of clips) {
+            const acute = acutePairs.has(`${c.form}:${c.pusher.id}:${c.crossed.id}`);
+            if (c.kind === "low") { if (acute) c.kind = "acute"; }
+            else c.kind = acute ? "acute" : "extended";
+            c.cat = c.kind === "low" ? "low" : (c.drop > 0 ? "low-" : "") + c.kind;
         }
         const groups = groupClips(clips);
         last = {

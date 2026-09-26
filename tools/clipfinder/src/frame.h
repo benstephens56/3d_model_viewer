@@ -1,0 +1,47 @@
+// clipfinder: one frame of Link's movement and wall pushes, and whether it clips; where he can stand.
+#pragma once
+
+#include "collision.h"
+
+// How far back a frame's start is tried from (MOVE_STEPS),
+// and how far a frame's move can go for reachability (REACH_DIST: speed 30
+// moves 45). --max-move N: both up to N units a frame (speed N / 1.5); over
+// 45 the starts go on every 4 past 32. Set once in main, before any scan.
+static const double DEFAULT_MAX_MOVE = 45;
+extern vector<double> MOVE_STEPS;
+extern double REACH_DIST;
+// onFace: the push that took Link through started with him in front of the
+// pusher's actual face (see pushOnFace), not beside it.
+struct ClipResult { int crossed, pusher; V3 end; bool onFace; };
+struct LineFrameR { Hit hit; V3 res; PushList trace; };
+
+void setMaxMove(double n);
+
+// Whether a wall push started with Link in front of the wall itself: his
+// sphere centre, projected onto the wall along its normal, lands on the
+// triangle. The game's wall check projects along the Z or X axis instead
+// (CollisionPoly_Check[ZX]IntersectApprox), so a diagonal wall also pushes
+// Link standing past its end, in front of its extended plane - as far past as
+// he is in front of it at 45 degrees - on top of the 1 unit / detMax 300
+// tolerance. A line test's snap is on the triangle already.
+// The distance is measured from a vertex, not with the poly's stored plane
+// distance: that's a whole number, so the plane can sit up to 0.5 off the
+// triangle, enough to put a point on the edge two walls share (OoT Hyrule
+// Field TRI 1286 / 1288, 0.006 inside 1286) past it. The 0.1 slack covers the
+// rest (the normal is stored as s16s).
+bool pushOnFace(const Model& m, const Push& t);
+
+// rayFromY (prevPos.y, walking; NAN = none): the frame's floor check first
+// (wall_push_clips.js clipFromFrame).
+std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const V3& prev, const V3& res,
+	const PushList& trace, const Tol& tol, double rayFromY = NAN);
+
+std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3& prev, const V3& next, const Tol& tol);
+
+std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor);
+
+// wall_push_clips.js standSpot: where Link can stand still near (x, z).
+std::optional<V3> standSpot(const Model& m, double x, double z, double floorY);
+
+// standSpot through the thread's cache (Scratch::standSpots).
+std::optional<V3> standSpotCached(const Model& m, Scratch& s, double x, double z, double floorY);

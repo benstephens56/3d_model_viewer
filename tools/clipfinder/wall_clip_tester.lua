@@ -44,7 +44,7 @@
 local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\oot2\OOT_Spirit_Temple_Adult_Child_falling.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
-local SKIP_FALLING = false        -- true: leave out the falling clips (kind "low", from --falling scans)
+local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --falling scans)
 local SETTLE_FRAMES = 30          -- emulated frames to let run after the test frame (3 per game frame)
 local HOOK_TIMEOUT = 60           -- emulated frames to wait for the player's bg check
 local HOLD_FRAMES = 9             -- "move": emulated frames Link is held at the start first
@@ -287,7 +287,11 @@ local function testsFromJson(path)
 	local key3 = function(v) return string.format("%.9g,%.9g,%.9g", v[1], v[2], v[3]) end
 	for _, c in ipairs(data.clips) do
 		local form = data.forms and c.form or nil
-		local gk = table.concat({ form or "", c.pusher, c.crossed, c.cross and "cross" or "stand", c.kind }, ":")
+		-- falling clips: "low-acute" / "low-extended" (their wall pair's category),
+		-- or "low" from files older than the per-pair categories
+		local kind = c.kind
+		if kind ~= "low" and (c.drop or 0) > 0 then kind = "low-" .. kind end
+		local gk = table.concat({ form or "", c.pusher, c.crossed, c.cross and "cross" or "stand", kind }, ":")
 		if not groupOf[gk] then nGroups = nGroups + 1; groupOf[gk] = nGroups end
 		local prev, nxt
 		if c.cross or c.speed then
@@ -302,7 +306,7 @@ local function testsFromJson(path)
 		if not seen[k] then
 			seen[k] = true
 			T.tests[#T.tests + 1] = {
-				group = groupOf[gk], form = form, kind = c.kind, type = c.cross and "cross" or "stand",
+				group = groupOf[gk], form = form, kind = kind, type = c.cross and "cross" or "stand",
 				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt,
 				yaw = c.speed and c.yaw or nil, speed = c.speed, expect = vec(c["end"]),
 			}
@@ -515,7 +519,7 @@ end
 if SKIP_FALLING then
 	local kept = {}
 	for _, t in ipairs(tests) do
-		if t.kind ~= "low" then kept[#kept + 1] = t end
+		if not t.kind:find("^low") then kept[#kept + 1] = t end
 	end
 	print(string.format("SKIP_FALLING: left out %d falling tests", #tests - #kept))
 	tests = kept
@@ -645,13 +649,13 @@ local function runTest(t, mode)
 		end
 		writefloat(K.player + K.speedXZ, speed)
 		r.yaw, r.speed = yaw, speed
-		-- Falling tests (kind "low"): `next` is `drop` below the floor, not the
+		-- Falling tests (kind "low..."): `next` is `drop` below the floor, not the
 		-- usual GROUND_DROP, so give him the y velocity that gets there. Written
 		-- where the last frame's floor check left it (-4 standing), before the
 		-- frame's gravity (-1) and Actor_UpdatePos (x1.5): velocity.y ends up
 		-- -drop / 1.5 (at most -20, the terminal velocity, for the 30 drop).
 		local drop = t.prev[2] - t.next[2]
-		if t.kind == "low" or drop > 7.5 + 0.01 then
+		if t.kind:find("^low") or drop > 7.5 + 0.01 then
 			r.velY = -drop / 1.5 + 1
 			writefloat(K.player + K.velocity + 4, r.velY)
 		end

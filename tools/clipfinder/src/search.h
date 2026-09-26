@@ -1,0 +1,35 @@
+// clipfinder: the scan for wall push clips over a whole map.
+#pragma once
+
+#include "frame.h"
+
+struct Clip {
+	// The wall pair's category, the same for all its points (walking and
+	// falling): 0 acute if any of the pair's points is an acutePoint, else 1
+	// extended. Set at the end of the scan.
+	int kind = 1;
+	// This point on its own clips without the extended planes, pushed from in
+	// front of the pusher's face (pushOnFace)
+	bool acutePoint = false;
+	bool cross = false;
+	int drop = 0;         // falling: posNext this far below the floor (0 walking)
+	int pusher = -1, crossed = -1;
+	V3 from, prev, next, res, end;
+	bool hasNext = false, hasFloorY = false, endNoFloor = false;
+	double floorY = 0;
+	vector<int> yaws;
+	int yaw = 0;          // crossings and standing points: the exact move (s16 yaw, f32 speed)
+	bool hasMove = false;
+	double speed = 0;
+	// --min-speed: the slowest move from a standable start that does it
+	// (reachability below); reachDone and no reach = none found
+	bool reachDone = false, hasReach = false;
+	double reachSpeed = 0;
+	int reachYaw = 0;
+	V3 reachStart;
+};
+
+// firstPerPair: stop looking at a wall pair (pushing wall, clipped wall) once
+// one clip through it is found (like wall_clip_tester.lua's
+// RECORD_ONE_PER_PAIR) - one point per pair, much faster.
+vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false);
