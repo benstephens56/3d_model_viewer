@@ -1,8 +1,8 @@
 -- Wall push clip tester (BizHawk, N64 OoT US 1.0 / MM US, Mupen64Plus core)
 --
 -- Tries, in the game, every clip point in a results JSON - from
--- tools/clipfinder, or from the 3d_model_viewer ("Find wall push clips" ->
--- "Export JSON") - and writes a summary of the ones that worked.
+-- tools/clipfinder, or the 3d_model_viewer's "Export JSON" of imported
+-- results (e.g. just the reachable ones) - and writes a summary of the ones that worked.
 --
 -- How a test runs: the game's own wall check does the work. A callback on
 -- Actor_UpdateBgCheckInfo (code segment, so its address is fixed) catches the

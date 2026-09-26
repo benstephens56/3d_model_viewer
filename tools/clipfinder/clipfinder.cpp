@@ -1,12 +1,12 @@
-// clipfinder: the viewer's wall push clip scan (js/wall_push_clips.js), native
-// and multithreaded. Reads an OoT / MM scene from models/, builds the same
-// collision model the viewer does (js/parse_model.js, js/subdivisions.js), runs
-// the same search and writes the points as JSON for the viewer's "Import
-// results" button.
+// clipfinder: the wall push clip scan, native and multithreaded. Reads an
+// OoT / MM scene from models/, builds the same collision model the viewer does
+// (js/parse_model.js, js/subdivisions.js), runs the search and writes the
+// points as JSON for the viewer's "Import results" button.
 //
-// Every computation mirrors the JS line for line: doubles with F() wherever the
-// JS has Math.fround, so the numbers come out identical. See the JS for why
-// each step is the way it is; the comments here only cover what's different.
+// The collision model, clipFromFrame, standSpot, landing and reachability are
+// also in js/wall_push_clips.js (for the viewer's "Reachable only") and have to
+// stay in step with it: doubles with F() wherever the JS has Math.fround, so
+// the numbers come out identical. The JS explains the game side of each step.
 //
 // Build (MSYS2 mingw64):  see build.sh next to this file.
 // Usage:
@@ -765,7 +765,7 @@ struct Model {
 static const double NEXT_STEP = 0.5;
 static const double CROSS_STEP = 0.25;
 static const double FLOOR_BLOCK = 4;
-// How far back a frame's start is tried from (wall_push_clips.js MOVE_STEPS),
+// How far back a frame's start is tried from (MOVE_STEPS),
 // and how far a frame's move can go for reachability (REACH_DIST: speed 30
 // moves 45). --max-move N: both up to N units a frame (speed N / 1.5); over
 // 45 the starts go on every 4 past 32. Set once in main, before any scan.
@@ -846,9 +846,8 @@ static std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const
 
 struct Pair { int A, B; double cosAB, lo, hi, x0, x1, z0, z1; };
 
-// Triangle-triangle distance (wall_push_clips.js triTriDist): 0 if an edge of
-// one passes through the other, else the smallest vertex-triangle / edge-edge
-// distance.
+// Triangle-triangle distance: 0 if an edge of one passes through the other,
+// else the smallest vertex-triangle / edge-edge distance.
 using D3 = std::array<double, 3>;
 static D3 sub3(const D3& a, const D3& b) { return { a[0] - b[0], a[1] - b[1], a[2] - b[2] }; }
 static double dot3(const D3& a, const D3& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
@@ -936,7 +935,7 @@ static vector<Pair> wallPairCandidates(const Model& m) {
 	vector<Pair> pairs;
 	std::unordered_set<int64_t> seen;
 	const double R = m.radius, E = R + REACH;
-	const double reach = 2 * m.radius + 42; // wall_push_clips.js pairReach
+	const double reach = 2 * m.radius + 42;
 	for (const auto& sub : m.colCtx.subWalls) {
 		if (sub.size() < 2) continue;
 		vector<int> walls;
@@ -977,7 +976,7 @@ static bool planesMeet(const Poly& A, const Poly& B, double h, double a, double 
 	return true;
 }
 
-// wall_push_clips.js cornerBox: the bounding box of the parallelogram (within
+// cornerBox: the bounding box of the parallelogram (within
 // radius in front of A or 4 behind it, at most radius + 4 in front of B)
 // around where the planes meet, over check heights [lo, hi], plus a unit.
 static bool cornerBox(const Poly& A, const Poly& B, double R, double lo, double hi, double box[4]) {
@@ -1051,7 +1050,7 @@ static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, c
 	for (x = std::ceil(x0 / step) * step; x <= x1; x += step) {
 		for (z = std::ceil(z0 / step) * step; z <= z1; z += step) {
 			if (!anyHeight()) continue;
-			// floorsNear() of the JS: a Set in insertion order
+			// floor heights around the point, in the order first found
 			ys.clear();
 			auto add = [&](double y) { if (std::find(ys.begin(), ys.end(), y) == ys.end()) ys.push_back(y); };
 			for (double y : m.floorsAt(x, z)) add(y);
@@ -1153,7 +1152,7 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 				if (drop > 0 && (ui % 2)) break;
 				// (walking, posNext is GROUND_DROP below the floor)
 				double low = F(y - (drop ? drop : GROUND_DROP));
-				// wall_push_clips.js: checkHeight + dy < 5 makes the game's line
+				// checkHeight + dy < 5 makes the game's line
 				// test run at the feet with floors, which stops Link on the
 				// floor he starts from - bigger drops can't clip crossing
 				if (F(ch + F(low - y)) < 5) break;
@@ -1334,7 +1333,7 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 	auto clip = clipFromFrame(m, s, p, res, trace, LOOSE, floorPt.y);
 	if (!clip) return std::nullopt;
 	if (!m.isInBounds(s, floorPt) || m.isInBounds(s, clip->end)) return std::nullopt;
-	// Link walks there himself (wall_push_clips.js walkInto): the game's move
+	// Link walks there himself: the game's move
 	// stops a hair off p, so the frame is checked again where he ends up.
 	for (double dist : MOVE_STEPS) {
 		for (int i = 0; i < 16; i++) {
@@ -1807,7 +1806,7 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 			const vector<int>& partners = partnersOf[A.id];
 			double k = F(m.radius * F(1 / A.nXZ));
 			std::set<std::pair<double, double>> done;
-			// one point per (start, move) frame (JS crossFrames; the frame's
+			// one point per (start, move) frame (the frame's
 			// line check has to hit A, so it can only come from this pusher)
 			std::set<std::array<double, 6>> frames;
 			crossingPointsForWall(m, s, A, pairsOf[A.id], [&](const CrossPoint& cp) {
@@ -1905,8 +1904,8 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 		if (a.prev.z != b.prev.z) return a.prev.z < b.prev.z;
 		return a.kind < b.kind;
 	});
-	// Low standing points can be found through more than one wall pair (the
-	// JS keeps the first); keep one per position.
+	// Low standing points can be found through more than one wall pair; keep
+	// one per position.
 	vector<Clip> out;
 	std::unordered_set<string> keep;
 	size_t acuteDropped = 0;

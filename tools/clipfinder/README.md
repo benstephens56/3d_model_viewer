@@ -1,11 +1,11 @@
 # clipfinder
 
-A native, multithreaded version of the viewer's wall push clip scan
-(`js/wall_push_clips.js`) for OoT and MM. It reads a scene from `models/`,
-builds the same collision model the viewer does, and runs the same search in
-the same f32 arithmetic. It writes the clip points as JSON, which you can load
-with the viewer's **Import results** button or run in game with
-`tools/clipfinder/wall_clip_tester.lua`.
+The wall push clip scan for OoT and MM, native and multithreaded. (It began as
+a port of an in-browser scan in the viewer, since removed as too slow.) It
+reads a scene from `models/`, builds the same collision model the viewer does,
+and runs the search in the game's f32 arithmetic. It writes the clip points as
+JSON, which you can load with the viewer's **Import results** button or run in
+game with `tools/clipfinder/wall_clip_tester.lua`.
 
 It also has tools for studying a single clip: the lowest speed that does it,
 the angles that work, and a step-by-step single-frame simulation.
@@ -146,10 +146,8 @@ and the tester.
 
 ## Keeping it in sync
 
-clipfinder and `js/wall_push_clips.js` should produce the same points for the
-same map and form. A change to the search in one belongs in the other too.
-Two exceptions:
-
-- `--min-speed` also runs the frame for standing points, which the viewer's
-  "Reachable only" doesn't.
-- `--refine`, `--angles` and `--sim` exist only here.
+The search lives only here. `js/wall_push_clips.js` still has the collision
+model, `clipFromFrame`, `standSpot`, `landing` and `reachability`, for the
+viewer's "Reachable only" on files without `--min-speed` data. A change to
+those belongs in both. One difference: `--min-speed` also runs the frame for
+standing points, which the viewer's "Reachable only" doesn't.
