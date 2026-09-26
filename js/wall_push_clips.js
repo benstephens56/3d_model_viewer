@@ -562,7 +562,12 @@ function clipFromFrame(model, prev, res, trace, tol, rayFromY = null) {
     const s1 = model.sphereStep(at, tol, null);
     const s2 = model.sphereStep(s1, tol, null);
     const from2 = { x: prev.x, y: at.y, z: prev.z };
-    if (model.crossedWall(from2, s2) !== crossed) return null;
+    // Still through the same wall - or, landed at another height, through any:
+    // there it can be another triangle (MM Treasure Chest Shop: pushed through
+    // the 40 high counter front TRI 90, he lands on its top, behind TRI 73/74
+    // of the wall above it - in-game that clips walking at speed 11)
+    const held = model.crossedWall(from2, s2);
+    if (landY === null ? held !== crossed : !held) return null;
     // Out the other side of a thin wall: through it, not out of bounds.
     if (model.crossedWall(from2, s2, true)) return null;
     const end = landY === null ? s2 : { x: s2.x, y: landY, z: s2.z };
@@ -930,6 +935,13 @@ function* crossingPointsForWall(model, A, pairsA) {
                 if (drop > 0 && ui % 2) break;
                 // (walking, posNext is GROUND_DROP below the floor)
                 const low = F(y - (drop || GROUND_DROP));
+                // BgCheck_CheckWallImpl: when checkHeight + dy < 5 its line
+                // test runs from prevPos to posNext at the feet, floors
+                // included, instead of level at posNext.y + checkHeight. From a
+                // start on the floor that line hits the floor where it starts
+                // and Link stays put (seen in-game, MM Ikana Castle, drop 26),
+                // so crossings with a bigger drop can't clip.
+                if (F(ch + F(low - y)) < 5) break;
                 const h = F(low + ch);
                 if (h < A.minY - 1 || h > A.maxY + 1) continue;
                 const i = onPlane(u, h);
@@ -1226,6 +1238,10 @@ async function scanWallPushClips(model, onProgress) {
     const pairs = wallPairCandidates(model);
     const seen = new Set();
     const clips = [];
+    // Extended plane only: wall pairs with a point that clips without the
+    // extended planes too (acute angle clips)
+    const acutePairs = new Set();
+    const pairKey = c => c.pusher.id + ":" + c.crossed.id;
 
     let lastYield = performance.now();
     for (let pi = 0; pi < pairs.length; pi++) {
@@ -1237,8 +1253,9 @@ async function scanWallPushClips(model, onProgress) {
                 const c = standingClip(model, p);
                 if (c) {
                     // (extended plane only: an acute one is still found, so the
-                    // point is done with, just not kept)
-                    if (!(model.extendedOnly && c.kind === "acute")) clips.push(c);
+                    // point is done with, just not kept - and its pair is acute)
+                    if (model.extendedOnly && c.kind === "acute") acutePairs.add(pairKey(c));
+                    else clips.push(c);
                     continue;
                 }
             }
@@ -1251,7 +1268,8 @@ async function scanWallPushClips(model, onProgress) {
                 seen.add(lowKey);
                 const c = lowClip(model, p, k);
                 if (c) {
-                    if (!(model.extendedOnly && c.strict)) clips.push(c);
+                    if (model.extendedOnly && c.strict) acutePairs.add(pairKey(c));
+                    else clips.push(c);
                     break;
                 }
             }
@@ -1315,7 +1333,7 @@ async function scanWallPushClips(model, onProgress) {
             // (extended plane only: falling ones are checked without the
             // extended planes too, and the ones that still clip left out)
             const strict = (p.drop === 0 || model.extendedOnly) && crossingClip(model, A, p, STRICT);
-            if (model.extendedOnly && strict) continue;
+            if (model.extendedOnly && strict) { acutePairs.add(A.id + ":" + clip.crossed.id); continue; }
             clips.push({
                 kind: p.drop > 0 ? "low" : strict ? "acute" : "extended", cross: true, drop: p.drop,
                 from: clip.at, floorY: p.floorY, prev: clip.prev, next: clip.next, res: clip.res, end: clip.end, yaws: clip.yaws,
@@ -1332,6 +1350,9 @@ async function scanWallPushClips(model, onProgress) {
         }
     }
 
+    // Extended plane only: a wall pair with any point that also clips without
+    // the extended planes is an acute angle clip, so all its points go.
+    if (model.extendedOnly) return clips.filter(c => !acutePairs.has(pairKey(c)));
     return clips;
 }
 
@@ -1678,11 +1699,14 @@ export function setupWallPushClipUI(scene) {
             ? last.groups.map(g => ({ ...g, clips: g.clips.filter(c => c.reach && c.reach.speed <= maxSpeed) }))
                 .filter(g => g.clips.length > 0)
             : last.groups;
-        // Extended plane only also hides acute ones already found (a scan
-        // without it, or imported results)
+        // Extended plane only also hides acute clips already found (a scan
+        // without it, or imported results): every wall pair (per form) with
+        // at least one acute point - or falling one that clips without the
+        // extended planes - is an acute angle clip, all its points hidden
         if (extendedOnlyChk.checked) {
-            shown = shown.map(g => ({ ...g, clips: g.clips.filter(c => c.kind !== "acute" && !c.strict) }))
-                .filter(g => g.clips.length > 0);
+            const key = g => (g.form ?? "") + ":" + g.pusher.id + ":" + g.crossed.id;
+            const acute = new Set(last.groups.filter(g => g.kind === "acute" || g.clips.some(c => c.strict)).map(key));
+            shown = shown.filter(g => !acute.has(key(g)));
         }
         const byKind = {};
         for (const kind of Object.keys(MODEL_NAMES)) byKind[kind] = shown.filter(g => g.kind === kind);
@@ -1818,11 +1842,14 @@ export function setupWallPushClipUI(scene) {
             if (c.yaws) clip.yaws = c.yaws;
             if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
             if (c.strict) clip.strict = true;
+            // clipfinder --min-speed: the reachability already worked out
+            if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
             clips.push(clip);
         }
         const groups = groupClips(clips);
         const formNames = forms.map(f => f.form).join(", ");
         last = { groups, model, forms, formLabel: formNames, checkHeight: model.checkHeight, note: `imported ${formNames}${data.falling ? ", falling" : ""}${data.extendedOnly ? ", extended plane only" : ""}` };
+        if (clips.length > 0 && clips.every(c => c.reach !== undefined)) last.reachDone = true;
         if (data.map !== map) console.warn(`wall push clips: ${file.name} says map "${data.map}", "${map}" is loaded (same polygon count)`);
         render();
         logGroups(groups);

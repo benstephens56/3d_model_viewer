@@ -36,9 +36,14 @@
 -- Settings
 ---------------------------------------------------------------------------
 
-local TESTS_FILE = nil            -- nil: wall_clip_tests.lua next to this script
+-- nil: wall_clip_tests.lua next to this script. Can also be a .json from
+-- tools/clipfinder (e.g. [[C:\...\results\OOT_Spot_01_-_Kakariko_Village_All.json]]):
+-- its clips are turned into tests the way the viewer's export does, with the
+-- walls read from RAM (load that map first).
+local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\tcs_50_90.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
+local SKIP_FALLING = false        -- true: leave out the falling clips (kind "low", from --falling scans)
 local SETTLE_FRAMES = 30          -- emulated frames to let run after the test frame (3 per game frame)
 local HOOK_TIMEOUT = 60           -- emulated frames to wait for the player's bg check
 local HOLD_FRAMES = 9             -- "move": emulated frames Link is held at the start first
@@ -49,7 +54,7 @@ local FAST = true                 -- skip drawing while testing (client.invisibl
 -- facing the way he'll go, and Z is tapped - Z-targeting nothing swings the
 -- camera behind him), and pauses RECORD_BUFFER emulated frames (60 a second)
 -- before and after each one. Off by default.
-local RECORD = true
+local RECORD = false
 local RECORD_BUFFER = 90
 local RECORD_ONE_PER_PAIR = true  -- recording: once a wall pair's test works, skip the rest of that pair's
 if RECORD then FAST = false end
@@ -163,7 +168,145 @@ local function staticCollision()
 		end
 		return out
 	end
-	return numPolygons, polyVerts
+	-- (CollisionPoly normal at +0x8, dist at +0xE: the export's n and d)
+	local function polyPlane(id)
+		local poly = polyList + id * 0x10
+		return { read_s16(poly + 0x8), read_s16(poly + 0xA), read_s16(poly + 0xC) }, read_s16(poly + 0xE)
+	end
+	return numPolygons, polyVerts, polyPlane
+end
+
+-- A small JSON reader (objects, arrays, strings, numbers, true/false/null),
+-- for clipfinder's results files: BizHawk's Lua has none built in.
+local function parseJson(text)
+	local pos = 1
+	local function fail(msg) error(string.format("bad JSON at character %d: %s", pos, msg)) end
+	local function ws() pos = text:find("[^ \t\r\n]", pos) or #text + 1 end
+	local value
+	local function str()
+		local out, i = {}, pos + 1
+		while true do
+			local c = text:sub(i, i)
+			if c == "" then fail("unterminated string") end
+			if c == '"' then pos = i + 1; return table.concat(out) end
+			if c == "\\" then
+				local e = text:sub(i + 1, i + 1)
+				local map = { n = "\n", t = "\t", r = "\r", b = "\b", f = "\f" }
+				if e == "u" then local cp = tonumber(text:sub(i + 2, i + 5), 16) or 63
+				out[#out + 1] = (utf8 and utf8.char(cp)) or (cp < 256 and string.char(cp)) or "?"; i = i + 6
+				else out[#out + 1] = map[e] or e; i = i + 2 end
+			else
+				out[#out + 1] = c
+				i = i + 1
+			end
+		end
+	end
+	function value()
+		ws()
+		local c = text:sub(pos, pos)
+		if c == "{" then
+			local obj = {}
+			pos = pos + 1; ws()
+			if text:sub(pos, pos) == "}" then pos = pos + 1; return obj end
+			while true do
+				ws()
+				if text:sub(pos, pos) ~= '"' then fail("expected a key") end
+				local k = str()
+				ws()
+				if text:sub(pos, pos) ~= ":" then fail("expected ':'") end
+				pos = pos + 1
+				obj[k] = value()
+				ws()
+				local d = text:sub(pos, pos)
+				pos = pos + 1
+				if d == "}" then return obj end
+				if d ~= "," then fail("expected ',' or '}'") end
+			end
+		elseif c == "[" then
+			local arr = {}
+			pos = pos + 1; ws()
+			if text:sub(pos, pos) == "]" then pos = pos + 1; return arr end
+			while true do
+				arr[#arr + 1] = value()
+				ws()
+				local d = text:sub(pos, pos)
+				pos = pos + 1
+				if d == "]" then return arr end
+				if d ~= "," then fail("expected ',' or ']'") end
+			end
+		elseif c == '"' then
+			return str()
+		elseif text:sub(pos, pos + 3) == "true" then pos = pos + 4; return true
+		elseif text:sub(pos, pos + 4) == "false" then pos = pos + 5; return false
+		elseif text:sub(pos, pos + 3) == "null" then pos = pos + 4; return nil
+		else
+			local num = text:match("^-?%d+%.?%d*[eE]?[-+]?%d*", pos)
+			if not num or num == "" then fail("unexpected '" .. c .. "'") end
+			pos = pos + #num
+			return tonumber(num)
+		end
+	end
+	local v = value()
+	return v
+end
+
+-- clipfinder's results (wall-push-clips-1 / -2) as a tests table, the same as
+-- the viewer's "Export test script" (js/wall_push_clips.js exportLua) would
+-- make from them: every clip, grouped by form, wall pair, crossing/standing
+-- and kind. Walls are filled in from RAM later (T.fromJson).
+local function testsFromJson(path)
+	local f = io.open(path, "rb")
+	if not f then error("can't read " .. path) end
+	local data = parseJson(f:read("*a"))
+	f:close()
+	if data.format ~= "wall-push-clips-1" and data.format ~= "wall-push-clips-2" then
+		error(path .. " isn't a clipfinder results file")
+	end
+	local forms = data.forms or { { form = data.form, radius = data.radius, checkHeight = data.checkHeight } }
+	local T = {
+		game = data.game, map = data.map, numPolygons = data.numPolygons, fromJson = true,
+		radius = forms[1].radius, checkHeight = forms[1].checkHeight, tests = {}, walls = {},
+	}
+	if data.forms then
+		T.forms = {}
+		local names = {}
+		for _, fm in ipairs(data.forms) do
+			T.forms[fm.form] = { radius = fm.radius, checkHeight = fm.checkHeight }
+			names[#names + 1] = fm.form
+		end
+		T.form = table.concat(names, ", ")
+	else
+		T.form = data.form
+	end
+	local groupOf, nGroups, seen = {}, 0, {}
+	local vec = function(a) return { a[1], a[2], a[3] } end
+	local key3 = function(v) return string.format("%.9g,%.9g,%.9g", v[1], v[2], v[3]) end
+	for _, c in ipairs(data.clips) do
+		local form = data.forms and c.form or nil
+		local gk = table.concat({ form or "", c.pusher, c.crossed, c.cross and "cross" or "stand", c.kind }, ":")
+		if not groupOf[gk] then nGroups = nGroups + 1; groupOf[gk] = nGroups end
+		local prev, nxt
+		if c.cross or c.speed then
+			-- (a standing point Link walks onto: the same kind of move)
+			prev, nxt = vec(c.prev), vec(c.next or c.from)
+		else
+			-- standing on the floor; the game's movement puts posNext below it
+			nxt = vec(c.from)
+			prev = { c.from[1], c.floorY or c.from[2], c.from[3] }
+		end
+		local k = (form or "") .. key3(prev) .. key3(nxt)
+		if not seen[k] then
+			seen[k] = true
+			T.tests[#T.tests + 1] = {
+				group = groupOf[gk], form = form, kind = c.kind, type = c.cross and "cross" or "stand",
+				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt,
+				yaw = c.speed and c.yaw or nil, speed = c.speed, expect = vec(c["end"]),
+			}
+			T.walls[c.pusher] = true
+			T.walls[c.crossed] = true
+		end
+	end
+	return T
 end
 
 ---------------------------------------------------------------------------
@@ -172,17 +315,24 @@ end
 
 local scriptDir = (debug.getinfo(1, "S").source:match("^@?(.*[/\\])")) or ""
 local testsPath = TESTS_FILE or (scriptDir .. "wall_clip_tests.lua")
-local T = dofile(testsPath)
+local T = testsPath:lower():match("%.json$") and testsFromJson(testsPath) or dofile(testsPath)
 local resultsPath = RESULTS_FILE or (testsPath:match("^(.*[/\\])") or scriptDir) .. "wall_clip_results.txt"
 
 if T.game ~= GAME then
 	error(string.format("tests are for %s, the loaded game is %s", tostring(T.game), GAME))
 end
 
-local numPolygons, polyVerts = staticCollision()
+local numPolygons, polyVerts, polyPlane = staticCollision()
 if numPolygons ~= T.numPolygons then
 	error(string.format("tests are for %s (%d static polys); the loaded scene has %d - load that map first",
 		T.map, T.numPolygons, numPolygons))
+end
+if T.fromJson then
+	-- (the JSON has only polygon ids: the walls come from the loaded map)
+	for id in pairs(T.walls) do
+		local n, d = polyPlane(id)
+		T.walls[id] = { v = polyVerts(id), n = n, d = d }
+	end
 end
 for id, w in pairs(T.walls) do
 	local v = polyVerts(id)
@@ -307,7 +457,8 @@ local function fmt(v) return v and string.format("%.9g, %.9g, %.9g", v[1], v[2],
 -- The form Link is in now.
 local function currentForm()
 	if GAME == "OOT" then
-		if read_u32(K.player + K.stateFlags2) & K.crawling ~= 0 then return "Crawlspace" end
+		-- (arithmetic, not `&`: BizHawk's Lua doesn't parse the bitwise operators)
+		if math.floor(read_u32(K.player + K.stateFlags2) / K.crawling) % 2 == 1 then return "Crawlspace" end
 		return read_u32(K.linkAge) == 0 and "Adult" or "Child"
 	end
 	local names = { [0] = "FierceDeity", "Goron", "Zora", "Deku", "Human" }
@@ -340,6 +491,31 @@ if T.forms then
 			FORM and ", from FORM" or " in RAM", table.concat(names, ", ")))
 	end
 	print(string.format("Form: %s (%d of %d tests; the file has %s)", runForm, #tests, #T.tests, table.concat(names, ", ")))
+end
+
+-- Falling crossings whose drop makes checkHeight + dy < 5 can't work: the
+-- game's wall line test then runs from Link's feet with floors included and
+-- stops him on the floor he starts from (older exports still have them).
+do
+	local kept = {}
+	for _, t in ipairs(tests) do
+		if not (t.type == "cross" and checkHeight + (t.next[2] - t.prev[2]) < 5) then kept[#kept + 1] = t end
+	end
+	if #kept < #tests then
+		print(string.format("left out %d falling crossing tests with a drop over %g (can't clip)", #tests - #kept, checkHeight - 5))
+	end
+	tests = kept
+	if #tests == 0 then error("no tests left: they were all falling crossings that can't clip") end
+end
+
+if SKIP_FALLING then
+	local kept = {}
+	for _, t in ipairs(tests) do
+		if t.kind ~= "low" then kept[#kept + 1] = t end
+	end
+	print(string.format("SKIP_FALLING: left out %d falling tests", #tests - #kept))
+	tests = kept
+	if #tests == 0 then error("no tests left after SKIP_FALLING (they were all falling ones)") end
 end
 
 -- Group the tests, and pick up to MAX_PER_GROUP spread over each group.
@@ -465,6 +641,16 @@ local function runTest(t, mode)
 		end
 		writefloat(K.player + K.speedXZ, speed)
 		r.yaw, r.speed = yaw, speed
+		-- Falling tests (kind "low"): `next` is `drop` below the floor, not the
+		-- usual GROUND_DROP, so give him the y velocity that gets there. Written
+		-- where the last frame's floor check left it (-4 standing), before the
+		-- frame's gravity (-1) and Actor_UpdatePos (x1.5): velocity.y ends up
+		-- -drop / 1.5 (at most -20, the terminal velocity, for the 30 drop).
+		local drop = t.prev[2] - t.next[2]
+		if t.kind == "low" or drop > 7.5 + 0.01 then
+			r.velY = -drop / 1.5 + 1
+			writefloat(K.player + K.velocity + 4, r.velY)
+		end
 		r.log = {}
 		local frames0 = read_u32(K.play + K.gameplayFrames)
 		-- Link's state too: what he's doing (actionFunc, stateFlags1), whether
@@ -472,9 +658,10 @@ local function runTest(t, mode)
 		-- he's riding something
 		local function logLine(tag)
 			r.log[#r.log + 1] = string.format(
-				"%s gf+%d pos %s speedXZ %.3f speed %.3f yaw %04X action %08X flags1 %08X animMove %02X ride %08X",
+				"%s gf+%d pos %s speedXZ %.3f speed %.3f velY %.3f yaw %04X action %08X flags1 %08X animMove %02X ride %08X",
 				tag, read_u32(K.play + K.gameplayFrames) - frames0, fmt(readVec(K.player + K.pos)),
-				readfloat(K.player + K.speedXZ), readfloat(K.player + K.actorSpeed), mainmemory.read_u16_be(K.player + K.yaw),
+				readfloat(K.player + K.speedXZ), readfloat(K.player + K.actorSpeed), readfloat(K.player + K.velocity + 4),
+				mainmemory.read_u16_be(K.player + K.yaw),
 				read_u32(K.player + K.actionFunc), read_u32(K.player + K.stateFlags1),
 				mainmemory.read_u8(K.player + K.skelAnime + 0x35), read_u32(K.player + K.rideActor))
 		end

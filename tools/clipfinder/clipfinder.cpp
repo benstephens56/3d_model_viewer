@@ -18,6 +18,7 @@
 //      --form Adult,Child: just those forms, the same way)
 // Options: --root <viewer dir> (default: two levels up from the exe's dir, or
 // the current dir if it has models/), --threads N, --radius R (overrides --form).
+// Every option is explained in README.md next to this file.
 
 #include <algorithm>
 #include <array>
@@ -791,7 +792,10 @@ static std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const
 	V3 s1 = m.sphereStep(at, tol, nullptr);
 	V3 s2 = m.sphereStep(s1, tol, nullptr);
 	const V3 from2 = { prev.x, at.y, prev.z };
-	if (m.crossedWall(s, from2, s2) != crossed) return std::nullopt;
+	// still through the same wall, or landed at another height through any
+	// (wall_push_clips.js clipFromFrame: MM Treasure Chest Shop TRI 50 / 90)
+	int held = m.crossedWall(s, from2, s2);
+	if (landed ? held < 0 : held != crossed) return std::nullopt;
 	if (m.crossedWall(s, from2, s2, true) >= 0) return std::nullopt;
 	V3 end = landed ? V3{ s2.x, landY, s2.z } : s2;
 	const Poly& C = m.polys[crossed];
@@ -1118,6 +1122,10 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 				if (drop > 0 && (ui % 2)) break;
 				// (walking, posNext is GROUND_DROP below the floor)
 				double low = F(y - (drop ? drop : GROUND_DROP));
+				// wall_push_clips.js: checkHeight + dy < 5 makes the game's line
+				// test run at the feet with floors, which stops Link on the
+				// floor he starts from - bigger drops can't clip crossing
+				if (F(ch + F(low - y)) < 5) break;
 				double h = F(low + ch);
 				if (h < A.minY - 1 || h > A.maxY + 1) continue;
 				auto i = onPlane(u, h);
@@ -1209,6 +1217,12 @@ struct Clip {
 	int yaw = 0;          // crossings and standing points: the exact move (s16 yaw, f32 speed)
 	bool hasMove = false;
 	double speed = 0;
+	// --min-speed: the slowest move from a standable start that does it
+	// (reachability below); reachDone and no reach = none found
+	bool reachDone = false, hasReach = false;
+	double reachSpeed = 0;
+	int reachYaw = 0;
+	V3 reachStart;
 };
 
 struct CrossFound { ClipResult clip; V3 prev, next, res, at; bool noFloor = false; int yaw = 0; double speed = 0; };
@@ -1346,6 +1360,277 @@ static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int 
 	return c;
 }
 
+// wall_push_clips.js reachability: the lowest speed Link can do clip `c` at,
+// from a standable in-bounds start one frame's move away (32 directions, every
+// REACH_STEP up to REACH_DIST 45). Crossings: the game's move at that yaw and
+// speed (0.5 past the plane) has to hit the pusher and clip through the same
+// wall. Standing points: unlike the JS (which only checks the line), the frame
+// is run too - the move at that yaw and speed has to clip through the same
+// wall and end out of bounds - so the speed is one that works exactly.
+static void reachability(const Model& m, Scratch& s, Clip& c) {
+	const double REACH_DIST = 45, REACH_STEP = 1;
+	c.reachDone = true;
+	const double floorRef = c.hasFloorY ? c.floorY : c.from.y;
+	const V3 P = c.from;
+	const double over = c.cross ? 0.5 : 0;
+	std::set<std::pair<double, double>> tried;
+	bool have = false;
+	for (int i = 0; i < 32; i++) {
+		double ang = i / 32.0 * 2 * PI;
+		for (double d = REACH_STEP; d <= REACH_DIST; d += REACH_STEP) {
+			if (have && (d + over) / SPEED_RATE >= c.reachSpeed + 2) break;
+			auto startO = standSpot(m, F(P.x - d * std::sin(ang)), F(P.z - d * std::cos(ang)), floorRef);
+			if (!startO) continue;
+			V3 start = *startO;
+			if (!tried.insert({ start.x, start.z }).second) continue;
+			double vx = P.x - start.x, vz = P.z - start.z, len = std::hypot(vx, vz);
+			if (len < 0.01 || len > REACH_DIST) continue;
+			double speed = F((len + over) / SPEED_RATE);
+			if (have && speed >= c.reachSpeed) continue;
+			int yaw = yawOf(vx, vz);
+			V3 next = moveStep(start, yaw, speed);
+			if (c.drop > 0) next.y = P.y;
+			// (moving, a drop with checkHeight + dy < 5 gets the feet-level line
+			// test that stops him on his floor: see crossingPointsForWall)
+			if (F(m.checkHeight + F(next.y - start.y)) < 5) continue;
+			if (c.cross) {
+				auto f = lineFrame(m, s, start, next, LOOSE);
+				if (!f || f->hit.poly != c.pusher) continue;
+				auto clip = clipFromFrame(m, s, start, f->res, f->trace, LOOSE, c.drop > 0 ? NAN : start.y);
+				if (!clip || clip->crossed != c.crossed) continue;
+				bool noFloor;
+				if (c.drop > 0 ? !landing(m, s, f->res, floorRef, noFloor) : m.isInBounds(s, clip->end)) continue;
+			} else {
+				// nothing in the way, then the frame's pushes clip through the same wall
+				if (lineFrame(m, s, start, next, LOOSE)) continue;
+				PushList tr;
+				V3 res = m.sphereStep(next, LOOSE, &tr);
+				auto clip = clipFromFrame(m, s, start, res, tr, LOOSE, c.drop > 0 ? NAN : start.y);
+				if (!clip || clip->crossed != c.crossed) continue;
+				bool noFloor;
+				if (c.drop > 0 ? !landing(m, s, res, floorRef, noFloor) : m.isInBounds(s, clip->end)) continue;
+			}
+			if (!m.isInBounds(s, start)) continue;
+			have = true;
+			c.hasReach = true;
+			c.reachSpeed = speed;
+			c.reachYaw = yaw;
+			c.reachStart = start;
+		}
+	}
+}
+
+// One walking frame from a standing start: does moving at yaw / speed make
+// TRI pusher push Link through TRI crossed and leave him out of bounds?
+// (line test, pushes, floor check, two more frames: the scan's own checks)
+static std::optional<ClipResult> walkFrameClips(const Model& m, Scratch& s, const V3& start, int yaw, double speed,
+	int pusher, int crossed) {
+	V3 next = moveStep(start, yaw, speed);
+	V3 res;
+	PushList trace;
+	auto f = lineFrame(m, s, start, next, LOOSE);
+	if (f) { res = f->res; trace = f->trace; }
+	else res = m.sphereStep(next, LOOSE, &trace);
+	auto clip = clipFromFrame(m, s, start, res, trace, LOOSE, start.y);
+	if (!clip || clip->crossed != crossed || clip->pusher != pusher) return std::nullopt;
+	if (m.isInBounds(s, clip->end)) return std::nullopt;
+	return clip;
+}
+
+struct Refined { bool found = false; double speed = 0; int yaw = 0; V3 start, end; int starts = 0; };
+
+// Clips at this speed and at every 0.0025 up to 0.01 more: not a single-f32
+// coincidence (e.g. posNext landing exactly on a wall's plane, which the
+// one-face line test then counts from behind)
+static bool robustClip(const Model& m, Scratch& s, const V3& S, int yaw, double sp, int pusher, int crossed) {
+	for (int k = 0; k <= 4; k++)
+		if (!walkFrameClips(m, s, S, yaw, F(sp + k * 0.0025), pusher, crossed)) return false;
+	return true;
+}
+
+// The lowest robustly clipping speed from S at one yaw, in [lower, limit):
+// every 0.02, then bisected to the f32 boundary. 0 if none.
+static double minSpeedAtYaw(const Model& m, Scratch& s, const V3& S, int yaw, int pusher, int crossed,
+	double lower, double limit) {
+	double prevFail = std::max(0.0, lower - 0.02);
+	for (double sp = std::max(0.02, lower); sp < limit; sp += 0.02) {
+		// (the plain check first: most speeds don't clip at all)
+		if (!walkFrameClips(m, s, S, yaw, F(sp), pusher, crossed) || !robustClip(m, s, S, yaw, F(sp), pusher, crossed)) {
+			prevFail = sp;
+			continue;
+		}
+		double a = prevFail, b = F(sp);
+		for (int k = 0; k < 40; k++) {
+			double mid = F((a + b) / 2);
+			if (mid <= a || mid >= b) break;
+			if (robustClip(m, s, S, yaw, mid, pusher, crossed)) b = mid; else a = mid;
+		}
+		return b;
+	}
+	return 0.0;
+}
+
+// --angles: from the refined start, every one of the 4096 directions the sine
+// table tells apart (yaw >> 4): its lowest robust speed up to 30, and whether
+// the refined speed works there. Printed as runs of neighbouring yaws.
+static void angleRanges(const Model& m, const Refined& r, int pusher, int crossed, int threads) {
+	vector<double> minSp(4096, 0);
+	vector<char> atRefined(4096, 0);
+	std::atomic<int> next{ 0 };
+	auto work = [&]() {
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		for (int c; (c = next++) < 4096;) {
+			int yaw = c << 4;
+			minSp[c] = minSpeedAtYaw(m, s, r.start, yaw, pusher, crossed, 0, 30);
+			atRefined[c] = walkFrameClips(m, s, r.start, yaw, r.speed, pusher, crossed).has_value();
+		}
+	};
+	vector<std::thread> ts;
+	for (int t = 0; t < threads; t++) ts.emplace_back(work);
+	for (auto& t : ts) t.join();
+	auto run = [&](const char* title, auto pred, bool withMin) {
+		printf("%s\n", title);
+		// start the scan at a class that doesn't match, so a run through 0 isn't split
+		int s0 = 0;
+		while (s0 < 4096 && pred(s0)) s0++;
+		if (s0 == 4096) { printf("  all yaws\n"); return; }
+		bool any = false;
+		for (int k = 1; k <= 4096; k++) {
+			int c = (s0 + k) & 0xFFF;
+			if (!pred(c)) continue;
+			int first = c, n = 0;
+			double lo = 1e9;
+			int loYaw = 0;
+			while (pred((first + n) & 0xFFF)) {
+				int cc = (first + n) & 0xFFF;
+				if (minSp[cc] > 0 && minSp[cc] < lo) { lo = minSp[cc]; loYaw = cc << 4; }
+				n++;
+			}
+			int last = (first + n - 1) & 0xFFF;
+			printf("  0x%04X - 0x%04X  (%d directions)", first << 4, (last << 4) | 0xF, n);
+			if (withMin) printf("  lowest speed %.9g at 0x%04X", lo, loYaw);
+			printf("\n");
+			any = true;
+			k += n - 1;
+		}
+		if (!any) printf("  none\n");
+	};
+	printf("From start %.9g, %.9g, %.9g (TRI %d -> %d); yaws that differ only in the low 4 bits move the same:\n",
+		r.start.x, r.start.y, r.start.z, pusher, crossed);
+	char title[128];
+	snprintf(title, sizeof title, "Yaws that clip at speed %.9g:", r.speed);
+	run(title, [&](int c) { return atRefined[c] != 0; }, false);
+	run("Yaws that clip at some speed up to 30 (with the lowest speed in each run):", [&](int c) { return minSp[c] > 0; }, true);
+	printf("Lowest speed per direction where it clips (runs of the same speed merged):\n");
+	for (int c = 0; c < 4096;) {
+		if (minSp[c] <= 0) { c++; continue; }
+		int e = c;
+		while (e + 1 < 4096 && minSp[e + 1] == minSp[c]) e++;
+		printf("  0x%04X - 0x%04X: %.9g%s\n", c << 4, (e << 4) | 0xF, minSp[c], atRefined[c] ? "" : "  (not at that speed)");
+		c = e + 1;
+	}
+}
+
+// --refine: the lowest walking speed for one wall pair, searched finer than
+// the scan's grid. Starts: every standable in-bounds resting spot on a 0.25
+// grid within 24 of the scan's best start, nearest to the clip points first
+// (a start can't do better than its distance to them / 1.5). Yaws: toward
+// the clip points, every 8, then every 1 around the best. Speeds: every 0.02
+// up to the best so far, and at the first that clips, bisected down to the
+// f32 boundary. Returns the best found.
+static Refined refineMinSpeed(const Model& m, const vector<Clip>& clips, int pusher, int crossed, int threads) {
+	Refined best;
+	const Clip* seed = nullptr;
+	// (walking only: falling clips need a y velocity as well)
+	for (const Clip& c : clips) if (c.drop == 0 && c.hasReach && (!seed || c.reachSpeed < seed->reachSpeed)) seed = &c;
+	if (!seed) return best;
+	best.found = true;
+	best.speed = seed->reachSpeed;
+	best.yaw = seed->reachYaw;
+	best.start = seed->reachStart;
+	vector<V3> targets;
+	for (const Clip& c : clips) if (c.drop == 0) targets.push_back(c.from);
+	auto nearest = [&](const V3& p) {
+		double d = 1e9;
+		for (const V3& t : targets) d = std::min(d, std::hypot(t.x - p.x, t.z - p.z));
+		return d;
+	};
+	// candidate starts
+	vector<std::pair<double, V3>> starts;
+	{
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		std::set<std::pair<float, float>> seen;
+		const V3 B = seed->reachStart;
+		for (double dx = -24; dx <= 24; dx += 0.25) {
+			for (double dz = -24; dz <= 24; dz += 0.25) {
+				if (dx * dx + dz * dz > 24 * 24) continue;
+				auto st = standSpot(m, F(B.x + dx), F(B.z + dz), B.y);
+				if (!st || !seen.insert({ (float)st->x, (float)st->z }).second) continue;
+				if (!m.isInBounds(s, *st)) continue;
+				starts.push_back({ nearest(*st), *st });
+			}
+		}
+	}
+	std::sort(starts.begin(), starts.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	std::mutex mu;
+	std::atomic<size_t> next{ 0 }, done{ 0 };
+	auto bestSpeed = [&]() { std::lock_guard<std::mutex> g(mu); return best.speed; };
+	auto work = [&]() {
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		for (size_t i; (i = next++) < starts.size();) {
+			const V3 S = starts[i].second;
+			done++;
+			// (nearest clip point minus 2 units of slack: can't clip slower)
+			double lower = std::max(0.0, (starts[i].first - 2) / SPEED_RATE);
+			if (lower >= bestSpeed()) continue;
+			// yaws toward the clip points within reach
+			int lo = INT32_MAX, hi = INT32_MIN;
+			int center = -1;
+			for (const V3& t : targets) {
+				double dx = t.x - S.x, dz = t.z - S.z;
+				if (std::hypot(dx, dz) > bestSpeed() * SPEED_RATE + 2) continue;
+				int y = yawOf(dx, dz);
+				if (center < 0) center = y;
+				int rel = (int16_t)(uint16_t)(y - center);
+				lo = std::min(lo, rel);
+				hi = std::max(hi, rel);
+			}
+			if (center < 0) continue;
+			auto minAtYaw = [&](int yaw, double limit) { return minSpeedAtYaw(m, s, S, yaw, pusher, crossed, lower, limit); };
+			double myBest = 0;
+			int myYaw = 0;
+			for (int rel = lo - 0x100; rel <= hi + 0x100; rel += 8) {
+				int yaw = (center + rel) & 0xFFFF;
+				double sp = minAtYaw(yaw, myBest ? myBest : bestSpeed());
+				if (sp > 0 && (!myBest || sp < myBest)) { myBest = sp; myYaw = yaw; }
+			}
+			if (!myBest) continue;
+			for (int d = -8; d <= 8; d++) {
+				int yaw = (myYaw + d) & 0xFFFF;
+				double sp = minAtYaw(yaw, myBest);
+				if (sp > 0 && sp < myBest) { myBest = sp; myYaw = yaw; }
+			}
+			std::lock_guard<std::mutex> g(mu);
+			if (myBest < best.speed) {
+				best.speed = myBest;
+				best.yaw = myYaw;
+				best.start = S;
+			}
+		}
+	};
+	vector<std::thread> ts;
+	for (int t = 0; t < threads; t++) ts.emplace_back(work);
+	for (auto& t : ts) t.join();
+	best.starts = (int)starts.size();
+	Scratch s;
+	s.stamp.assign(m.polys.size(), 0);
+	if (auto c = walkFrameClips(m, s, best.start, best.yaw, best.speed, pusher, crossed)) best.end = c->end;
+	return best;
+}
+
 // A point (and falling drop) seen by any thread, sharded to keep lock
 // contention down.
 struct SeenKey {
@@ -1404,6 +1689,15 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 		return foundPairs.insert({ a, b }).second;
 	};
 	std::atomic<size_t> nextPair{ 0 }, pairsDone{ 0 };
+	// --extended-only: wall pairs (pusher, crossed) with at least one point
+	// that clips without the extended planes too. That makes them acute angle
+	// clips, so all their points are left out, extended ones included.
+	std::mutex acuteMu;
+	std::set<std::pair<int, int>> acutePairs;
+	auto markAcute = [&](int a, int b) {
+		std::lock_guard<std::mutex> g(acuteMu);
+		acutePairs.insert({ a, b });
+	};
 
 	auto progress = [&](const char* phase, size_t done, size_t total) {
 		static std::mutex pm;
@@ -1431,7 +1725,8 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 				if (h - GROUND_DROP >= np.lo && h - GROUND_DROP <= np.hi && seen.insert({ p.x, p.z, p.y, 0 })) {
 					if (auto c = standingClip(m, s, p)) {
 						// (extended plane only: an acute one still ends the point, it's just not kept)
-						if (!(m.extendedOnly && c->kind == 0) && claimPair(c->pusher, c->crossed)) local.push_back(*c);
+						if (m.extendedOnly && c->kind == 0) markAcute(c->pusher, c->crossed);
+						else if (claimPair(c->pusher, c->crossed)) local.push_back(*c);
 						return;
 					}
 				}
@@ -1440,7 +1735,8 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 					if (hk < np.lo || hk > np.hi) continue;
 					if (!seen.insert({ p.x, p.z, p.y, k })) continue;
 					if (auto c = lowClip(m, s, p, k)) {
-						if (!(m.extendedOnly && c->strict) && claimPair(c->pusher, c->crossed)) local.push_back(*c);
+						if (m.extendedOnly && c->strict) markAcute(c->pusher, c->crossed);
+						else if (claimPair(c->pusher, c->crossed)) local.push_back(*c);
 						break;
 					}
 				}
@@ -1523,7 +1819,7 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 				// (extended plane only: falling ones are checked without the
 				// extended planes too, and the ones that still clip left out)
 				bool strict = (cp.drop == 0 || m.extendedOnly) && (bool)crossingClip(m, s, A, cp, STRICT);
-				if (m.extendedOnly && strict) return;
+				if (m.extendedOnly && strict) { markAcute(A.id, r->first.clip.crossed); return; }
 				if (!claimPair(A.id, r->first.clip.crossed)) return;
 				const CrossFound& f = r->first;
 				Clip c;
@@ -1573,13 +1869,18 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 	// JS keeps the first); keep one per position.
 	vector<Clip> out;
 	std::unordered_set<string> keep;
+	size_t acuteDropped = 0;
 	for (const Clip& c : clips) {
+		if (m.extendedOnly && acutePairs.count({ c.pusher, c.crossed })) { acuteDropped++; continue; }
 		string k = (c.cross ? "c" : "s") + std::to_string(c.pusher) + ":" + keyOf(c.from.x, c.from.z, c.hasFloorY ? c.floorY : c.from.y);
 		if (!c.cross && !keep.insert(k).second) continue;
 		out.push_back(c);
 	}
 	double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 	fprintf(stderr, "  %zu clip points in %.1fs\n", out.size(), secs);
+	if (m.extendedOnly && !acutePairs.empty())
+		fprintf(stderr, "  (extended only: left out %zu wall pairs with an acute result, and their %zu extended points)\n",
+			acutePairs.size(), acuteDropped);
 	return out;
 }
 
@@ -1602,7 +1903,11 @@ static string jsonStr(const string& s) {
 
 // One scan's results: the form name (forms sharing a radius and check height
 // share a scan: "Human/Deku"), its radius and check height, and its clips.
-struct FormResult { string form; double radius, checkHeight; vector<Clip> clips; };
+struct FormResult {
+	string form;
+	double radius, checkHeight;
+	vector<Clip> clips;
+};
 
 // Format 2: every form's clips in one file, each clip marked with its form
 // (one of `forms`), so the viewer can show them all at once.
@@ -1637,6 +1942,11 @@ static string toJson(const string& game, const string& map, int numPolygons, boo
 			o << "]";
 		}
 		if (c.hasMove) o << ",\"yaw\":" << c.yaw << ",\"speed\":" << num(c.speed);
+		// --min-speed: the slowest move that does it, or null for none
+		if (c.reachDone) {
+			if (c.hasReach) o << ",\"reach\":{\"speed\":" << num(c.reachSpeed) << ",\"yaw\":" << c.reachYaw << ",\"start\":" << vec(c.reachStart) << "}";
+			else o << ",\"reach\":null";
+		}
 		o << "}";
 	}
 	o << "\n  ]\n}\n";
@@ -1682,9 +1992,13 @@ static string safeName(const string& s) {
 }
 
 int main(int argc, char** argv) {
-	string game, mapName, form, out, outDir, root;
+	string game, mapName, form, out, outDir, root, after;
 	double radius = 0;
-	bool falling = false, all = false, extendedOnly = false, firstPerPair = false;
+	bool falling = false, all = false, extendedOnly = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
+	int onlyPusher = -1, onlyCrossed = -1;
+	string simArg;  // --sim x,y,z,yaw,speed[,drop]
+	bool haveFrom = false;
+	double fromX = 0, fromY = 0, fromZ = 0, fromSpeed = 0;  // --from
 	int threads = (int)std::max(1u, std::thread::hardware_concurrency());
 	for (int i = 1; i < argc; i++) {
 		string a = argv[i];
@@ -1696,7 +2010,24 @@ int main(int argc, char** argv) {
 		else if (a == "--falling") falling = true;
 		else if (a == "--extended-only") extendedOnly = true;
 		else if (a == "--first-per-pair") firstPerPair = true;
+		else if (a == "--min-speed") minSpeed = true;
+		else if (a == "--refine") { refine = true; minSpeed = true; }
+		else if (a == "--angles") { angles = true; refine = true; minSpeed = true; }
+		else if (a == "--from") {
+			// --angles from this start (and speed) instead of the refined one
+			string v = val();
+			int n = sscanf(v.c_str(), "%lf,%lf,%lf,%lf", &fromX, &fromY, &fromZ, &fromSpeed);
+			if (n < 3) { fprintf(stderr, "--from wants X,Y,Z[,SPEED]\n"); return 2; }
+			haveFrom = true;
+			angles = refine = minSpeed = true;
+		}
+		else if (a == "--sim") simArg = val();
+		else if (a == "--pair") {
+			string v = val();
+			if (sscanf(v.c_str(), "%d,%d", &onlyPusher, &onlyCrossed) != 2) { fprintf(stderr, "--pair wants PUSHER,CROSSED (TRI ids), e.g. --pair 757,714\n"); return 2; }
+		}
 		else if (a == "--all") all = true;
+		else if (a == "--after") after = val();
 		else if (a == "-o" || a == "--out") out = val();
 		else if (a == "--out-dir") outDir = val();
 		else if (a == "--root") root = val();
@@ -1708,6 +2039,10 @@ int main(int argc, char** argv) {
 		fprintf(stderr,
 			"usage: clipfinder --game OOT|MM (--map \"<name in the viewer's map list>\" | --all)\n"
 			"                  [--form Adult|Child|Crawlspace|Human|Deku|Zora|Goron|FierceDeity|All, or a list: Adult,Child] [--radius R] [--falling] [--extended-only] [--first-per-pair]\n"
+			"                  [--min-speed] [--pair PUSHER,CROSSED] [--refine (with --pair: the exact lowest walking speed)]\n"
+			"                  [--angles (with --pair: also every yaw that works from the refined start)]\n"
+			"                  [--from X,Y,Z[,SPEED] (--angles from this start instead, and at this speed)]\n"
+			"                  [--sim X,Y,Z,YAW,SPEED[,DROP]]  (one frame from a standing start, printed step by step)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -1765,6 +2100,14 @@ int main(int argc, char** argv) {
 	vector<MapEntry> todo;
 	for (const MapEntry& e : maps) if (all || e.name == mapName) todo.push_back(e);
 	if (todo.empty()) { fprintf(stderr, "no map named \"%s\" in the %s list\n", mapName.c_str(), game.c_str()); return 1; }
+	// --after "<map>": resume an --all run, skipping the maps up to and
+	// including that one
+	if (!after.empty()) {
+		auto it = std::find_if(todo.begin(), todo.end(), [&](const MapEntry& e) { return e.name == after; });
+		if (it == todo.end()) { fprintf(stderr, "--after: no map named \"%s\" in the %s list\n", after.c_str(), game.c_str()); return 1; }
+		todo.erase(todo.begin(), it + 1);
+		fprintf(stderr, "starting after %s: %zu maps to go\n", after.c_str(), todo.size());
+	}
 
 	int failures = 0;
 	for (const MapEntry& e : todo) {
@@ -1813,7 +2156,157 @@ int main(int argc, char** argv) {
 			m.lowDrop = falling ? 30 : 0;
 			m.extendedOnly = extendedOnly;
 			m.build(tris, ch.numPolygons);
-			results.push_back({ v.form, v.radius, F(v.checkHeight), scan(m, threads, firstPerPair) });
+			if (!simArg.empty()) {
+				// --sim: Link standing at (x, y, z) (feet), moving at yaw / speed for
+				// one frame, posNext GROUND_DROP (or DROP) below; every step printed
+				double sx, sy, sz, speed, drop = 0;
+				char yawStr[32] = {};
+				int n = sscanf(simArg.c_str(), "%lf,%lf,%lf,%31[^,],%lf,%lf", &sx, &sy, &sz, yawStr, &speed, &drop);
+				if (n < 5) { fprintf(stderr, "--sim wants X,Y,Z,YAW,SPEED[,DROP] (YAW as 0x1234 or decimal)\n"); return 2; }
+				int yaw = (int)strtol(yawStr, nullptr, 0) & 0xFFFF;
+				Scratch s;
+				s.stamp.assign(m.polys.size(), 0);
+				auto P = [](const V3& v) { static char b[4][96]; static int k = 0; k = (k + 1) % 4; snprintf(b[k], 96, "(%.9g, %.9g, %.9g)", v.x, v.y, v.z); return b[k]; };
+				V3 start = { F(sx), F(sy), F(sz) };
+				V3 next = moveStep(start, yaw, F(speed));
+				if (drop > 0) next.y = F(start.y - drop);
+				printf("start %s  yaw 0x%04X  speed %.9g -> posNext %s\n", P(start), yaw, F(speed), P(next));
+				printf("start in bounds: %s\n", m.isInBounds(s, start) ? "yes" : "NO");
+				auto rest = m.restingSpot(start);
+				printf("start is a resting spot: %s\n", rest && rest->x == start.x && rest->z == start.z ? "yes" : rest ? (string("no, rests at ") + P(*rest)).c_str() : "no (pushes don't settle)");
+				if (F(m.checkHeight + F(next.y - start.y)) < 5) printf("checkHeight + dy < 5: the game's line test runs at the feet, floors included (not modelled)\n");
+				V3 res;
+				PushList trace;
+				auto f = lineFrame(m, s, start, next, LOOSE);
+				if (f) {
+					printf("line test at y %.9g hits TRI %d at (%.9g, %.9g), snapped to %s\n", F(next.y + m.checkHeight), f->hit.poly, f->hit.x, f->hit.z, P(f->trace[0].to));
+					res = f->res;
+					trace = f->trace;
+				} else {
+					printf("line test at y %.9g: nothing hit\n", F(next.y + m.checkHeight));
+					res = m.sphereStep(next, LOOSE, &trace);
+				}
+				for (const Push& t : trace) if (!t.line) printf("  TRI %d pushes %s -> %s\n", t.poly, P(t.from), P(t.to));
+				printf("after the pushes: %s\n", P(res));
+				auto clip = clipFromFrame(m, s, start, res, trace, LOOSE, drop > 0 ? NAN : start.y);
+				if (!clip) {
+					int crossed = m.crossedWall(s, { start.x, res.y, start.z }, res);
+					printf("no clip (%s)\n", crossed < 0 ? "not through any wall between start and there"
+						: ("through TRI " + std::to_string(crossed) + ", but the next frames' pushes put him back / not held").c_str());
+				} else {
+					printf("CLIP: TRI %d pushes Link through TRI %d; after 2 more frames %s, %s\n", clip->pusher, clip->crossed, P(clip->end),
+						m.isInBounds(s, clip->end) ? "in bounds (doesn't count)" : "OUT OF BOUNDS");
+					if (drop > 0) {
+						bool noFloor;
+						auto land = landing(m, s, res, start.y, noFloor);
+						printf("falling: %s\n", !land ? "lands in bounds" : noFloor ? "no floor under him: falls out" : (string("lands out of bounds at ") + P(*land)).c_str());
+					}
+				}
+				return 0;
+			}
+			vector<Clip> found = scan(m, threads, firstPerPair);
+			// --pair: just the clips of that wall pair
+			if (onlyPusher >= 0) {
+				found.erase(std::remove_if(found.begin(), found.end(),
+					[&](const Clip& c) { return c.pusher != onlyPusher || c.crossed != onlyCrossed; }), found.end());
+				fprintf(stderr, "  %zu clip points of TRI %d through TRI %d\n", found.size(), onlyPusher, onlyCrossed);
+			}
+			if (minSpeed && !found.empty()) {
+				auto r0 = std::chrono::steady_clock::now();
+				std::atomic<size_t> next{ 0 }, done{ 0 };
+				auto work = [&]() {
+					Scratch s;
+					s.stamp.assign(m.polys.size(), 0);
+					for (size_t i; (i = next++) < found.size();) {
+						reachability(m, s, found[i]);
+						size_t d = ++done;
+						if (d % 64 == 0 || d == found.size()) fprintf(stderr, "\r  min speed %zu / %zu   ", d, found.size());
+					}
+				};
+				vector<std::thread> ts;
+				for (int t = 0; t < threads; t++) ts.emplace_back(work);
+				for (auto& t : ts) t.join();
+				fprintf(stderr, "(%.1fs)\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - r0).count());
+				// the lowest per wall pair, crossing / standing and kind
+				std::map<std::tuple<int, int, bool, int>, const Clip*> best;
+				for (const Clip& c : found) {
+					if (!c.hasReach) continue;
+					auto k = std::make_tuple(c.pusher, c.crossed, c.cross, c.kind);
+					if (!best.count(k) || c.reachSpeed < best[k]->reachSpeed) best[k] = &c;
+				}
+				static const char* kinds[] = { "acute", "extended", "low" };
+				for (auto& [k, c] : best) {
+					fprintf(stderr, "  %s %s TRI %d -> %d: min speed %.4f  start %.3f, %.3f, %.3f  yaw 0x%04X  (clip point %.3f, %.3f, %.3f%s)\n",
+						kinds[c->kind], c->cross ? "cross" : "stand", c->pusher, c->crossed, c->reachSpeed,
+						c->reachStart.x, c->reachStart.y, c->reachStart.z, c->reachYaw & 0xFFFF,
+						c->from.x, c->from.y, c->from.z, c->drop ? (", drop " + std::to_string(c->drop)).c_str() : "");
+				}
+				size_t none = std::count_if(found.begin(), found.end(), [](const Clip& c) { return !c.hasReach; });
+				if (none) fprintf(stderr, "  (%zu clip points not reachable from a standable start at up to speed 30)\n", none);
+				if (refine) {
+					if (onlyPusher < 0) { fprintf(stderr, "--refine needs --pair PUSHER,CROSSED\n"); return 2; }
+					auto t0r = std::chrono::steady_clock::now();
+					Refined r = refineMinSpeed(m, found, onlyPusher, onlyCrossed, threads);
+					if (!r.found) fprintf(stderr, "  refine: no walking clip of this pair to start from\n");
+					else fprintf(stderr, "  REFINED TRI %d -> %d: min walking speed %.9g  start %.9g, %.9g, %.9g  yaw 0x%04X  -> end %.9g, %.9g, %.9g  (%d starts tried, %.1fs)\n",
+						onlyPusher, onlyCrossed, r.speed, r.start.x, r.start.y, r.start.z, r.yaw & 0xFFFF, r.end.x, r.end.y, r.end.z,
+						r.starts, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0r).count());
+					if (angles && (r.found || haveFrom)) {
+						auto ta = std::chrono::steady_clock::now();
+						Refined from = r;
+						if (haveFrom) {
+							from.start = { F(fromX), F(fromY), F(fromZ) };
+							if (fromSpeed > 0) from.speed = F(fromSpeed);
+							else if (!r.found) from.speed = 0;
+							Scratch s;
+							s.stamp.assign(m.polys.size(), 0);
+							auto rest = m.restingSpot(from.start);
+							if (!rest || rest->x != from.start.x || rest->z != from.start.z)
+								printf("(note: Link doesn't stand still at that start: the pushes move him%s)\n",
+									rest ? (string(" to ") + std::to_string(rest->x) + ", " + std::to_string(rest->z)).c_str() : "");
+							if (!m.isInBounds(s, from.start)) printf("(note: that start is out of bounds)\n");
+						}
+						angleRanges(m, from, onlyPusher, onlyCrossed, threads);
+						fprintf(stderr, "  (angles: %.1fs)\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count());
+					}
+					if (r.found) {
+						// The clips written are just the refined one, as an ordinary
+						// clip (the frame run again for its fields), so the viewer and
+						// wall_clip_tester.lua use its exact start, yaw and speed.
+						Scratch s;
+						s.stamp.assign(m.polys.size(), 0);
+						auto frame = [&](const Tol& tol, V3& res, V3& at, bool& cross) {
+							V3 nx = moveStep(r.start, r.yaw, r.speed);
+							PushList trace;
+							auto f = lineFrame(m, s, r.start, nx, tol);
+							cross = (bool)f;
+							if (f) { res = f->res; trace = f->trace; at = { f->hit.x, nx.y, f->hit.z }; }
+							else { res = m.sphereStep(nx, tol, &trace); at = nx; }
+							auto cl = clipFromFrame(m, s, r.start, res, trace, tol, r.start.y);
+							if (cl && (cl->crossed != onlyCrossed || cl->pusher != onlyPusher)) cl.reset();
+							return cl;
+						};
+						V3 res, at, sres, sat;
+						bool cross, scross;
+						auto cl = frame(LOOSE, res, at, cross);
+						if (cl) {
+							Clip c;
+							c.kind = frame(STRICT, sres, sat, scross) ? 0 : 1;
+							c.cross = cross;
+							c.pusher = onlyPusher; c.crossed = onlyCrossed;
+							c.prev = r.start; c.next = moveStep(r.start, r.yaw, r.speed); c.hasNext = true;
+							c.from = at; c.res = res; c.end = cl->end;
+							c.floorY = r.start.y; c.hasFloorY = true;
+							c.yaw = r.yaw; c.speed = r.speed; c.hasMove = true;
+							if (cross) c.yaws = { r.yaw };
+							c.reachDone = c.hasReach = true;
+							c.reachSpeed = r.speed; c.reachYaw = r.yaw; c.reachStart = r.start;
+							found = { c };
+						}
+					}
+				}
+			}
+			results.push_back({ v.form, v.radius, F(v.checkHeight), std::move(found) });
 		}
 		f << toJson(game, e.name, ch.numPolygons, falling, extendedOnly, results);
 		f.close();
