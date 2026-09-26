@@ -1620,6 +1620,14 @@ export function setupWallPushClipUI(scene) {
     const extendedOnlyChk = document.getElementById("wallClipExtendedOnly");
     if (!container) return;
 
+    // The in-browser scan and its options (the native tools/clipfinder is the
+    // usual route: its results only need Import and the reachable filter)
+    const advancedChk = document.getElementById("wallClipShowAdvanced");
+    const advanced = document.getElementById("wallClipAdvanced");
+    const showAdvanced = () => { advanced.style.display = advancedChk.checked ? "flex" : "none"; };
+    advancedChk.addEventListener("change", showAdvanced);
+    showAdvanced();
+
     // The last scan, drawn again when the reachable filter changes.
     let last = null;
 

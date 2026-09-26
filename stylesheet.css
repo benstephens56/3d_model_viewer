@@ -127,6 +127,40 @@ button {
     margin-top: 6px
 }
 
+/* Wall push clip tools (wall_push_clips.js shows it as flex for OoT/MM) */
+.clip-region {
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 8px 0;
+    padding: 6px 8px 8px;
+    border: 1px solid #2a3a4a;
+    border-radius: 6px;
+    background: #15202c
+}
+
+.clip-region-title {
+    flex-basis: 100%;
+    font-size: 13px;
+    font-weight: 600
+}
+
+.clip-region-row {
+    flex-basis: 100%;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap
+}
+
+.clip-region label {
+    margin-top: 0
+}
+
+.clip-region > label,
+.clip-region > #wallClipStatus {
+    flex-basis: 100%
+}
+
 /* ---- Per-model rows (built by addModelCheckbox in render.js) ----
    One grid-like row per loaded model: [checkbox + name] [swatch] [delete].
    The label is the only item allowed to flex, so the swatch and the delete
