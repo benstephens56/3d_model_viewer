@@ -26,9 +26,14 @@ The walls' "extended planes" come from CollisionPoly_Check[XZ]IntersectApprox
 (Math3D_TriChkPoint Para[XZ]Impl with detMax 300, chkDist 1): the sphere
 centre only has to be within 1 unit of the triangle's projected bounding box
 and within 300/edgeLength of its edges, so a wall pushes a little past its own
-ends. Clips that only work thanks to that are reported separately: every clip
-found is re-simulated with the tolerance removed (detMax 0, chkDist 0), and the
-ones that disappear are "extended plane" clips.
+ends. On top of that, the check projects the sphere centre onto the triangle
+along the Z or X axis, not the wall's normal, so a diagonal wall also pushes
+Link standing beside it past its end, in front of its plane's extension (at 45
+degrees as far past the end as he is in front of the plane). Clips that only
+work thanks to either are reported separately as "extended plane" clips: every
+clip found is re-simulated with the tolerance removed (detMax 0, chkDist 0),
+and it's an acute angle clip only if it still clips and the push that did it
+started with Link in front of the pusher's face (pushOnFace).
 
 Search: for every pair of walls (A pushing against the back of B) sharing a
 subdivision, test every point on the floor within A's reach and in front of B
@@ -64,7 +69,8 @@ const FLOOR_BLOCK = 4; // how often along a wall its floors are looked up
 // deep in an acute corner the nearest resting spot is far back (OoT Kakariko
 // polys 323/730 clip as adult from ~33 away, speed 22).
 // (How fast that is, is the Reachable filter's business.)
-const MOVE_STEPS = [2, 4, 6, 8, 12, 16, 20, 24, 28, 32];
+// setMaxMove (clipfinder --max-move) changes it and REACH_DIST.
+let MOVE_STEPS = [2, 4, 6, 8, 12, 16, 20, 24, 28, 32];
 // Falling, Link's wall check runs at posNext.y + checkHeight before the floor
 // check lands him, so posNext can be up to 30 below the floor (terminal y
 // velocity -20 * 1.5): low walls, below the check when standing, can push.
@@ -77,8 +83,18 @@ const GROUND_DROP = 7.5;
 
 // Reachability: starts up to REACH_DIST away (speed 30 moves 45 a frame), every
 // REACH_STEP, in 32 directions. Actor_UpdatePos moves speed * 1.5 a frame.
-const REACH_DIST = 45;
+const DEFAULT_MAX_MOVE = 45;
+let REACH_DIST = DEFAULT_MAX_MOVE;
 const REACH_STEP = 1;
+
+// How far Link can move in a frame (glitches can go well past speed 30):
+// reachability starts up to n away (speed n / 1.5), and over 45 the crossing
+// starts go on every 4 past 32 (clipfinder.cpp setMaxMove).
+function setMaxMove(n) {
+    MOVE_STEPS = [2, 4, 6, 8, 12, 16, 20, 24, 28, 32].filter(d => d <= n);
+    if (n > DEFAULT_MAX_MOVE) for (let d = 36; d <= n; d += 4) MOVE_STEPS.push(d);
+    REACH_DIST = n;
+}
 const SPEED_RATE = 1.5;
 const REACH = 14; // how far past the radius of both walls to sample
 
@@ -508,6 +524,21 @@ class CollisionModel {
     }
 }
 
+// Whether a wall push (a trace entry) started with Link in front of the wall
+// itself: his sphere centre, projected onto the wall along its normal, lands
+// on the triangle. The game's wall check projects along the Z or X axis
+// instead (CollisionPoly_Check[ZX]IntersectApprox), so a diagonal wall also
+// pushes Link standing past its end, in front of its extended plane - as far
+// past as he is in front of it at 45 degrees - on top of the 1 unit /
+// detMax 300 tolerance. A line test's snap is on the triangle already.
+function pushOnFace(model, t) {
+    if (t.line) return true;
+    const P = t.poly;
+    const y = t.from.y + model.checkHeight;
+    const k = planeDist(P, t.from.x, y, t.from.z) / P.nMag;
+    return pointInTri3D(P, t.from.x - k * P.nx, y - k * P.ny, t.from.z - k * P.nz, 0);
+}
+
 function pointInTri3D(p, x, y, z, tolerance) {
     // Project on the dominant normal axis and test with an edge tolerance.
     const ax = Math.abs(p.nx), ay = Math.abs(p.ny), az = Math.abs(p.nz);
@@ -535,8 +566,9 @@ function pointInTri3D(p, x, y, z, tolerance) {
 
 // Checks the frame prev -> res (whose pushes are in `trace`) for a clip: the
 // result is behind a wall it was in front of, and two more frames of standing
-// still leave it there. Returns the wall crossed, the push that crossed it and
-// where Link ends up, or null.
+// still leave it there. Returns the wall crossed, the push that crossed it,
+// where Link ends up and whether that push started in front of the pusher's
+// face (onFace, see pushOnFace), or null.
 //
 // With `rayFromY` (prevPos.y, Link walking) the frame's floor check runs first
 // (func_800B7678): a ray down from rayFromY + 50 finds the highest floor - or
@@ -587,7 +619,7 @@ function clipFromFrame(model, prev, res, trace, tol, rayFromY = null) {
         }
     }
     if (!pusher) return null;
-    return { crossed, pusher: pusher.poly, end };
+    return { crossed, pusher: pusher.poly, end, onFace: pushOnFace(model, pusher) };
 }
 
 // Triangle-triangle distance (3D): 0 if an edge of one passes through the
@@ -1090,8 +1122,10 @@ function standingClip(model, floorPt) {
     const strictTrace = [];
     const strictRes = model.sphereStep(w.next, STRICT, strictTrace);
     const strict = clipFromFrame(model, w.prev, strictRes, strictTrace, STRICT, w.prev.y);
+    // acute: it clips without the extended planes, and the push starts in
+    // front of the pusher's face (not beside it, see pushOnFace)
     return {
-        kind: strict ? "acute" : "extended",
+        kind: strict && strict.onFace ? "acute" : "extended",
         from: w.next, floorY: w.prev.y, prev: w.prev, next: w.next, yaw: w.yaw, speed: w.speed,
         res: w.res, end: w.clip.end,
         crossed: w.clip.crossed, pusher: w.clip.pusher,
@@ -1157,12 +1191,14 @@ function lowClip(model, p, drop) {
     if (!end) return null;
     const prev = reachFrom(model, low, p.y);
     if (!prev) return null;
-    // Extended plane only: whether it also clips with them removed.
+    // Extended plane only: whether it also clips with them removed, pushed
+    // from in front of the pusher's face.
     let strict = false;
     if (model.extendedOnly) {
         const strictTrace = [];
         const strictRes = model.sphereStep(low, STRICT, strictTrace);
-        strict = !!clipFromFrame(model, low, strictRes, strictTrace, STRICT);
+        const sclip = clipFromFrame(model, low, strictRes, strictTrace, STRICT);
+        strict = !!sclip && sclip.onFace;
     }
     return {
         kind: "low", drop, strict,
@@ -1332,7 +1368,11 @@ async function scanWallPushClips(model, onProgress) {
             crossFrames.add(frameKey);
             // (extended plane only: falling ones are checked without the
             // extended planes too, and the ones that still clip left out)
-            const strict = (p.drop === 0 || model.extendedOnly) && crossingClip(model, A, p, STRICT);
+            let strict = false;
+            if (p.drop === 0 || model.extendedOnly) {
+                const sclip = crossingClip(model, A, p, STRICT);
+                strict = !!sclip && sclip.onFace;
+            }
             if (model.extendedOnly && strict) { acutePairs.add(A.id + ":" + clip.crossed.id); continue; }
             clips.push({
                 kind: p.drop > 0 ? "low" : strict ? "acute" : "extended", cross: true, drop: p.drop,
@@ -1418,7 +1458,7 @@ function describeClipLines(g, c, checkHeight) {
             c.drop > 0
                 ? (c.end.noFloor ? `  no floor under where he's pushed to: falls out of bounds` : `  lands at: ${fmt(c.end)} (out of bounds)`)
                 : `  after 2 more frames: ${fmt(c.end)} (${behind.toFixed(3)} units behind TRI ${g.crossed.id})`,
-            ...(c.drop > 0 ? [] : [`  this point ${c.kind === "acute" ? "also clips" : "does not clip"} with the extended planes removed`]),
+            ...(c.drop > 0 ? [] : [`  this point ${c.kind === "acute" ? "also clips with the extended planes removed" : `needs TRI ${g.pusher.id}'s extended plane (no clip without the tolerance, or Link is beside it, past its edge)`}`]),
         ].join("\n");
     }
     if (c.kind === "low") {
@@ -1439,7 +1479,7 @@ function describeClipLines(g, c, checkHeight) {
         ] : [`  Link at:   ${fmt(c.from)} (after moving there, e.g. from ${fmt(c.prev)})`]),
         `  pushed to: ${fmt(c.res)}`,
         `  after 2 more frames: ${fmt(c.end)} (${behind.toFixed(3)} units behind TRI ${g.crossed.id})`,
-        `  this point ${c.kind === "acute" ? "also clips" : "does not clip"} with the extended planes removed`,
+        `  this point ${c.kind === "acute" ? "also clips with the extended planes removed" : `needs TRI ${g.pusher.id}'s extended plane (no clip without the tolerance, or Link is beside it, past its edge)`}`,
     ].join("\n");
 }
 
@@ -1576,7 +1616,8 @@ function exportJson(groups, info) {
         `{`,
         `  "format": "wall-push-clips-2",`,
         `  "game": ${JSON.stringify(info.game)}, "map": ${JSON.stringify(info.map)}, "falling": ${info.falling}, ` +
-            `"extendedOnly": ${info.extendedOnly}, "numPolygons": ${info.numPolygons},`,
+            `"extendedOnly": ${info.extendedOnly}, "numPolygons": ${info.numPolygons}` +
+            (REACH_DIST !== DEFAULT_MAX_MOVE ? `, "maxMove": ${num(REACH_DIST)}` : "") + `,`,
         `  "forms": [`,
         [...forms].map(([name, m]) => `    {"form":${JSON.stringify(name)},"radius":${num(m.radius)},"checkHeight":${num(m.checkHeight)}}`).join(",\n"),
         `  ],`,
@@ -1618,6 +1659,7 @@ export function setupWallPushClipUI(scene) {
     const reachableChk = document.getElementById("wallClipReachable");
     const maxSpeedInput = document.getElementById("wallClipMaxSpeed");
     const extendedOnlyChk = document.getElementById("wallClipExtendedOnly");
+    const maxMoveInput = document.getElementById("wallClipMaxMove");
     if (!container) return;
 
     // The in-browser scan and its options (the native tools/clipfinder is the
@@ -1755,6 +1797,19 @@ export function setupWallPushClipUI(scene) {
     });
     maxSpeedInput.addEventListener("change", render);
 
+    // Max move a frame: the scan's starts and reachability's reach (the
+    // reachability worked out so far is redone with it)
+    const applyMaxMove = () => {
+        const n = Number(maxMoveInput.value);
+        setMaxMove(n > 0 ? n : DEFAULT_MAX_MOVE);
+        if (!last) return;
+        for (const g of last.groups) for (const c of g.clips) delete c.reach;
+        last.reachDone = false;
+        render();
+    };
+    maxMoveInput.addEventListener("change", applyMaxMove);
+    setMaxMove(Number(maxMoveInput.value) > 0 ? Number(maxMoveInput.value) : DEFAULT_MAX_MOVE);
+
     button.addEventListener("click", async () => {
         const main = loadedModels.find(m => m.name === "Main Model");
         const colCtx = currentColCtx;
@@ -1819,6 +1874,9 @@ export function setupWallPushClipUI(scene) {
         }
         removeMarkerModels(scene);
         last = null;
+        // (clipfinder --max-move: reachability as far as its scan went)
+        maxMoveInput.value = data.maxMove ?? DEFAULT_MAX_MOVE;
+        setMaxMove(Number(maxMoveInput.value));
         // Format 1: one form. Format 2: `forms` (name, radius, check height)
         // and each clip marked with its form, each form getting its own model.
         const forms = (data.forms ?? [{ form: data.form, radius: data.radius, checkHeight: data.checkHeight }]).map(f => ({

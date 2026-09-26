@@ -461,7 +461,7 @@ struct Model {
 	ColCtx colCtx;
 	double radius, checkHeight;
 	int lowDrop;
-	bool extendedOnly = false; // leave out clips that also work without the extended planes
+	bool extendedOnly = false; // leave out wall pairs with an acute clip (see pushOnFace)
 	vector<Poly> polys;
 	vector<vector<int>> cellWallsL, cellFloorsL; // sorted, per subdivision
 	std::unordered_map<int64_t, vector<int>> floorGrid;
@@ -765,10 +765,41 @@ struct Model {
 static const double NEXT_STEP = 0.5;
 static const double CROSS_STEP = 0.25;
 static const double FLOOR_BLOCK = 4;
-static const double MOVE_STEPS[] = { 2, 4, 6, 8, 12, 16, 20, 24, 28, 32 };
+// How far back a frame's start is tried from (wall_push_clips.js MOVE_STEPS),
+// and how far a frame's move can go for reachability (REACH_DIST: speed 30
+// moves 45). --max-move N: both up to N units a frame (speed N / 1.5); over
+// 45 the starts go on every 4 past 32. Set once in main, before any scan.
+static const double DEFAULT_MAX_MOVE = 45;
+static vector<double> MOVE_STEPS = { 2, 4, 6, 8, 12, 16, 20, 24, 28, 32 };
+static double REACH_DIST = DEFAULT_MAX_MOVE;
+
+static void setMaxMove(double n) {
+	vector<double> steps;
+	for (double d : { 2, 4, 6, 8, 12, 16, 20, 24, 28, 32 }) if (d <= n) steps.push_back(d);
+	if (n > DEFAULT_MAX_MOVE) for (double d = 36; d <= n; d += 4) steps.push_back(d);
+	MOVE_STEPS = steps;
+	REACH_DIST = n;
+}
 static const double REACH = 14;
 
-struct ClipResult { int crossed, pusher; V3 end; };
+// onFace: the push that took Link through started with him in front of the
+// pusher's actual face (see pushOnFace), not beside it.
+struct ClipResult { int crossed, pusher; V3 end; bool onFace; };
+
+// Whether a wall push started with Link in front of the wall itself: his
+// sphere centre, projected onto the wall along its normal, lands on the
+// triangle. The game's wall check projects along the Z or X axis instead
+// (CollisionPoly_Check[ZX]IntersectApprox), so a diagonal wall also pushes
+// Link standing past its end, in front of its extended plane - as far past as
+// he is in front of it at 45 degrees - on top of the 1 unit / detMax 300
+// tolerance. A line test's snap is on the triangle already.
+static bool pushOnFace(const Model& m, const Push& t) {
+	if (t.line) return true;
+	const Poly& P = m.polys[t.poly];
+	double y = t.from.y + m.checkHeight;
+	double k = planeDist(P, t.from.x, y, t.from.z) / P.nMag;
+	return pointInTri3D(P, t.from.x - k * P.nx, y - k * P.ny, t.from.z - k * P.nz, 0);
+}
 
 // rayFromY (prevPos.y, walking; NAN = none): the frame's floor check first
 // (wall_push_clips.js clipFromFrame).
@@ -800,17 +831,17 @@ static std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const
 	V3 end = landed ? V3{ s2.x, landY, s2.z } : s2;
 	const Poly& C = m.polys[crossed];
 	double sphY = res.y + m.checkHeight;
-	int pusher = -1;
+	const Push* pusher = nullptr;
 	for (const Push& t : trace) {
 		if (t.poly == crossed) continue;
 		double before = planeDist(C, t.from.x, sphY, t.from.z), after = planeDist(C, t.to.x, sphY, t.to.z);
-		if (before >= 0 && after < 0) { pusher = t.poly; break; }
+		if (before >= 0 && after < 0) { pusher = &t; break; }
 	}
-	if (pusher < 0) {
-		for (int i = trace.size() - 1; i >= 0; i--) if (trace[i].poly != crossed) { pusher = trace[i].poly; break; }
+	if (!pusher) {
+		for (int i = trace.size() - 1; i >= 0; i--) if (trace[i].poly != crossed) { pusher = &trace[i]; break; }
 	}
-	if (pusher < 0) return std::nullopt;
-	return ClipResult{ crossed, pusher, end };
+	if (!pusher) return std::nullopt;
+	return ClipResult{ crossed, pusher->poly, end, pushOnFace(m, *pusher) };
 }
 
 struct Pair { int A, B; double cosAB, lo, hi, x0, x1, z0, z1; };
@@ -1213,7 +1244,7 @@ struct Clip {
 	bool hasNext = false, hasFloorY = false, endNoFloor = false;
 	double floorY = 0;
 	vector<int> yaws;
-	bool strict = false;  // low: also clips without the extended planes (checked with extendedOnly)
+	bool strict = false;  // low: acute by the standing points' test (checked with extendedOnly)
 	int yaw = 0;          // crossings and standing points: the exact move (s16 yaw, f32 speed)
 	bool hasMove = false;
 	double speed = 0;
@@ -1287,7 +1318,7 @@ static std::optional<V3> reachFrom(const Model& m, Scratch& s, const V3& p, doub
 			if (!prevO) continue;
 			V3 prev = *prevO;
 			double x = prev.x, z = prev.z;
-			if (std::hypot(p.x - x, p.z - z) > 45) continue; // REACH_DIST
+			if (std::hypot(p.x - x, p.z - z) > REACH_DIST) continue;
 			if (m.lineHit(s, { x, h, z }, { p.x, h, p.z }, LOOSE, false, true)) continue;
 			if (m.isInBounds(s, prev)) return prev;
 		}
@@ -1312,7 +1343,7 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 			if (!prevO) continue;
 			V3 prev = *prevO;
 			double vx = p.x - prev.x, vz = p.z - prev.z, len = std::hypot(vx, vz);
-			if (len < 0.01 || len > 45) continue; // REACH_DIST
+			if (len < 0.01 || len > REACH_DIST) continue;
 			int yaw = yawOf(vx, vz);
 			double speed = F(len / SPEED_RATE);
 			V3 next = moveStep(prev, yaw, speed);
@@ -1323,9 +1354,11 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 			if (!wclip || m.isInBounds(s, wclip->end) || !m.isInBounds(s, prev)) continue;
 			PushList st;
 			V3 sres = m.sphereStep(next, STRICT, &st);
-			bool strict = (bool)clipFromFrame(m, s, prev, sres, st, STRICT, prev.y);
+			// acute: it clips without the extended planes, and the push starts
+			// in front of the pusher's face (not beside it, see pushOnFace)
+			auto sclip = clipFromFrame(m, s, prev, sres, st, STRICT, prev.y);
 			Clip c;
-			c.kind = strict ? 0 : 1;
+			c.kind = sclip && sclip->onFace ? 0 : 1;
 			c.from = next; c.floorY = prev.y; c.hasFloorY = true; c.prev = prev; c.res = wres; c.end = wclip->end;
 			c.next = next; c.hasNext = true; c.yaw = yaw; c.speed = speed; c.hasMove = true;
 			c.crossed = wclip->crossed; c.pusher = wclip->pusher;
@@ -1352,7 +1385,8 @@ static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int 
 	if (m.extendedOnly) {
 		PushList st;
 		V3 sres = m.sphereStep(low, STRICT, &st);
-		c.strict = (bool)clipFromFrame(m, s, low, sres, st, STRICT);
+		auto sclip = clipFromFrame(m, s, low, sres, st, STRICT);
+		c.strict = sclip && sclip->onFace;
 	}
 	c.kind = 2; c.drop = drop;
 	c.from = low; c.floorY = p.y; c.hasFloorY = true; c.prev = *prev; c.res = res; c.end = *end; c.endNoFloor = noFloor;
@@ -1362,13 +1396,13 @@ static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int 
 
 // wall_push_clips.js reachability: the lowest speed Link can do clip `c` at,
 // from a standable in-bounds start one frame's move away (32 directions, every
-// REACH_STEP up to REACH_DIST 45). Crossings: the game's move at that yaw and
+// REACH_STEP up to REACH_DIST). Crossings: the game's move at that yaw and
 // speed (0.5 past the plane) has to hit the pusher and clip through the same
 // wall. Standing points: unlike the JS (which only checks the line), the frame
 // is run too - the move at that yaw and speed has to clip through the same
 // wall and end out of bounds - so the speed is one that works exactly.
 static void reachability(const Model& m, Scratch& s, Clip& c) {
-	const double REACH_DIST = 45, REACH_STEP = 1;
+	const double REACH_STEP = 1;
 	c.reachDone = true;
 	const double floorRef = c.hasFloorY ? c.floorY : c.from.y;
 	const V3 P = c.from;
@@ -1471,7 +1505,7 @@ static double minSpeedAtYaw(const Model& m, Scratch& s, const V3& S, int yaw, in
 }
 
 // --angles: from the refined start, every one of the 4096 directions the sine
-// table tells apart (yaw >> 4): its lowest robust speed up to 30, and whether
+// table tells apart (yaw >> 4): its lowest robust speed up to REACH_DIST / 1.5, and whether
 // the refined speed works there. Printed as runs of neighbouring yaws.
 static void angleRanges(const Model& m, const Refined& r, int pusher, int crossed, int threads) {
 	vector<double> minSp(4096, 0);
@@ -1482,7 +1516,7 @@ static void angleRanges(const Model& m, const Refined& r, int pusher, int crosse
 		s.stamp.assign(m.polys.size(), 0);
 		for (int c; (c = next++) < 4096;) {
 			int yaw = c << 4;
-			minSp[c] = minSpeedAtYaw(m, s, r.start, yaw, pusher, crossed, 0, 30);
+			minSp[c] = minSpeedAtYaw(m, s, r.start, yaw, pusher, crossed, 0, REACH_DIST / SPEED_RATE);
 			atRefined[c] = walkFrameClips(m, s, r.start, yaw, r.speed, pusher, crossed).has_value();
 		}
 	};
@@ -1521,7 +1555,8 @@ static void angleRanges(const Model& m, const Refined& r, int pusher, int crosse
 	char title[128];
 	snprintf(title, sizeof title, "Yaws that clip at speed %.9g:", r.speed);
 	run(title, [&](int c) { return atRefined[c] != 0; }, false);
-	run("Yaws that clip at some speed up to 30 (with the lowest speed in each run):", [&](int c) { return minSp[c] > 0; }, true);
+	snprintf(title, sizeof title, "Yaws that clip at some speed up to %g (with the lowest speed in each run):", REACH_DIST / SPEED_RATE);
+	run(title, [&](int c) { return minSp[c] > 0; }, true);
 	printf("Lowest speed per direction where it clips (runs of the same speed merged):\n");
 	for (int c = 0; c < 4096;) {
 		if (minSp[c] <= 0) { c++; continue; }
@@ -1690,8 +1725,9 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 	};
 	std::atomic<size_t> nextPair{ 0 }, pairsDone{ 0 };
 	// --extended-only: wall pairs (pusher, crossed) with at least one point
-	// that clips without the extended planes too. That makes them acute angle
-	// clips, so all their points are left out, extended ones included.
+	// that is acute (clips without the extended planes too, pushed from in front
+	// of the pusher's face). That makes them acute angle clips, so all their
+	// points are left out, extended ones included.
 	std::mutex acuteMu;
 	std::set<std::pair<int, int>> acutePairs;
 	auto markAcute = [&](int a, int b) {
@@ -1818,7 +1854,11 @@ static vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false)
 				if (!frames.insert({ f0.prev.x, f0.prev.y, f0.prev.z, f0.next.x, f0.next.y, f0.next.z }).second) return;
 				// (extended plane only: falling ones are checked without the
 				// extended planes too, and the ones that still clip left out)
-				bool strict = (cp.drop == 0 || m.extendedOnly) && (bool)crossingClip(m, s, A, cp, STRICT);
+				bool strict = false;
+				if (cp.drop == 0 || m.extendedOnly) {
+					auto sr = crossingClip(m, s, A, cp, STRICT);
+					strict = sr && sr->first.clip.onFace;
+				}
 				if (m.extendedOnly && strict) { markAcute(A.id, r->first.clip.crossed); return; }
 				if (!claimPair(A.id, r->first.clip.crossed)) return;
 				const CrossFound& f = r->first;
@@ -1917,7 +1957,9 @@ static string toJson(const string& game, const string& map, int numPolygons, boo
 	std::ostringstream o;
 	o << "{\n  \"format\": \"wall-push-clips-2\",\n";
 	o << "  \"game\": " << jsonStr(game) << ", \"map\": " << jsonStr(map)
-		<< ", \"falling\": " << (falling ? "true" : "false") << ", \"extendedOnly\": " << (extendedOnly ? "true" : "false") << ", \"numPolygons\": " << numPolygons << ",\n";
+		<< ", \"falling\": " << (falling ? "true" : "false") << ", \"extendedOnly\": " << (extendedOnly ? "true" : "false") << ", \"numPolygons\": " << numPolygons;
+	if (REACH_DIST != DEFAULT_MAX_MOVE) o << ", \"maxMove\": " << num(REACH_DIST);
+	o << ",\n";
 	o << "  \"forms\": [";
 	for (size_t i = 0; i < forms.size(); i++) {
 		o << (i ? ",\n    " : "\n    ") << "{\"form\":" << jsonStr(forms[i].form) << ",\"radius\":" << num(forms[i].radius)
@@ -2031,6 +2073,11 @@ int main(int argc, char** argv) {
 		else if (a == "-o" || a == "--out") out = val();
 		else if (a == "--out-dir") outDir = val();
 		else if (a == "--root") root = val();
+		else if (a == "--max-move") {
+			double n = std::stod(val());
+			if (!(n > 0)) { fprintf(stderr, "--max-move wants a distance > 0\n"); return 2; }
+			setMaxMove(n);
+		}
 		else if (a == "--threads") threads = std::max(1, std::stoi(val()));
 		else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
 	}
@@ -2043,6 +2090,7 @@ int main(int argc, char** argv) {
 			"                  [--angles (with --pair: also every yaw that works from the refined start)]\n"
 			"                  [--from X,Y,Z[,SPEED] (--angles from this start instead, and at this speed)]\n"
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP]]  (one frame from a standing start, printed step by step)\n"
+			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -2196,6 +2244,18 @@ int main(int argc, char** argv) {
 				} else {
 					printf("CLIP: TRI %d pushes Link through TRI %d; after 2 more frames %s, %s\n", clip->pusher, clip->crossed, P(clip->end),
 						m.isInBounds(s, clip->end) ? "in bounds (doesn't count)" : "OUT OF BOUNDS");
+					for (int id : { clip->pusher, clip->crossed }) {
+						const Poly& q = m.polys[id];
+						printf("  TRI %d: (%g, %g, %g) (%g, %g, %g) (%g, %g, %g)  normal (%.4f, %.4f, %.4f)\n", id,
+							q.ax, q.ay, q.az, q.bx, q.by, q.bz, q.cx, q.cy, q.cz, q.nx / q.nMag, q.ny / q.nMag, q.nz / q.nMag);
+					}
+					PushList st;
+					V3 sres = m.sphereStep(next, STRICT, &st);
+					for (const Push& t : st) if (!t.line) printf("  without the extended planes: TRI %d pushes %s -> %s\n", t.poly, P(t.from), P(t.to));
+					auto sclip = clipFromFrame(m, s, start, sres, st, STRICT, drop > 0 ? NAN : start.y);
+					printf("without the extended planes: %s\n", !sclip ? "no clip (extended)"
+						: sclip->onFace ? "still clips, pushed from in front of the pusher's face (acute)"
+						: "still clips, but pushed from beside the pusher, past its edge (extended)");
 					if (drop > 0) {
 						bool noFloor;
 						auto land = landing(m, s, res, start.y, noFloor);
@@ -2242,7 +2302,7 @@ int main(int argc, char** argv) {
 						c->from.x, c->from.y, c->from.z, c->drop ? (", drop " + std::to_string(c->drop)).c_str() : "");
 				}
 				size_t none = std::count_if(found.begin(), found.end(), [](const Clip& c) { return !c.hasReach; });
-				if (none) fprintf(stderr, "  (%zu clip points not reachable from a standable start at up to speed 30)\n", none);
+				if (none) fprintf(stderr, "  (%zu clip points not reachable from a standable start at up to speed %g)\n", none, REACH_DIST / SPEED_RATE);
 				if (refine) {
 					if (onlyPusher < 0) { fprintf(stderr, "--refine needs --pair PUSHER,CROSSED\n"); return 2; }
 					auto t0r = std::chrono::steady_clock::now();
@@ -2291,7 +2351,8 @@ int main(int argc, char** argv) {
 						auto cl = frame(LOOSE, res, at, cross);
 						if (cl) {
 							Clip c;
-							c.kind = frame(STRICT, sres, sat, scross) ? 0 : 1;
+							auto scl = frame(STRICT, sres, sat, scross);
+							c.kind = scl && scl->onFace ? 0 : 1;
 							c.cross = cross;
 							c.pusher = onlyPusher; c.crossed = onlyCrossed;
 							c.prev = r.start; c.next = moveStep(r.start, r.yaw, r.speed); c.hasNext = true;

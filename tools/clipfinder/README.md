@@ -72,7 +72,7 @@ the radius, so scan each form you care about.
 | Option | Meaning |
 |---|---|
 | `--falling` | Also look for clips while falling ("low" clips). Link's post-move position (posNext) is 2–30 below the floor, so the wall check runs lower than when walking. Slower. Falling crossings are only generated for drops where `checkHeight + dy >= 5`. Beyond that, the game's line test runs from Link's feet with floors included and stops him on his own floor (MM Human: drop over 21.8, OoT: over 21, Crawlspace: over 10). |
-| `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes (the 1-unit / `detMax 300` tolerance of the game's triangle checks). A pair with even one point that also clips without that tolerance is an acute angle clip, so all its points are left out, extended ones included. Falling points that still clip without the tolerance count as acute too. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
+| `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) A point is **acute** when it still clips without the tolerance *and* the push that does it starts with Link in front of the pusher's actual face (projected along its normal onto the triangle); every other walking point is **extended**. A pair with even one acute point is an acute angle clip, so all its points are left out, extended ones included. Falling points that are acute by the same test count too. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
 | `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them). Needed for `--refine` / `--angles`. |
 
@@ -80,10 +80,11 @@ the radius, so scan each form you care about.
 
 | Option | Meaning |
 |---|---|
-| `--min-speed` | For every clip, the lowest speed that does it: starts in 32 directions every 1 unit up to 45 away, each where Link comes to rest there, with the real frame run. Written to each clip as `"reach": {speed, yaw, start}` (`null` if none). The terminal lists the lowest per wall pair. The viewer's "Reachable only" filter uses these values directly. |
+| `--min-speed` | For every clip, the lowest speed that does it: starts in 32 directions every 1 unit up to 45 away (`--max-move`), each where Link comes to rest there, with the real frame run. Written to each clip as `"reach": {speed, yaw, start}` (`null` if none). The terminal lists the lowest per wall pair. The viewer's "Reachable only" filter uses these values directly. |
 | `--refine` | With `--pair`: the exact lowest **walking** speed for that clip. It searches every standable in-bounds start within 24 of the best coarse one (0.25 grid), every yaw toward the clip points (then single steps), and speeds every 0.02, bisected down to the exact f32 boundary. A speed only counts if the clip also works at +0.0025 … +0.01, which rules out single-value flukes (like posNext landing exactly on a wall's plane). The JSON's `clips` then holds **only the refined clip** (its `prev` is the start, its `yaw` and `speed` the move), so the tester runs exactly that move. If the refine finds nothing, the ordinary clips are written. Implies `--min-speed`. |
-| `--angles` | With `--pair`: after refining, try all 4096 directions from the refined start. The game's sine table ignores the yaw's low 4 bits, so e.g. `0xFFC0`–`0xFFCF` move Link the same way. Prints the yaws that clip at the refined speed, the yaws that clip at any speed up to 30, and each direction's lowest speed. Implies `--refine`. |
+| `--angles` | With `--pair`: after refining, try all 4096 directions from the refined start. The game's sine table ignores the yaw's low 4 bits, so e.g. `0xFFC0`–`0xFFCF` move Link the same way. Prints the yaws that clip at the refined speed, the yaws that clip at any speed up to 30 (`--max-move` / 1.5), and each direction's lowest speed. Implies `--refine`. |
 | `--from X,Y,Z[,SPEED]` | With `--pair`: `--angles` from this start (feet position) instead of the refined one, and at SPEED if given. Warns if Link wouldn't stand still there or if it's out of bounds. |
+| `--max-move N` | How far Link can move in one frame, in units. Default 45 (speed 30), which glitches can beat (55+). Crossing points are tried from starts up to 32 back by default, and every 4 past that out to N when N is over 45. `--min-speed`, `--refine` and `--angles` look for starts up to N away (speed N / 1.5). Written to the JSON as `"maxMove"` when it isn't 45; the viewer's max move box picks it up on import. Scans take longer the further out it goes. |
 
 ### Debugging one frame
 
@@ -105,7 +106,7 @@ the radius, so scan each form you care about.
 ```jsonc
 {
   "format": "wall-push-clips-2",
-  "game": "MM", "map": "Treasure Chest Shop", "falling": false, "extendedOnly": false, "numPolygons": 97,
+  "game": "MM", "map": "Treasure Chest Shop", "falling": false, "extendedOnly": false, "numPolygons": 97,  // , "maxMove": N with --max-move
   "forms": [
     {"form": "Human", "radius": 14, "checkHeight": 26.8000011}
   ],
