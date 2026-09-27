@@ -32,7 +32,7 @@ bool pushOnFace(const Model& m, const Push& t) {
 // rayFromY (prevPos.y, walking; NAN = none): the frame's floor check first
 // (wall_push_clips.js clipFromFrame).
 std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const V3& prev, const V3& res,
-	const PushList& trace, const Tol& tol, double rayFromY) {
+	const PushList& trace, const Tol& tol, double rayFromY, const Move* move) {
 	if (trace.empty()) return std::nullopt;
 	const V3 from = { prev.x, res.y, prev.z };
 	int crossed = m.crossedWall(s, from, res);
@@ -48,15 +48,39 @@ std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const V3& pr
 			at = { res.x, F(*fy - GROUND_DROP), res.z };
 		}
 	}
-	V3 s1 = m.sphereStep(at, tol, nullptr);
-	V3 s2 = m.sphereStep(s1, tol, nullptr);
-	const V3 from2 = { prev.x, at.y, prev.z };
-	// still through the same wall, or landed at another height through any
-	// (wall_push_clips.js clipFromFrame: MM Treasure Chest Shop TRI 50 / 90)
-	int held = m.crossedWall(s, from2, s2);
-	if (landed ? held < 0 : held != crossed) return std::nullopt;
-	if (m.crossedWall(s, from2, s2, true) >= 0) return std::nullopt;
-	V3 end = landed ? V3{ s2.x, landY, s2.z } : s2;
+	// Two more frames standing still from `at0`: still through the same wall,
+	// or landed at another height through any (wall_push_clips.js
+	// clipFromFrame: MM Treasure Chest Shop TRI 50 / 90).
+	auto standStill = [&](const V3& at0, bool landed0, double landY0, V3& endOut) {
+		V3 s1 = m.sphereStep(at0, tol, nullptr);
+		V3 s2 = m.sphereStep(s1, tol, nullptr);
+		const V3 from2 = { prev.x, at0.y, prev.z };
+		int held = m.crossedWall(s, from2, s2);
+		if (landed0 ? held < 0 : held != crossed) return false;
+		// out the other side of a thin wall: through it, not out of bounds - but
+		// through a dynapoly (a gate, a fence) that's what the clip is for
+		if (m.polys[crossed].bg < 0 && m.crossedWall(s, from2, s2, true) >= 0) return false;
+		endOut = landed0 ? V3{ s2.x, landY0, s2.z } : s2;
+		return true;
+	};
+	V3 end;
+	bool hold = false;
+	if (!standStill(at, landed, landY, end)) {
+		// Standing still, the wall he went through pushes him back out (he's
+		// less than 4 behind it). Holding the stick, the next frame's move can
+		// take him further behind it before its check runs, and then it can't
+		// (OoT Ice Cavern: the rock TRI 721 puts Link 1.5 behind the red ice).
+		// One more frame of the same move from where he landed, then standing.
+		if (!move || !landed) return std::nullopt;
+		V3 st2 = { res.x, landY, res.z };
+		V3 nx2 = moveStep(st2, move->yaw, move->speed);
+		auto lf = lineFrame(m, s, st2, nx2, tol);
+		V3 r2 = lf ? lf->res : m.sphereStep(nx2, tol, nullptr, &st2);
+		auto fy = m.floorCheck(r2.x, r2.z, F(st2.y + 50));
+		if (!fy || F(*fy - r2.y) < -11) return std::nullopt;
+		if (!standStill({ r2.x, F(*fy - GROUND_DROP), r2.z }, true, *fy, end)) return std::nullopt;
+		hold = true;
+	}
 	const Poly& C = m.polys[crossed];
 	double sphY = res.y + m.checkHeight;
 	const Push* pusher = nullptr;
@@ -69,7 +93,7 @@ std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const V3& pr
 		for (int i = trace.size() - 1; i >= 0; i--) if (trace[i].poly != crossed) { pusher = &trace[i]; break; }
 	}
 	if (!pusher) return std::nullopt;
-	return ClipResult{ crossed, pusher->poly, end, pushOnFace(m, *pusher) };
+	return ClipResult{ crossed, pusher->poly, end, pushOnFace(m, *pusher), hold };
 }
 std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3& prev, const V3& next, const Tol& tol) {
 	double h = F(next.y + m.checkHeight);
@@ -84,16 +108,16 @@ std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3& prev, 
 	LineFrameR r;
 	r.hit = *hit;
 	r.trace.push_back({ hit->poly, next, snapped, true });
-	r.res = m.sphereStep(snapped, tol, &r.trace);
+	r.res = m.sphereStep(snapped, tol, &r.trace, &prev, m.polys[hit->poly].bg >= 0);
 	return r;
 }
-std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor) {
+std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor, int crossed) {
 	noFloor = false;
 	auto land = m.floorCheck(res.x, res.z, F(floorY + 50));
 	if (!land) { noFloor = true; return res; }
 	V3 st = m.sphereStep(m.sphereStep({ res.x, F(*land - GROUND_DROP), res.z }, LOOSE, nullptr), LOOSE, nullptr);
 	V3 end = { st.x, *land, st.z };
-	if (m.isInBounds(s, end)) return std::nullopt;
+	if (!m.endCounts(s, crossed, end)) return std::nullopt;
 	return end;
 }
 // The highest floor within 10 of ref, then the top one of the floors at most

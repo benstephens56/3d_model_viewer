@@ -36,3 +36,6 @@ bool parseScene(const vector<uint8_t>& buf, const string& game, ColHeader& ch, v
 void initColCtx(ColCtx& c, const string& game, const string& mapName, const ColHeader& ch);
 
 void initializeSubdivisions(ColCtx& c, const vector<Tri>& tris);
+
+// The subdivisions a poly goes in (StaticLookup_AddPoly's cube test), as indices.
+void subdivisionCellsOf(const ColCtx& c, const Tri& t, vector<int>& out);

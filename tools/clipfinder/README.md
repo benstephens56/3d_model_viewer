@@ -52,6 +52,9 @@ tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Dek
 
 # One frame, step by step
 tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --sim "-239.859,0,824.246,0xFF9D,11" --out-dir tools/clipfinder/results
+
+# With the map's dynapoly actors (exported from the viewer), only the wall pairs with a dynapoly wall in them
+tools/clipfinder/clipfinder.exe --game OOT --map "Spot 01 - Kakariko Village" --form All --falling --dyna OOT_Spot_01_-_Kakariko_Village_dyna.json --dyna-only -o tools/clipfinder/results/kak_dyna.json
 ```
 
 Progress and summaries print to the terminal (stderr). The JSON goes to the
@@ -86,6 +89,8 @@ the radius, so scan each form you care about.
 | `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) See **Acute or extended** below for how a wall pair is categorised; this leaves out every acute pair, all its points included. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
 | `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them). Needed for `--refine` / `--angles`. |
+| `--dyna FILE` | Add the map's dynapoly actors, from the viewer's **Export dynapolys** (see **Dynapolys** below). One map's export: use `--map`, not `--all`. Output files named by `--out-dir` get `_dyna` added. |
+| `--dyna-only` | With `--dyna`: only scan the wall pairs that have a dynapoly wall in them (pusher or clipped wall). Much faster; the static-only pairs are what a scan without `--dyna` finds, give or take the dynapolys' effect on them. |
 
 ### Speed and angle analysis
 
@@ -169,6 +174,94 @@ and the tester.
   "border"` tries only the cells next to one with the other answer (about a
   quarter of them). Turn `RECORD` off for this: it adds 3 s a cell.
 
+## Dynapolys
+
+Without `--dyna` the scan sees only the scene's static collision. With it, the
+dynapoly actors the viewer had loaded join in, the way `z_bgcheck.c` handles
+them:
+
+- **Getting the file.** Load the map in the viewer (with **Render Actors** on),
+  then **Export dynapolys** in the wall clip panel. It writes each dynapoly
+  actor under the **Actors** rows in the order they take bg actor slots, which
+  is the order the game checks them in and can decide a clip: spawn order,
+  except that the actors that register their collision from Update once
+  their own object has loaded (Bg_Spot01_Objects2, Door_Shutter, ...:
+  `LATE_BG_ACTORS` in `js/render_actors.js`) come after all the others. (In
+  Kakariko setup 2 a crate pushes Link through the shooting gallery's wall
+  only because the gallery's walls are checked after the crate's.) Hide an actor's row to
+  leave it out, e.g. a door you'll have opened; the **Actor display** menu
+  doesn't count, only the rows. Each actor is its tangible polys in world
+  space as `DynaPoly_ExpandSRT` builds them (s16 vertices, normals and plane
+  distances recomputed from those), plus the bounding sphere and Y range the
+  game culls it with. The viewer draws each actor in its default state (switch
+  flags unset and so on), and that state is the one exported.
+- **Wall pushes** (`BgCheck_CheckWallImpl`): the dynapoly walls push *before*
+  the static ones: every bg actor whose Y range and bounding sphere (grown by
+  the radius) take Link, all its walls' Z pushes, then all their X pushes. The
+  lists are in reverse poly order, unsorted, with no early out. Then the
+  static walls push, in the subdivision of where the dynapolys left him.
+- **The dynapoly line check.** After a dynapoly collision (a dynapoly push, or
+  the frame's line test stopping him on a dynapoly with no static push after
+  it), the game checks the line from posPrev to the result against the
+  **static** walls, one face only, and puts Link the radius in front of the
+  first one crossed. That stops most "a dynapoly pushes Link through a static
+  wall" clips, but not where the line misses the wall: it runs at Link's feet,
+  and walking it ends 7.5 below the floor, under a wall whose bottom is at
+  floor level. The other way round, a static wall pushing him through a
+  dynapoly, isn't checked at all.
+- **Line tests and floors.** The frame's line test and the floor check include
+  the dynapolys (`BgCheck_CheckLineAgainstDyna`, `BgCheck_RaycastFloorDyna`:
+  dynapoly floors have the `detMax 300` tolerance, and their walls count as
+  floors only when nothing else was found). Standable spots, in bounds and
+  "behind a wall" all see them too.
+- **What counts.** A clip through a static wall still has to leave Link out
+  of bounds. A clip through a **dynapoly** wall counts wherever he ends up,
+  as long as he's still behind it two frames later, and passing clean through
+  a thin one is allowed: getting past a gate, a fence or a door is the point,
+  and that usually lands in bounds. This covers dynapolys pushed through by
+  other dynapolys (the same actor's or another's), and static walls pushing
+  Link into a dynapoly, like a crate against a wall.
+- **Poly ids.** Dynapolys get the ids after the scene's own, in the file's
+  order (`numPolygons` on). The results carry the export as `"dyna"`, so the
+  viewer rebuilds the same ids on import, and labels them, e.g.
+  `TRI 971 (Obj_Kibako2 dynapoly 4)`. `--sim` does the same.
+
+Things the export can't know: actors that move (they're exported where they
+spawn), ones that only appear later, and which dynapoly actors are loaded
+together in-game. The export has each actor its spawn list has for the chosen
+setup.
+
+## Holding the stick, and floor snaps
+
+Two kinds of clip beyond one push from a standing start:
+
+- **Hold clips** (`"hold": true`). After the clip frame the scan normally has
+  Link stand still for two frames; a wall he's less than 4 behind pushes him
+  back out, so that isn't a clip. If he keeps holding the stick instead, the
+  next frame's move (the same yaw and speed) can take him further behind it
+  before its check runs, and then it can't. When standing still fails, the
+  scan tries that one extra frame, then two standing still, and marks the
+  point `hold`. The viewer says so when you click it. `wall_clip_tester.lua`
+  doesn't hold the stick yet, so it won't reproduce these. (OoT Ice Cavern:
+  the rock TRI 721 puts Link 1.5 behind the red ice, and holding on takes him
+  through.)
+- **Floor snaps.** Moving more than his radius in a frame, the game's line
+  test includes floors, and it puts Link the radius out along a sloped
+  floor's horizontal direction just as for a wall. That can put him behind
+  the wall the slope runs up to, so sloped floors are pushers too, for
+  crossings only (floors never push in the wall check). (OoT Bottom of the
+  Well: the slopes TRI 863 and 860 through the walls TRI 876 / 884 / 885.)
+  The line only meets a slope where it has risen checkHeight - 7.5 above
+  Link's floor, often most of a frame's move away, so for slope pushers the
+  scan looks for his floor and starts out to the full `--max-move`. Many
+  need speeds near or over 30: OoT Shadow Temple TRI 1182 through TRI 1160
+  gives 17 points at the default, 233 with `--max-move 55`.
+
+Not modelled: a running start. Every frame starts where Link stands still. A
+clip whose frame has to start where only a previous frame's move could have
+put him (e.g. still sliding along a wall that would push him away if he
+stopped) isn't found. The Ice Cavern red ice clip is one of these.
+
 ## Acute or extended
 
 Every wall pair (pushing wall, clipped wall) gets one category, per form, and
@@ -195,6 +288,7 @@ point is acute.
 
 The search lives only here. `js/wall_push_clips.js` still has the collision
 model, `clipFromFrame`, `standSpot`, `landing` and `reachability`, for the
-viewer's "Reachable only" on files without `--min-speed` data. A change to
-those belongs in both. One difference: `--min-speed` also runs the frame for
+viewer's "Reachable only" on files without `--min-speed` data, dynapolys
+included (`src/collision.cpp` / `CollisionModel`). A change to those belongs
+in both. One difference: `--min-speed` also runs the frame for
 standing points, which the viewer's "Reachable only" doesn't.

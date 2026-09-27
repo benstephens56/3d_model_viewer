@@ -12,7 +12,11 @@ extern vector<double> MOVE_STEPS;
 extern double REACH_DIST;
 // onFace: the push that took Link through started with him in front of the
 // pusher's actual face (see pushOnFace), not beside it.
-struct ClipResult { int crossed, pusher; V3 end; bool onFace; };
+// hold: Link only stays through if he keeps moving (the same yaw and speed)
+// for one more frame after the push, instead of standing still
+struct ClipResult { int crossed, pusher; V3 end; bool onFace; bool hold = false; };
+// The frame's move, for a clip's hold frame (clipFromFrame)
+struct Move { int yaw; double speed; };
 struct LineFrameR { Hit hit; V3 res; PushList trace; };
 
 void setMaxMove(double n);
@@ -33,12 +37,15 @@ bool pushOnFace(const Model& m, const Push& t);
 
 // rayFromY (prevPos.y, walking; NAN = none): the frame's floor check first
 // (wall_push_clips.js clipFromFrame).
+// move (walking frames): if standing still afterwards puts him back, try
+// keeping the stick held for one more frame (ClipResult::hold).
 std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const V3& prev, const V3& res,
-	const PushList& trace, const Tol& tol, double rayFromY = NAN);
+	const PushList& trace, const Tol& tol, double rayFromY = NAN, const Move* move = nullptr);
 
 std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3& prev, const V3& next, const Tol& tol);
 
-std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor);
+// crossed: the wall clipped through; a dynapoly one counts wherever he lands (Model::endCounts)
+std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor, int crossed = -1);
 
 // wall_push_clips.js standSpot: where Link can stand still near (x, z).
 std::optional<V3> standSpot(const Model& m, double x, double z, double floorY);

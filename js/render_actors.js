@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { addModelCheckbox, buildGeometry, buildGeometry_fwc, clearAllModels, buildGeometryButDontAddToScene, getModelGroup, primaryColorTarget, resetGroupModelState, applyGroupMasterState } from './render.js';
+import { addModelCheckbox, buildGeometry, buildGeometry_fwc, clearAllModels, buildGeometryButDontAddToScene } from './render.js';
 import { parseCollisionHeader, parseVerticesAndPolygons, parseWaterboxes } from './parse_model.js';
-import { dynaTransformVertices, dynaRecomputePolyData, dynaActorPos } from './dyna_transform.js';
+import { dynaTransformVertices, dynaRecomputePolyData, dynaActorPos, dynaBoundingSphere } from './dyna_transform.js';
 import { buildWaterBoxModel } from './waterboxes.js';
 import { renderStandableSurfaceXZ, STANDABLE_DET_MAX_DYNAPOLY } from './standable_surfaces.js';
 
@@ -680,16 +680,41 @@ export function actorShapeRot(actorName, spawn, game, sceneName) {
         : spawn.rot;
 }
 
-export async function renderZeldaObjectsInScene(scene, game, sceneName) {
-    // Start every dynapoly row at its intended default for this map: actor
-    // collision shown, standable-surface and seams overlays hidden.
-    //
-    // Saved visibility is keyed by model name and survives a scene load (which
-    // is what lets a colour you picked persist). Carrying visibility across
-    // scenes is wrong though -- unchecking an actor in one map left the same
-    // actor unchecked on entering the next map, looking like collision had
-    // failed to load. Colours are still remembered.
-    resetGroupModelState('dynapoly');
+/**
+ * Build the collision of every dynapoly actor in the selected setup.
+ *
+ * Nothing is added to the scene and no sidebar rows are made: the objects are
+ * handed back for oot_actors.js, which puts each one in the same "Actors" row
+ * as the actor's model, under the layer the "Actor display" menu toggles.
+ * They are registered in loadedModels (selection, the wireframe checkbox).
+ *
+ * spawns: [{ spawn, position, room }] -- see the loop below.
+ *
+ * @returns {Map<string, Array<{collision: THREE.Object3D, standable: ?THREE.Object3D,
+ *          seams: ?THREE.Object3D, colorTarget: THREE.Object3D, color: string}>>}
+ *          keyed by actor name ("Obj_Tokei_Step"), one entry per instance
+ */
+// Dynapoly actors that register their collision late: not in their Init but
+// from Update, once an object they load themselves is in (e.g.
+// Bg_Spot01_Objects2's func_808AC2BC, DoorShutter_WaitForObject). By then
+// every actor that registers in its Init has its bg actor slot, so these come
+// after all of them in bgId order - the order the game checks dynapolys in
+// (the export's `order`). Found by listing the decomps' actors whose
+// DynaPolyActor_LoadMesh isn't reachable from their Init. (MM Dm_Char08 loads
+// in Init for some types, so it isn't here.)
+const LATE_BG_ACTORS = {
+    OOT: new Set([
+        "Bg_Breakwall", "Bg_Haka_Megane", "Bg_Haka_Zou", "Bg_Mjin", "Bg_Mori_Hineri",
+        "Bg_Spot01_Objects2", "Bg_Spot09_Obj", "Bg_Spot18_Obj", "Demo_Gt", "Door_Shutter",
+    ]),
+    MM: new Set([
+        "Bg_Breakwall", "Bg_Danpei_Movebg", "Bg_Umajump", "En_Horse_Game_Check", "En_Sekihi",
+        "En_Warp_tag", "Obj_Etcetera", "Obj_Nozoki", "Obj_Purify", "Obj_Pzlblock",
+    ]),
+};
+
+export async function buildDynaPolyActors(scene, game, sceneName, spawns) {
+    const byActor = new Map();
 
     function normalizeTriangleIndices(tris, vertexCount) {
         if (!tris || tris.length === 0) {
@@ -715,11 +740,6 @@ export async function renderZeldaObjectsInScene(scene, game, sceneName) {
 
     const objectCache = new Map();
 
-    const setupDropdown = document.getElementById("setupDropdown");
-    let setupID = 0;
-    if(setupDropdown.value)
-        setupID = setupDropdown.value;
-
     let json_path = null;
 
     // ------------------------------------------------------------
@@ -729,7 +749,7 @@ export async function renderZeldaObjectsInScene(scene, game, sceneName) {
     const actors = await fetchJSON(json_path);
     if (!actors) {
         console.log("Failed to parse 'actors' json in game: " + game);
-        return;
+        return byActor;
     }
     //console.log(actors);
 
@@ -740,688 +760,678 @@ export async function renderZeldaObjectsInScene(scene, game, sceneName) {
     const objects = await fetchJSON(json_path);
     if (!objects) {
         console.log("Failed to parse 'objects' json in game: " + game);
-        return;
+        return byActor;
     }
     //console.log(objects);
 
     // ------------------------------------------------------------
-    // Process every room
+    // Process every spawn
     // ------------------------------------------------------------
-    for (let i = 0; i < areaActors[setupID]["rooms"].length; i++) {
-        const room = areaActors[setupID]["rooms"][i];
+    // `spawns` is the setup's spawn list as oot_actors.js expands it: every
+    // room's entries decoded (decodeActorSpawnEntry), plus the actors an
+    // Init spawns or moves (an override's `spawns`, e.g. Obj_Tokei_Tobira's
+    // second door), so the collision lands where the models do.
+    for (const [spawnIndex, { spawn, position, room }] of spawns.entries()) {
+        // Decoded values throughout -- rotXYZ in particular is binang, which
+        // is what the SkinMatrix code and the THREE rotation below expect.
+        const actorId = spawn.actorId;
+        const actorParams = spawn.params;
+        const posXYZ = position;
+        const rotSpawnXYZ = spawn.rot;
+        const rotRawXYZ = spawn.rotRaw;
 
-        // --------------------------------------------------------
-        // Process every actor in room
-        // --------------------------------------------------------
-        for (let j = 0; j < room["actors"].length; j++) {
-            const actor = room["actors"][j];
+        // ----------------------------------------------------
+        // Get actor/object information
+        // ----------------------------------------------------
+        const actorTableEntry = actors[actorId];
+        if (!actorTableEntry) {
+            console.warn("Unknown actor id in spawn list:",
+                `0x${actorId.toString(16).toUpperCase()}`);
+            continue;
+        }
+        const actorName = actorTableEntry["name"];
+        //const actorObjectId = actorTableEntry["objectId"];
+        //const objectName = objects[actorObjectId]["name"];
 
-            // The spawn list stores the id and rotations bit-packed in MM;
-            // decodeActorSpawnEntry() undoes that (and is a pass-through for
-            // OOT). Everything below wants the decoded values -- rotXYZ in
-            // particular is binang, which is what the SkinMatrix code and the
-            // THREE rotation below both expect.
-            const spawn = decodeActorSpawnEntry(actor, game);
-            const actorId = spawn.actorId;
-            const actorParams = spawn.params;
-            const posXYZ = actor.position;
-            const rotSpawnXYZ = spawn.rot;
-            const rotRawXYZ = spawn.rotRaw;
+        // What DynaPoly actually rotates the collision by: shape.rot after
+        // the actor's Init has had its say, not the raw spawn rotation.
+        // sceneName is passed through because a couple of Inits branch on
+        // play->sceneId (Obj_Switch only zeroes roll in SCENE_SECOM).
+        const rotXYZ = actorShapeRot(actorName, spawn, game, sceneName);
 
-            // ----------------------------------------------------
-            // Get actor/object information
-            // ----------------------------------------------------
-            const actorTableEntry = actors[actorId];
-            if (!actorTableEntry) {
-                console.warn("Unknown actor id in spawn list:",
-                    `0x${actorId.toString(16).toUpperCase()}`,
-                    "(raw id word 0x" + (actor.actorId & 0xFFFF).toString(16).toUpperCase() + ")");
-                continue;
-            }
-            const actorName = actorTableEntry["name"];
-            //const actorObjectId = actorTableEntry["objectId"];
-            //const objectName = objects[actorObjectId]["name"];
+        // ----------------------------------------------------
+        // Check if this is a dynapoly actor
+        // ----------------------------------------------------
+        function getMaskShift(mask) {
+            let shift = 0;
 
-            // What DynaPoly actually rotates the collision by: shape.rot after
-            // the actor's Init has had its say, not the raw spawn rotation.
-            // sceneName is passed through because a couple of Inits branch on
-            // play->sceneId (Obj_Switch only zeroes roll in SCENE_SECOM).
-            const rotXYZ = actorShapeRot(actorName, spawn, game, sceneName);
-
-            // ----------------------------------------------------
-            // Check if this is a dynapoly actor
-            // ----------------------------------------------------
-            function getMaskShift(mask) {
-                let shift = 0;
-
-                while ((mask & 1) === 0) {
-                    mask >>= 1;
-                    shift++;
-                }
-
-                return shift;
-            }
-            
-            let DynaPoly_Actors = null;
-            let Dynapoly_Collisions = null;
-            if (game == "OOT") {
-                DynaPoly_Actors = OOT_Dynapoly_Actors;
-                Dynapoly_Collisions = OOT_Dynapoly_Collisions;
-            }
-            else if (game == "MM") {
-                DynaPoly_Actors = MM_Dynapoly_Actors;
-                Dynapoly_Collisions = MM_Dynapoly_Collisions;
+            while ((mask & 1) === 0) {
+                mask >>= 1;
+                shift++;
             }
 
-            const dynaPolyActor = DynaPoly_Actors.find(i => {
-                if (i.actor_name !== actorName)
-                    return false;
+            return shift;
+        }
+        
+        let DynaPoly_Actors = null;
+        let Dynapoly_Collisions = null;
+        if (game == "OOT") {
+            DynaPoly_Actors = OOT_Dynapoly_Actors;
+            Dynapoly_Collisions = OOT_Dynapoly_Collisions;
+        }
+        else if (game == "MM") {
+            DynaPoly_Actors = MM_Dynapoly_Actors;
+            Dynapoly_Collisions = MM_Dynapoly_Collisions;
+        }
 
-                // Some actors only become dynapoly in (or outside of) specific
-                // scenes -- ObjNozoki_Init skips DynaPolyActor_Init entirely
-                // when play->sceneId == SCENE_AYASHIISHOP, for instance. Rows
-                // can opt into an allow-list or a deny-list of scene names;
-                // both match sceneName, the map filename the actor JSON is
-                // keyed by (e.g. "Z2_AYASHIISHOP").
-                if (i.scenes && !i.scenes.includes(sceneName))
-                    return false;
+        const dynaPolyActor = DynaPoly_Actors.find(i => {
+            if (i.actor_name !== actorName)
+                return false;
 
-                if (i.exclude_scenes && i.exclude_scenes.includes(sceneName))
-                    return false;
+            // Some actors only become dynapoly in (or outside of) specific
+            // scenes -- ObjNozoki_Init skips DynaPolyActor_Init entirely
+            // when play->sceneId == SCENE_AYASHIISHOP, for instance. Rows
+            // can opt into an allow-list or a deny-list of scene names;
+            // both match sceneName, the map filename the actor JSON is
+            // keyed by (e.g. "Z2_AYASHIISHOP").
+            if (i.scenes && !i.scenes.includes(sceneName))
+                return false;
 
-                if (i.params_mask == null)
-                    return true;
+            if (i.exclude_scenes && i.exclude_scenes.includes(sceneName))
+                return false;
 
-                const maskedParams = actorParams & i.params_mask;
+            if (i.params_mask == null)
+                return true;
 
-                let paramValue;
+            const maskedParams = actorParams & i.params_mask;
 
-                if (i.params_mask === 0xFFFF) {
-                    // Special case: full 16-bit params.
-                    // Do NOT shift, because values like 0xFFFF
-                    // represent the entire params field.
-                    paramValue = maskedParams;
-                }
-                else {
-                    // Extract the masked field and shift it down
-                    // so params_values contains the natural value.
-                    const shift = getMaskShift(i.params_mask);
-                    paramValue = maskedParams >> shift;
-                }
+            let paramValue;
 
-                return i.params_values?.includes(paramValue);
-            });
-
-            if (!dynaPolyActor) {
-                continue;
+            if (i.params_mask === 0xFFFF) {
+                // Special case: full 16-bit params.
+                // Do NOT shift, because values like 0xFFFF
+                // represent the entire params field.
+                paramValue = maskedParams;
+            }
+            else {
+                // Extract the masked field and shift it down
+                // so params_values contains the natural value.
+                const shift = getMaskShift(i.params_mask);
+                paramValue = maskedParams >> shift;
             }
 
-            // `scale` in the dynapoly tables is one uniform multiplier, a
-            // per-axis [x, y, z] triple, or a function of params, e.g.
-            //   Bg_Hakugin_Switch    scale: 0.1
-            //   Bg_Haka_Bombwall     scale: [0.07, 0.016, 0.07]
-            //   En_Horse_Game_Check  scale: (params) => (((params >> 8) & 0xFF) * 0.001)
-            //
-            // The function form is needed for actors that compute their own
-            // scale in Init instead of using a constant -- listing one table
-            // row per observed params value instead silently drops any
-            // instance whose value isn't in the list.
-            //
-            // The game stores actor->scale as a Vec3f and DynaPoly_ExpandSRT
-            // passes each component separately into
-            // SkinMatrix_SetTranslateRotateYXZScale, so a non-uniform scale
-            // really does produce differently proportioned collision -- it
-            // can't be collapsed to a single number.
-            const scale = (typeof dynaPolyActor.scale === 'function')
-                ? dynaPolyActor.scale(actorParams)
-                : dynaPolyActor.scale;
-
-            let scaleVec;
-            if (Array.isArray(scale)) {
-                scaleVec = { x: scale[0], y: scale[1], z: scale[2] };
-            } else if (typeof scale === 'number') {
-                scaleVec = { x: scale, y: scale, z: scale };
-            } else {
-                console.warn(
-                    "Dynapoly actor has no usable scale, defaulting to 1:",
-                    dynaPolyActor.actor_name, scale);
-                scaleVec = { x: 1, y: 1, z: 1 };
-            }
-
-            // ----------------------------------------------------
-            // Find collision information
-            // ----------------------------------------------------
-            // collision_name is not unique on its own -- OOT has an sCol in
-            // both ovl_Bg_Ganon_Otyuka and ovl_En_Jsjutan, and a bare name
-            // lookup always found the first. A row can add collision_file to
-            // say which file it means.
-            const actorCollision = Dynapoly_Collisions.find(
-                i => i.collision_name === dynaPolyActor.collision_name &&
-                     (dynaPolyActor.collision_file == null ||
-                      i.file_name === dynaPolyActor.collision_file));
-            if (!actorCollision) {
-                alert('No collision found for dynapoly actor: ' + dynaPolyActor.actor_name);
-                continue;
-            }
-            const objectName = actorCollision["file_name"];
-            const isOverlay = actorCollision.type === "overlay";
-            const cacheKey = `${objectName}:${actorCollision.offset}`;
-            //console.log(actorName + ": " + objectName);
-            //console.log(dynaPolyActor);
-            //console.log(actorCollision);
-
-            // ----------------------------------------------------
-            // Load object binary
-            // ----------------------------------------------------
-            try {
-                let cachedObject = objectCache.get(cacheKey);
-
-                if (!cachedObject) {
-                    // Overlays live in their own folder, not with the objects.
-                    const res = await fetch(
-                        './models/' +
-                        game +
-                        (isOverlay ? '/actors/overlays/' : '/actors/objects/') +
-                        objectName
-                    );
-
-                    const buffer = await res.arrayBuffer();
-
-                    // Overlay pointers are link-time VRAM addresses; without
-                    // the overlay's base address they cannot be turned into
-                    // file offsets. Prefer the value declared in the table and
-                    // fall back to recovering it from the file.
-                    let baseAddress = null;
-                    if (isOverlay) {
-                        baseAddress = actorCollision.base_address ?? null;
-
-                        if (baseAddress == null) {
-                            baseAddress = deriveOverlayBaseAddress(
-                                new DataView(buffer), actorCollision.offset);
-
-                            if (baseAddress == null) {
-                                console.error(
-                                    "Overlay collision has no base_address and it could not be " +
-                                    "derived; skipping:", objectName, dynaPolyActor.collision_name);
-                                continue;
-                            }
-
-                            console.warn(
-                                "Overlay", objectName, "has no base_address in the collision table;" +
-                                " derived 0x" + (baseAddress >>> 0).toString(16).toUpperCase() +
-                                " from the file. Add it to the table to skip this step.");
-                        }
-                    }
-
-                    const verts = [];
-                    const tris = [];
-                    const triangleData = [];
-
-                    const intangibleTris = [];
-                    const intangibleTriangleData = [];
-
-                    const waterBoxes = [];
-
-                    parseZeldaObjectBinary(
-                        scene,
-                        buffer,
-                        false,
-                        actorName,
-                        objectName,
-                        actorCollision.offset,
-                        verts,
-                        tris,
-                        triangleData,
-                        intangibleTris,
-                        intangibleTriangleData,
-                        waterBoxes,
-                        baseAddress
-                    );
-
-                    // Normalize indices ONCE before caching
-                    const normalizedTris =
-                        normalizeTriangleIndices(tris, verts.length);
-
-                    const normalizedIntangibleTris =
-                        normalizeTriangleIndices(
-                            intangibleTris,
-                            verts.length
-                        );
-
-                    cachedObject = {
-                        verts,
-                        tris: normalizedTris,
-                        triangleData,
-
-                        intangibleTris: normalizedIntangibleTris,
-                        intangibleTriangleData,
-
-                        waterBoxes
-                    };
-
-                    objectCache.set(cacheKey, cachedObject);
-                    //console.log(objectName + ": Binary file length:", buffer.byteLength);
-                }
-                
-                const actorTris = cachedObject.tris;
-
-                const actorIntangibleTris =
-                    cachedObject.intangibleTris;
-
-                const actorWaterBoxes =
-                    cachedObject.waterBoxes;
-
-                // Note: triangle indices were already normalised to 0-based
-                // by normalizeTriangleIndices() before caching. They used to
-                // be re-normalised here per instance, which mutated the
-                // shared cached arrays and could decrement them a second
-                // time for any object that happens not to reference vertex 0.
-
-                // ------------------------------------------------
-                // Transform collision into world space
-                // ------------------------------------------------
-                // The game does not keep dynapoly collision in object space
-                // and transform it while rendering. Once per frame
-                // DynaPoly_ExpandSRT bakes each actor's vertices into world
-                // space and stores them as Vec3s -- 16-bit INTEGERS -- then
-                // recomputes every polygon normal and plane distance from
-                // those truncated integers.
-                //
-                // So we bake here too, rather than putting the transform on
-                // the THREE group. Doing it the "clean" way with a float
-                // group transform gives subtly different geometry: vertices
-                // land on non-integer coordinates, and normals stay at their
-                // untransformed header values instead of being rederived.
-                //
-                // See dyna_transform.js for the details.
-
-                // shape.yOffset is 0 for most dynapoly actors; override
-                // per-actor in the dynapoly table if one needs it. Like
-                // `scale`, it may be a plain number or a function of params,
-                // for actors that only set it on one branch of their Init --
-                // BgIcicle_Init sets yOffset = 1200 in the same branch that
-                // flips shape.rot.x, so the two have to agree.
-                const yOffset = (typeof dynaPolyActor.yOffset === 'function')
-                    ? dynaPolyActor.yOffset(actorParams)
-                    : (dynaPolyActor.yOffset ?? 0);
-
-                const xform = {
-                    scale: scaleVec,
-                    rot: { x: rotXYZ[0], y: rotXYZ[1], z: rotXYZ[2] },
-                    pos: dynaActorPos(posXYZ, scaleVec.y, yOffset)
-                };
-
-                const mkVec = (x, y, z) => new THREE.Vector3(x, y, z);
-
-                // Integer world-space vertices, shared by tangible and
-                // intangible polys (they index the same vertex list).
-                const actorVerts = dynaTransformVertices(
-                    cachedObject.verts, xform);
-
-                // Normals/dist rederived from the truncated integer verts.
-                // Builds new objects, so the shared cache is left untouched.
-                const actorTriangleData = dynaRecomputePolyData(
-                    actorVerts, actorTris, cachedObject.triangleData, mkVec);
-
-                const actorIntangibleTriangleData = dynaRecomputePolyData(
-                    actorVerts, actorIntangibleTris,
-                    cachedObject.intangibleTriangleData, mkVec);
-
-                // ------------------------------------------------
-                // Validate triangle indices
-                // ------------------------------------------------
-                for (let k = 0; k < actorTris.length; k++) {
-                    const [a, b, c] = actorTris[k];
-                    if (a < 0 || b < 0 || c < 0 || a >= actorVerts.length || b >= actorVerts.length 
-                        || c >= actorVerts.length) {
-                        console.warn("Invalid triangle index", k, a, b, c, "verts:", actorVerts.length);
-                    }
-                }
-
-                // ------------------------------------------------
-                // Nothing to render
-                // ------------------------------------------------
-                if (
-                    actorTris.length === 0 &&
-                    actorIntangibleTris.length === 0 &&
-                    actorWaterBoxes.length === 0
-                ) {
-                    continue;
-                }
-
-                // ------------------------------------------------
-                // Build actor group
-                // ------------------------------------------------
-                const modelName = actorName + ": " + dynaPolyActor.actor_description;
-
-                const actorGroup = new THREE.Object3D();
-                actorGroup.name = modelName;
-
-                // The collision meshes below are already in world space (see
-                // the transform block above), so the group itself stays at
-                // identity. Anything that needs world coordinates can keep
-                // using localToWorld() and will simply get a no-op.
-
-
-                // ------------------------------------------------
-                // Store actor information on group
-                // ------------------------------------------------
-                actorGroup.userData.actorName = actorName;
-                actorGroup.userData.actorId = actorId;
-                actorGroup.userData.objectName = objectName;
-                actorGroup.userData.params = actorParams;
-                actorGroup.userData.position = posXYZ;
-                actorGroup.userData.rotation = rotXYZ;          // shape.rot used by dyna
-                actorGroup.userData.rotationSpawn = rotSpawnXYZ; // before Init overrides
-                actorGroup.userData.rotationRaw = rotRawXYZ;     // packed scene words
-                actorGroup.userData.csId = spawn.csId;
-                actorGroup.userData.halfDaysBits = spawn.halfDaysBits;
-                actorGroup.userData.scale = scale;
-                actorGroup.userData.scaleVec = scaleVec;
-                actorGroup.userData.collisionName = dynaPolyActor.collision_name;
-
-                // Each collision category keeps its own colour, matching the
-                // scene-level models: tangible orange, intangible green,
-                // waterboxes cyan (set inside buildWaterBoxModel). Passing
-                // the same colour for tangible and intangible is what made a
-                // mixed actor look like it was entirely one or the other.
-                const DYNA_TANGIBLE_COLOR = 0xff7b24;
-                const DYNA_INTANGIBLE_COLOR = 0x3aff78;
-
-                // All wireframe edges live under one subgroup so the global
-                // "Draw triangle/cube edges" checkbox can toggle them. That
-                // handler needs a single `edges` object per loadedModels
-                // entry, and a dynapoly actor has one edges object per part.
-                const edgesGroup = new THREE.Object3D();
-                edgesGroup.name = modelName + " Edges";
-                edgesGroup.visible = wireframeCheckbox.checked;
-                actorGroup.add(edgesGroup);
-
-                // The swatch on the actor's row drives whichever part the
-                // row's colour represents -- normally the tangible mesh.
-                // The other parts keep their fixed semantic colours.
-                let tangibleMesh = null;
-                let intangibleMesh = null;
-                let waterboxMesh = null;
-
-                // ------------------------------------------------
-                // Tangible collision
-                // ------------------------------------------------
-                if (actorTris.length > 0) {
-                    const result = buildGeometryButDontAddToScene(
-                        scene,
-                        actorVerts,
-                        actorTris,
-                        actorTriangleData,
-                        null,
-                        modelName,
-                        false,
-                        false,
-                        DYNA_TANGIBLE_COLOR
-                    );
-
-                    if (result) {
-                        // Make sure selection can identify this as a dynapoly
-                        result.mesh.userData.triangles = actorTriangleData;
-                        result.mesh.userData.dynaPolyActor = actorGroup;
-                        result.mesh.userData.collisionType = "tangible";
-
-                        result.edges.userData.dynaPolyActor = actorGroup;
-
-                        tangibleMesh = result.mesh;
-
-                        // edgesGroup owns edge visibility now, so the child
-                        // stays unconditionally visible. Leaving the builder's
-                        // own wireframe-dependent flag on it would keep the
-                        // edges hidden even after the group was switched on.
-                        result.edges.visible = true;
-
-                        actorGroup.add(result.mesh);
-                        edgesGroup.add(result.edges);
-                    }
-                }
-
-
-                // ------------------------------------------------
-                // Intangible collision
-                // ------------------------------------------------
-                if (actorIntangibleTris.length > 0) {
-                    const result = buildGeometryButDontAddToScene(
-                        scene,
-                        actorVerts,
-                        actorIntangibleTris,
-                        actorIntangibleTriangleData,
-                        null,
-                        modelName + " Intangible",
-                        false,
-                        true,
-                        DYNA_INTANGIBLE_COLOR
-                    );
-
-                    if (result) {
-                        // Make sure selection can identify this as a dynapoly
-                        result.mesh.userData.triangles = actorIntangibleTriangleData;
-                        result.mesh.userData.dynaPolyActor = actorGroup;
-                        result.mesh.userData.collisionType = "intangible";
-
-                        result.edges.userData.dynaPolyActor = actorGroup;
-
-                        intangibleMesh = result.mesh;
-
-                        result.edges.visible = true;
-
-                        actorGroup.add(result.mesh);
-                        edgesGroup.add(result.edges);
-                    }
-                }
-
-
-                // ------------------------------------------------
-                // Waterboxes
-                // ------------------------------------------------
-                if (actorWaterBoxes.length > 0) {
-                    const {
-                        mesh: waterMesh,
-                        edges: waterEdges
-                    } = buildWaterBoxModel(
-                        actorWaterBoxes,
-                        waterboxCheckbox.checked
-                    );
-
-                    waterMesh.userData.dynaPolyActor = actorGroup;
-                    waterMesh.userData.collisionType = "waterbox";
-
-                    waterEdges.userData.dynaPolyActor = actorGroup;
-
-                    waterboxMesh = waterMesh;
-
-                    // DynaPoly_ExpandSRT only bakes vertices and polygons --
-                    // it does not touch waterboxes, so there is no integer
-                    // truncation to reproduce for them. They stay in object
-                    // space under their own transformed subgroup.
-                    const waterGroup = new THREE.Object3D();
-                    waterGroup.name = modelName + " Waterboxes";
-
-                    waterGroup.position.set(
-                        xform.pos.x,
-                        xform.pos.y,
-                        xform.pos.z
-                    );
-
-                    // YXZ, matching SkinMatrix_SetRotateYXZ. The default
-                    // THREE order is XYZ, which differs for any actor
-                    // rotated about more than one axis.
-                    waterGroup.rotation.order = 'YXZ';
-                    waterGroup.rotation.set(
-                        (rotXYZ[0] / 0x8000) * Math.PI,
-                        (rotXYZ[1] / 0x8000) * Math.PI,
-                        (rotXYZ[2] / 0x8000) * Math.PI
-                    );
-
-                    waterGroup.scale.set(scaleVec.x, scaleVec.y, scaleVec.z);
-
-                    waterGroup.add(waterMesh);
-                    waterGroup.add(waterEdges);
-                    actorGroup.add(waterGroup);
-                }
-
-
-                // ------------------------------------------------
-                // Add entire actor to scene
-                // ------------------------------------------------
-                scene.add(actorGroup);
-
-
-                // ------------------------------------------------
-                // Register entire actor as one loaded model
-                // ------------------------------------------------
-                // Registering edgesGroup here is what lets the global
-                // "Draw triangle/cube edges" checkbox reach a dynapoly actor;
-                // with edges: null it skipped them entirely.
-                loadedModels.push({
-                    name: modelName,
-                    root: actorGroup,
-                    mesh: actorGroup,
-                    edges: edgesGroup
-                });
-
-                // Row colour follows whichever part the swatch will drive, so
-                // the swatch never advertises a colour belonging to a part it
-                // doesn't control. edgesObj stays null: hiding the actor hides
-                // edgesGroup along with it, and the wireframe checkbox owns
-                // edge visibility on its own.
-                const rowColorTarget = tangibleMesh ?? intangibleMesh ?? waterboxMesh;
-                const rowColor = tangibleMesh ? '#ff7b24'
-                    : (intangibleMesh ? '#3aff78' : '#00ffff');
-
-                // Dynapoly rows live in their own scrollable box with a
-                // master show/hide, since a busy scene can have dozens of
-                // them and they would otherwise bury every other control.
-                // Created lazily, so scenes with no dynapoly get no box.
-                const dynaGroup = getModelGroup('dynapoly', 'DynaPoly Actors');
-
-                addModelCheckbox(
-                    scene,
-                    modelName,
-                    actorGroup,
-                    null,
-                    false,
-                    true,
-                    rowColor,
-                    false,
-                    rowColorTarget,
-                    dynaGroup.body
+            return i.params_values?.includes(paramValue);
+        });
+
+        if (!dynaPolyActor) {
+            continue;
+        }
+
+        // `scale` in the dynapoly tables is one uniform multiplier, a
+        // per-axis [x, y, z] triple, or a function of params, e.g.
+        //   Bg_Hakugin_Switch    scale: 0.1
+        //   Bg_Haka_Bombwall     scale: [0.07, 0.016, 0.07]
+        //   En_Horse_Game_Check  scale: (params) => (((params >> 8) & 0xFF) * 0.001)
+        //
+        // The function form is needed for actors that compute their own
+        // scale in Init instead of using a constant -- listing one table
+        // row per observed params value instead silently drops any
+        // instance whose value isn't in the list.
+        //
+        // The game stores actor->scale as a Vec3f and DynaPoly_ExpandSRT
+        // passes each component separately into
+        // SkinMatrix_SetTranslateRotateYXZScale, so a non-uniform scale
+        // really does produce differently proportioned collision -- it
+        // can't be collapsed to a single number.
+        const scale = (typeof dynaPolyActor.scale === 'function')
+            ? dynaPolyActor.scale(actorParams)
+            : dynaPolyActor.scale;
+
+        let scaleVec;
+        if (Array.isArray(scale)) {
+            scaleVec = { x: scale[0], y: scale[1], z: scale[2] };
+        } else if (typeof scale === 'number') {
+            scaleVec = { x: scale, y: scale, z: scale };
+        } else {
+            console.warn(
+                "Dynapoly actor has no usable scale, defaulting to 1:",
+                dynaPolyActor.actor_name, scale);
+            scaleVec = { x: 1, y: 1, z: 1 };
+        }
+
+        // ----------------------------------------------------
+        // Find collision information
+        // ----------------------------------------------------
+        // collision_name is not unique on its own -- OOT has an sCol in
+        // both ovl_Bg_Ganon_Otyuka and ovl_En_Jsjutan, and a bare name
+        // lookup always found the first. A row can add collision_file to
+        // say which file it means.
+        const actorCollision = Dynapoly_Collisions.find(
+            i => i.collision_name === dynaPolyActor.collision_name &&
+                 (dynaPolyActor.collision_file == null ||
+                  i.file_name === dynaPolyActor.collision_file));
+        if (!actorCollision) {
+            alert('No collision found for dynapoly actor: ' + dynaPolyActor.actor_name);
+            continue;
+        }
+        const objectName = actorCollision["file_name"];
+        const isOverlay = actorCollision.type === "overlay";
+        const cacheKey = `${objectName}:${actorCollision.offset}`;
+        //console.log(actorName + ": " + objectName);
+        //console.log(dynaPolyActor);
+        //console.log(actorCollision);
+
+        // ----------------------------------------------------
+        // Load object binary
+        // ----------------------------------------------------
+        try {
+            let cachedObject = objectCache.get(cacheKey);
+
+            if (!cachedObject) {
+                // Overlays live in their own folder, not with the objects.
+                const res = await fetch(
+                    './models/' +
+                    game +
+                    (isOverlay ? '/actors/overlays/' : '/actors/objects/') +
+                    objectName
                 );
 
-                // ------------------------------------------------
-                // Standable-surface overlays for this actor
-                // ------------------------------------------------
-                // Same treatment the scene collision gets, but with the
-                // dynapoly determinant tolerance so the region reaches as far
-                // past each poly's edges as the game actually allows.
-                //
-                // colCtx is null: dynapoly polys are never registered in the
-                // static subdivision system, so there is no per-subdivision
-                // filtering to apply (this matches what selection.js passes for
-                // dynapoly sample points).
-                //
-                // Both default to hidden. A busy scene has dozens of dynapoly
-                // actors, and turning every overlay on at load would bury the
-                // scene in overlapping red.
-                if (actorTriangleData.length > 0) {
-                    const dynaStandable = renderStandableSurfaceXZ(
-                        actorTriangleData,
-                        null,
-                        groundClipBandsCheckbox?.checked ?? true,
-                        STANDABLE_DET_MAX_DYNAPOLY
-                    );
+                const buffer = await res.arrayBuffer();
 
-                    if (dynaStandable) {
-                        const {
-                            main: dynaStandableMain,
-                            vertexBulge: dynaStandableBulge
-                        } = dynaStandable;
+                // Overlay pointers are link-time VRAM addresses; without
+                // the overlay's base address they cannot be turned into
+                // file offsets. Prefer the value declared in the table and
+                // fall back to recovering it from the file.
+                let baseAddress = null;
+                if (isOverlay) {
+                    baseAddress = actorCollision.base_address ?? null;
 
-                        if (dynaStandableMain) {
-                            const nm = actorName + " Standable Surface";
-                            scene.add(dynaStandableMain);
+                    if (baseAddress == null) {
+                        baseAddress = deriveOverlayBaseAddress(
+                            new DataView(buffer), actorCollision.offset);
 
-                            if (dynaStandableMain.children[1]) {
-                                dynaStandableMain.children[1].visible =
-                                    wireframeCheckbox.checked;
-                            }
-
-                            dynaStandableMain.userData.dynaPolyActor = actorGroup;
-
-                            loadedModels.push({
-                                name: nm,
-                                mesh: dynaStandableMain,
-                                edges: dynaStandableMain.children[1]
-                            });
-
-                            addModelCheckbox(
-                                scene, nm, dynaStandableMain, null, false, true,
-                                '#ff0000', false,
-                                primaryColorTarget(dynaStandableMain),
-                                dynaGroup.body
-                            );
+                        if (baseAddress == null) {
+                            console.error(
+                                "Overlay collision has no base_address and it could not be " +
+                                "derived; skipping:", objectName, dynaPolyActor.collision_name);
+                            continue;
                         }
 
-                        if (dynaStandableBulge) {
-                            const nm = actorName + " Seams";
-                            scene.add(dynaStandableBulge);
-
-                            if (dynaStandableBulge.children[1]) {
-                                dynaStandableBulge.children[1].visible =
-                                    wireframeCheckbox.checked;
-                            }
-
-                            dynaStandableBulge.userData.dynaPolyActor = actorGroup;
-
-                            loadedModels.push({
-                                name: nm,
-                                mesh: dynaStandableBulge,
-                                edges: dynaStandableBulge.children[1]
-                            });
-
-                            addModelCheckbox(
-                                scene, nm, dynaStandableBulge, null, false, true,
-                                '#00cc44', false,
-                                primaryColorTarget(dynaStandableBulge),
-                                dynaGroup.body
-                            );
-                        }
+                        console.warn(
+                            "Overlay", objectName, "has no base_address in the collision table;" +
+                            " derived 0x" + (baseAddress >>> 0).toString(16).toUpperCase() +
+                            " from the file. Add it to the table to skip this step.");
                     }
                 }
 
-                // ------------------------------------------------
-                // Save useful actor information
-                // ------------------------------------------------
-                actorGroup.userData.actorName = actorName;
-                actorGroup.userData.actorId = actorId;
-                actorGroup.userData.objectName = objectName;
-                //actorGroup.userData.objectId = actorObjectId;
-                actorGroup.userData.params = actorParams;
-                actorGroup.userData.position = posXYZ;
-                actorGroup.userData.rotation = rotXYZ;          // shape.rot used by dyna
-                actorGroup.userData.rotationSpawn = rotSpawnXYZ; // before Init overrides
-                actorGroup.userData.rotationRaw = rotRawXYZ;     // packed scene words
-                actorGroup.userData.csId = spawn.csId;
-                actorGroup.userData.halfDaysBits = spawn.halfDaysBits;
-                actorGroup.userData.scale = scale;
-                actorGroup.userData.scaleVec = scaleVec;
-                actorGroup.userData.collisionName = dynaPolyActor.collision_name;
-                console.log("Rendered dynapoly:", actorName, "position:", posXYZ,
-                    "shape.rot (binang):", rotXYZ, "spawn rot (binang):", rotSpawnXYZ,
-                    "rot (raw words):", rotRawXYZ,
-                    "scale:", scale, "params:", `0x${actorParams.toString(16).toUpperCase()}`);
-                
-            } catch (err) {
-                console.error("Failed to load dynapoly object:", objectName, err);
+                const verts = [];
+                const tris = [];
+                const triangleData = [];
+
+                const intangibleTris = [];
+                const intangibleTriangleData = [];
+
+                const waterBoxes = [];
+
+                parseZeldaObjectBinary(
+                    scene,
+                    buffer,
+                    false,
+                    actorName,
+                    objectName,
+                    actorCollision.offset,
+                    verts,
+                    tris,
+                    triangleData,
+                    intangibleTris,
+                    intangibleTriangleData,
+                    waterBoxes,
+                    baseAddress
+                );
+
+                // Normalize indices ONCE before caching
+                const normalizedTris =
+                    normalizeTriangleIndices(tris, verts.length);
+
+                const normalizedIntangibleTris =
+                    normalizeTriangleIndices(
+                        intangibleTris,
+                        verts.length
+                    );
+
+                cachedObject = {
+                    verts,
+                    tris: normalizedTris,
+                    triangleData,
+
+                    intangibleTris: normalizedIntangibleTris,
+                    intangibleTriangleData,
+
+                    waterBoxes
+                };
+
+                objectCache.set(cacheKey, cachedObject);
+                //console.log(objectName + ": Binary file length:", buffer.byteLength);
             }
+            
+            const actorTris = cachedObject.tris;
+
+            const actorIntangibleTris =
+                cachedObject.intangibleTris;
+
+            const actorWaterBoxes =
+                cachedObject.waterBoxes;
+
+            // Note: triangle indices were already normalised to 0-based
+            // by normalizeTriangleIndices() before caching. They used to
+            // be re-normalised here per instance, which mutated the
+            // shared cached arrays and could decrement them a second
+            // time for any object that happens not to reference vertex 0.
+
+            // ------------------------------------------------
+            // Transform collision into world space
+            // ------------------------------------------------
+            // The game does not keep dynapoly collision in object space
+            // and transform it while rendering. Once per frame
+            // DynaPoly_ExpandSRT bakes each actor's vertices into world
+            // space and stores them as Vec3s -- 16-bit INTEGERS -- then
+            // recomputes every polygon normal and plane distance from
+            // those truncated integers.
+            //
+            // So we bake here too, rather than putting the transform on
+            // the THREE group. Doing it the "clean" way with a float
+            // group transform gives subtly different geometry: vertices
+            // land on non-integer coordinates, and normals stay at their
+            // untransformed header values instead of being rederived.
+            //
+            // See dyna_transform.js for the details.
+
+            // shape.yOffset is 0 for most dynapoly actors; override
+            // per-actor in the dynapoly table if one needs it. Like
+            // `scale`, it may be a plain number or a function of params,
+            // for actors that only set it on one branch of their Init --
+            // BgIcicle_Init sets yOffset = 1200 in the same branch that
+            // flips shape.rot.x, so the two have to agree.
+            const yOffset = (typeof dynaPolyActor.yOffset === 'function')
+                ? dynaPolyActor.yOffset(actorParams)
+                : (dynaPolyActor.yOffset ?? 0);
+
+            const xform = {
+                scale: scaleVec,
+                rot: { x: rotXYZ[0], y: rotXYZ[1], z: rotXYZ[2] },
+                pos: dynaActorPos(posXYZ, scaleVec.y, yOffset)
+            };
+
+            const mkVec = (x, y, z) => new THREE.Vector3(x, y, z);
+
+            // Integer world-space vertices, shared by tangible and
+            // intangible polys (they index the same vertex list).
+            const actorVerts = dynaTransformVertices(
+                cachedObject.verts, xform);
+
+            // Normals/dist rederived from the truncated integer verts.
+            // Builds new objects, so the shared cache is left untouched.
+            const actorTriangleData = dynaRecomputePolyData(
+                actorVerts, actorTris, cachedObject.triangleData, mkVec, game);
+
+            const actorIntangibleTriangleData = dynaRecomputePolyData(
+                actorVerts, actorIntangibleTris,
+                cachedObject.intangibleTriangleData, mkVec, game);
+
+            // ------------------------------------------------
+            // Validate triangle indices
+            // ------------------------------------------------
+            for (let k = 0; k < actorTris.length; k++) {
+                const [a, b, c] = actorTris[k];
+                if (a < 0 || b < 0 || c < 0 || a >= actorVerts.length || b >= actorVerts.length 
+                    || c >= actorVerts.length) {
+                    console.warn("Invalid triangle index", k, a, b, c, "verts:", actorVerts.length);
+                }
+            }
+
+            // ------------------------------------------------
+            // Nothing to render
+            // ------------------------------------------------
+            if (
+                actorTris.length === 0 &&
+                actorIntangibleTris.length === 0 &&
+                actorWaterBoxes.length === 0
+            ) {
+                continue;
+            }
+
+            // ------------------------------------------------
+            // Build actor group
+            // ------------------------------------------------
+            const modelName = actorName + ": " + dynaPolyActor.actor_description;
+
+            const actorGroup = new THREE.Object3D();
+            actorGroup.name = modelName;
+
+            // The collision meshes below are already in world space (see
+            // the transform block above), so the group itself stays at
+            // identity. Anything that needs world coordinates can keep
+            // using localToWorld() and will simply get a no-op.
+
+
+            // ------------------------------------------------
+            // Store actor information on group
+            // ------------------------------------------------
+            actorGroup.userData.actorName = actorName;
+            actorGroup.userData.actorId = actorId;
+            actorGroup.userData.objectName = objectName;
+            actorGroup.userData.params = actorParams;
+            actorGroup.userData.position = posXYZ;
+            actorGroup.userData.rotation = rotXYZ;          // shape.rot used by dyna
+            actorGroup.userData.rotationSpawn = rotSpawnXYZ; // before Init overrides
+            actorGroup.userData.rotationRaw = rotRawXYZ;     // packed scene words
+            actorGroup.userData.csId = spawn.csId;
+            actorGroup.userData.halfDaysBits = spawn.halfDaysBits;
+            actorGroup.userData.scale = scale;
+            actorGroup.userData.scaleVec = scaleVec;
+            actorGroup.userData.collisionName = dynaPolyActor.collision_name;
+
+            // The line selection.js prints above a picked triangle or
+            // waterbox of this actor (the way a BK / BT prop reports its
+            // placement), so a click says which actor the collision is.
+            const hex = (v, w = 4) => '0x' + (v >>> 0).toString(16).toUpperCase().padStart(w, '0');
+            const deg = rotXYZ.map(r => (r / 0x10000 * 360).toFixed(1)).join(', ');
+            const scaleText = (scaleVec.x === scaleVec.y && scaleVec.y === scaleVec.z)
+                ? `${scaleVec.x}` : `${scaleVec.x}, ${scaleVec.y}, ${scaleVec.z}`;
+            actorGroup.userData.actorInfo =
+                `ACTOR ${actorName} (${hex(actorId, 3)}): ${dynaPolyActor.actor_description}` +
+                ` pos=${posXYZ[0]}, ${posXYZ[1]}, ${posXYZ[2]} rot=${deg} (${rotRawXYZ.map(r => hex(r)).join(', ')})` +
+                ` params=${hex(actorParams)} room=${room} scale=${scaleText}` +
+                ` collision=${dynaPolyActor.collision_name} (${objectName})`;
+
+            // What wall_push_clips.js's "Export dynapolys" writes for this
+            // actor, for tools/clipfinder --dyna: its tangible polys (the
+            // intangible ones are skipped by Link's checks, like the static
+            // ones), in poly index order, as DynaPoly_ExpandSRT leaves them,
+            // and the bounding sphere / Y range the game culls the actor with.
+            // `order`: its place in the spawn order, i.e. its bg actor slot.
+            const sphere = dynaBoundingSphere(cachedObject.verts, xform);
+            if (sphere && actorTriangleData.length > 0) {
+                actorGroup.userData.dynaExport = {
+                    order: spawnIndex + (LATE_BG_ACTORS[game]?.has(actorName) ? 1e6 : 0),
+                    late: LATE_BG_ACTORS[game]?.has(actorName) || undefined,
+                    actor: actorName, id: actorId, params: actorParams, room,
+                    pos: [posXYZ[0], posXYZ[1], posXYZ[2]], rot: [rotXYZ[0], rotXYZ[1], rotXYZ[2]],
+                    scale: [scaleVec.x, scaleVec.y, scaleVec.z], yOffset,
+                    collision: dynaPolyActor.collision_name, file: objectName,
+                    sphere: { center: sphere.center, radius: sphere.radius }, minY: sphere.minY, maxY: sphere.maxY,
+                    polys: actorTriangleData.map((t, k) => ({
+                        v: actorTris[k].map(vi => actorVerts[vi].slice()),
+                        n: t.normals.slice(), d: t.d, type: t.surfaceType,
+                    })),
+                };
+            }
+
+            // Each collision category keeps its own colour, matching the
+            // scene-level models: tangible orange, intangible green,
+            // waterboxes cyan (set inside buildWaterBoxModel). Passing
+            // the same colour for tangible and intangible is what made a
+            // mixed actor look like it was entirely one or the other.
+            const DYNA_TANGIBLE_COLOR = 0xff7b24;
+            const DYNA_INTANGIBLE_COLOR = 0x3aff78;
+
+            // All wireframe edges live under one subgroup so the global
+            // "Draw triangle/cube edges" checkbox can toggle them. That
+            // handler needs a single `edges` object per loadedModels
+            // entry, and a dynapoly actor has one edges object per part.
+            const edgesGroup = new THREE.Object3D();
+            edgesGroup.name = modelName + " Edges";
+            edgesGroup.visible = wireframeCheckbox.checked;
+            actorGroup.add(edgesGroup);
+
+            // The swatch on the actor's row drives whichever part the
+            // row's colour represents -- normally the tangible mesh.
+            // The other parts keep their fixed semantic colours.
+            let tangibleMesh = null;
+            let intangibleMesh = null;
+            let waterboxMesh = null;
+
+            // ------------------------------------------------
+            // Tangible collision
+            // ------------------------------------------------
+            if (actorTris.length > 0) {
+                const result = buildGeometryButDontAddToScene(
+                    scene,
+                    actorVerts,
+                    actorTris,
+                    actorTriangleData,
+                    null,
+                    modelName,
+                    false,
+                    false,
+                    DYNA_TANGIBLE_COLOR
+                );
+
+                if (result) {
+                    // Make sure selection can identify this as a dynapoly
+                    result.mesh.userData.triangles = actorTriangleData;
+                    result.mesh.userData.dynaPolyActor = actorGroup;
+                    result.mesh.userData.collisionType = "tangible";
+
+                    result.edges.userData.dynaPolyActor = actorGroup;
+
+                    tangibleMesh = result.mesh;
+
+                    // edgesGroup owns edge visibility now, so the child
+                    // stays unconditionally visible. Leaving the builder's
+                    // own wireframe-dependent flag on it would keep the
+                    // edges hidden even after the group was switched on.
+                    result.edges.visible = true;
+
+                    actorGroup.add(result.mesh);
+                    edgesGroup.add(result.edges);
+                }
+            }
+
+
+            // ------------------------------------------------
+            // Intangible collision
+            // ------------------------------------------------
+            if (actorIntangibleTris.length > 0) {
+                const result = buildGeometryButDontAddToScene(
+                    scene,
+                    actorVerts,
+                    actorIntangibleTris,
+                    actorIntangibleTriangleData,
+                    null,
+                    modelName + " Intangible",
+                    false,
+                    true,
+                    DYNA_INTANGIBLE_COLOR
+                );
+
+                if (result) {
+                    // Make sure selection can identify this as a dynapoly
+                    result.mesh.userData.triangles = actorIntangibleTriangleData;
+                    result.mesh.userData.dynaPolyActor = actorGroup;
+                    result.mesh.userData.collisionType = "intangible";
+
+                    result.edges.userData.dynaPolyActor = actorGroup;
+
+                    intangibleMesh = result.mesh;
+
+                    result.edges.visible = true;
+
+                    actorGroup.add(result.mesh);
+                    edgesGroup.add(result.edges);
+                }
+            }
+
+
+            // ------------------------------------------------
+            // Waterboxes
+            // ------------------------------------------------
+            if (actorWaterBoxes.length > 0) {
+                const {
+                    mesh: waterMesh,
+                    edges: waterEdges
+                } = buildWaterBoxModel(
+                    actorWaterBoxes,
+                    waterboxCheckbox.checked
+                );
+
+                waterMesh.userData.dynaPolyActor = actorGroup;
+                waterMesh.userData.collisionType = "waterbox";
+
+                waterEdges.userData.dynaPolyActor = actorGroup;
+
+                waterboxMesh = waterMesh;
+
+                // DynaPoly_ExpandSRT only bakes vertices and polygons --
+                // it does not touch waterboxes, so there is no integer
+                // truncation to reproduce for them. They stay in object
+                // space under their own transformed subgroup.
+                const waterGroup = new THREE.Object3D();
+                waterGroup.name = modelName + " Waterboxes";
+
+                waterGroup.position.set(
+                    xform.pos.x,
+                    xform.pos.y,
+                    xform.pos.z
+                );
+
+                // YXZ, matching SkinMatrix_SetRotateYXZ. The default
+                // THREE order is XYZ, which differs for any actor
+                // rotated about more than one axis.
+                waterGroup.rotation.order = 'YXZ';
+                waterGroup.rotation.set(
+                    (rotXYZ[0] / 0x8000) * Math.PI,
+                    (rotXYZ[1] / 0x8000) * Math.PI,
+                    (rotXYZ[2] / 0x8000) * Math.PI
+                );
+
+                waterGroup.scale.set(scaleVec.x, scaleVec.y, scaleVec.z);
+
+                waterGroup.add(waterMesh);
+                waterGroup.add(waterEdges);
+                actorGroup.add(waterGroup);
+            }
+
+
+            // ------------------------------------------------
+            // Register entire actor as one loaded model
+            // ------------------------------------------------
+            // Registering edgesGroup here is what lets the global
+            // "Draw triangle/cube edges" checkbox reach a dynapoly actor;
+            // with edges: null it skipped them entirely.
+            loadedModels.push({
+                name: modelName,
+                root: actorGroup,
+                mesh: actorGroup,
+                edges: edgesGroup
+            });
+
+            // The row's swatch drives whichever part its colour stands
+            // for, so it never advertises a colour belonging to a part it
+            // doesn't control.
+            const entry = {
+                collision: actorGroup,
+                standable: null,
+                seams: null,
+                colorTarget: tangibleMesh ?? intangibleMesh ?? waterboxMesh,
+                color: tangibleMesh ? '#ff7b24' : (intangibleMesh ? '#3aff78' : '#00ffff'),
+            };
+            if (!byActor.has(actorName)) byActor.set(actorName, []);
+            byActor.get(actorName).push(entry);
+
+            // ------------------------------------------------
+            // Standable-surface overlays for this actor
+            // ------------------------------------------------
+            // Same treatment the scene collision gets, but with the
+            // dynapoly determinant tolerance so the region reaches as far
+            // past each poly's edges as the game actually allows.
+            //
+            // colCtx is null: dynapoly polys are never registered in the
+            // static subdivision system, so there is no per-subdivision
+            // filtering to apply (this matches what selection.js passes for
+            // dynapoly sample points).
+            //
+            // Both are hidden by default (the "Actor display" menu). A busy
+            // scene has dozens of dynapoly actors, and turning every
+            // overlay on at load would bury the scene in overlapping red.
+            if (actorTriangleData.length > 0) {
+                const dynaStandable = renderStandableSurfaceXZ(
+                    actorTriangleData,
+                    null,
+                    groundClipBandsCheckbox?.checked ?? true,
+                    STANDABLE_DET_MAX_DYNAPOLY
+                );
+
+                if (dynaStandable) {
+                    const {
+                        main: dynaStandableMain,
+                        vertexBulge: dynaStandableBulge
+                    } = dynaStandable;
+
+                    if (dynaStandableMain) {
+                        const nm = actorName + " Standable Surface";
+
+                        if (dynaStandableMain.children[1]) {
+                            dynaStandableMain.children[1].visible =
+                                wireframeCheckbox.checked;
+                        }
+
+                        dynaStandableMain.userData.dynaPolyActor = actorGroup;
+
+                        loadedModels.push({
+                            name: nm,
+                            mesh: dynaStandableMain,
+                            edges: dynaStandableMain.children[1]
+                        });
+                        entry.standable = dynaStandableMain;
+                    }
+
+                    if (dynaStandableBulge) {
+                        const nm = actorName + " Seams";
+
+                        if (dynaStandableBulge.children[1]) {
+                            dynaStandableBulge.children[1].visible =
+                                wireframeCheckbox.checked;
+                        }
+
+                        dynaStandableBulge.userData.dynaPolyActor = actorGroup;
+
+                        loadedModels.push({
+                            name: nm,
+                            mesh: dynaStandableBulge,
+                            edges: dynaStandableBulge.children[1]
+                        });
+                        entry.seams = dynaStandableBulge;
+                    }
+                }
+            }
+
+            // ------------------------------------------------
+            // Save useful actor information
+            // ------------------------------------------------
+            actorGroup.userData.actorName = actorName;
+            actorGroup.userData.actorId = actorId;
+            actorGroup.userData.objectName = objectName;
+            //actorGroup.userData.objectId = actorObjectId;
+            actorGroup.userData.params = actorParams;
+            actorGroup.userData.position = posXYZ;
+            actorGroup.userData.rotation = rotXYZ;          // shape.rot used by dyna
+            actorGroup.userData.rotationSpawn = rotSpawnXYZ; // before Init overrides
+            actorGroup.userData.rotationRaw = rotRawXYZ;     // packed scene words
+            actorGroup.userData.csId = spawn.csId;
+            actorGroup.userData.halfDaysBits = spawn.halfDaysBits;
+            actorGroup.userData.scale = scale;
+            actorGroup.userData.scaleVec = scaleVec;
+            actorGroup.userData.collisionName = dynaPolyActor.collision_name;
+            console.log("Rendered dynapoly:", actorName, "position:", posXYZ,
+                "shape.rot (binang):", rotXYZ, "spawn rot (binang):", rotSpawnXYZ,
+                "rot (raw words):", rotRawXYZ,
+                "scale:", scale, "params:", `0x${actorParams.toString(16).toUpperCase()}`);
+            
+        } catch (err) {
+            console.error("Failed to load dynapoly object:", objectName, err);
         }
     }
 
-    // Carry the group's master checkbox over from the previous scene.
-    applyGroupMasterState('dynapoly');
+    return byActor;
 }

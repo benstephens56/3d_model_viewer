@@ -3,7 +3,8 @@ import { addModelCheckbox, getModelGroup, resetGroupModelState, applyGroupMaster
 import { replayDisplayLists, makeZeldaMesh, parseZeldaSceneInfo, scrollSegment, SEG_FLEX_MATRICES } from './zelda_textured.js';
 import { attachTextured, clearTexturedPairs } from './bk_textured.js';
 import { addTypeRow, makeYawLine, groupBy, ACTOR_COLOR } from './bk_setup.js';
-import { decodeActorSpawnEntry, actorShapeRot } from './render_actors.js';
+import { decodeActorSpawnEntry, actorShapeRot, buildDynaPolyActors } from './render_actors.js';
+import { clearSelection } from './selection.js';
 import { MM_ACTOR_OVERRIDES } from './mm_actor_overrides.js';
 
 ////////////////////////////////////////
@@ -21,9 +22,10 @@ import { MM_ACTOR_OVERRIDES } from './mm_actor_overrides.js';
 // one ActorEntry per spawn: id, position, rotation, params) are drawn the
 // way BK's and BT's setup files are: one sidebar row per actor type with an
 // instance at every placement, drawn with the actor's real model when it
-// can be, a marker when it can't. The DynaPoly rows (render_actors.js) stay
-// separate: they draw the collision an actor registers, this draws what the
-// player sees.
+// can be, a marker when it can't. A dynapoly actor's collision
+// (render_actors.js), its standable surface and its seams go in the same row
+// as its model, each under a layer group the "Actor display" menu shows or
+// hides for every row at once (see Layers below).
 //
 // What an actor draws is in its own code, not in any table, so
 // tools/oot/generate_oot_actor_models.py reads it out of the decomp into
@@ -879,7 +881,23 @@ const OOT_ACTOR_OVERRIDES = {
     "Object_Kankyo": { marker: true },
     // z_en_holl.c: the black plane a room transition fades through.
     "En_Holl": { marker: true },
-    "Demo_Kankyo": { marker: true },
+    // z_demo_kankyo.c: environment effects (rocks, clouds, warp sparkles) are
+    // markers, except DEMOKANKYO_DOOR_OF_TIME (params 0x0D), the Temple of
+    // Time's Door of Time. Init sets its scale to 1 and spawns Door_Toki as a
+    // child at the same spot (rot 0, params 0) - the door's collision, which
+    // has no Draw of its own. DemoKankyo_DrawDoorOfTime draws the two halves,
+    // object_toki_objects DL_007440 and DL_007578, each slid sideways by the
+    // opening amount (0: shut). Once the door is opened (EVENTCHKINF), Init
+    // kills it instead; the viewer draws the unopened state.
+    "Demo_Kankyo": {
+        model: (params) => (params === 0x0D
+            ? { object: 'object_toki_objects', lists: [dl('object_toki_objects', 0x7440), dl('object_toki_objects', 0x7578)] }
+            : null),
+        scale: (params) => (params === 0x0D ? 1.0 : DEFAULT_SCALE),
+        spawns: (spawn) => (spawn.params === 0x0D
+            ? [spawn, { ...spawn, actorId: 0x070, params: 0, rot: [0, 0, 0], rotRaw: [0, 0, 0] }]
+            : [spawn]),
+    },
 };
 
 // A camera-facing quad (the flames' Matrix_ReplaceRotation / camera-yaw
@@ -1735,12 +1753,50 @@ function placeInstance(obj, inst) {
     obj.scale.set(inst.scale[0], inst.scale[1], inst.scale[2]);
 }
 
+////////////////////////////////////////
+// Layers
+////////////////////////////////////////
+//
+// A row in the "Actors" group holds up to four layers, each a child group of
+// the row's root: the model (textured, or flat with Textures off), the
+// dynapoly collision, its standable surface and its seams. The row checkbox
+// shows or hides the root; the "Actor display" menu (index.html,
+// #actorLayer_<layer>) shows or hides one layer in every row.
+
+const ACTOR_LAYERS = ['model', 'collision', 'standable', 'seams'];
+const DEFAULT_LAYERS = new Set(['model', 'collision']);
+const layerGroups = [];
+let layerScene = null;
+
+function layerShown(layer) {
+    const box = document.getElementById('actorLayer_' + layer);
+    return box ? box.checked : DEFAULT_LAYERS.has(layer);
+}
+
+for (const layer of ACTOR_LAYERS) {
+    document.getElementById('actorLayer_' + layer)?.addEventListener('change', () => {
+        const shown = layerShown(layer);
+        for (const g of layerGroups) if (g.userData.actorLayer === layer) g.visible = shown;
+        if (layerScene) clearSelection(layerScene);
+    });
+}
+
+function addLayer(root, layer, objects) {
+    const g = new THREE.Group();
+    g.name = `${root.name} ${layer}`;
+    g.userData.actorLayer = layer;
+    g.visible = layerShown(layer);
+    for (const o of objects) g.add(o);
+    root.add(g);
+    layerGroups.push(g);
+}
+
 /**
- * One row for an actor type whose instances have a model: each instance is
- * a plain flat-colour mesh (shown with textures off) carrying the textured
- * mesh as a child, plus a wireframe under the row's edges group.
+ * The model layer for an actor type's instances: each is a plain flat-colour
+ * mesh (shown with textures off) carrying the textured mesh as a child, plus
+ * a wireframe in a sibling edges group.
  */
-function addModelRow(scene, groupBody, rowName, instances, built) {
+function buildModelLayer(rowName, instances, built) {
     const material = new THREE.MeshLambertMaterial({ color: ACTOR_COLOR, side: THREE.DoubleSide, flatShading: true });
     material.polygonOffset = true;
     material.polygonOffsetFactor = 1;
@@ -1774,11 +1830,44 @@ function addModelRow(scene, groupBody, rowName, instances, built) {
         first = first ?? mesh;
     }
 
-    scene.add(typeGroup);
-    scene.add(edgesGroup);
-    loadedModels.push({ name: rowName, root: typeGroup, mesh: typeGroup, edges: edgesGroup });
-    addModelCheckbox(scene, rowName, typeGroup, edgesGroup, false, true, ACTOR_COLOR, false, first, groupBody);
-    edgesGroup.visible = typeGroup.visible && wireframeCheckbox.checked;
+    // The row's visibility lives on the row root, so typeGroup stays visible
+    // and the edges only have to follow the wireframe checkbox.
+    edgesGroup.visible = wireframeCheckbox.checked;
+    loadedModels.push({ name: rowName, mesh: typeGroup, edges: edgesGroup });
+    return { objects: [typeGroup, edgesGroup], first };
+}
+
+/**
+ * One row for an actor type: its modelled instances and/or the collision of
+ * its dynapoly instances (entries from buildDynaPolyActors), as layers.
+ */
+function addActorRow(scene, groupBody, rowName, instances, built, dyna) {
+    const root = new THREE.Group();
+    root.name = rowName;
+
+    let colorTarget = null, color = ACTOR_COLOR;
+    if (instances.length) {
+        const { objects, first } = buildModelLayer(rowName, instances, built);
+        addLayer(root, 'model', objects);
+        colorTarget = first;
+    }
+    if (dyna.length) {
+        addLayer(root, 'collision', dyna.map(d => d.collision));
+        const standable = dyna.map(d => d.standable).filter(Boolean);
+        const seams = dyna.map(d => d.seams).filter(Boolean);
+        if (standable.length) addLayer(root, 'standable', standable);
+        if (seams.length) addLayer(root, 'seams', seams);
+        if (!colorTarget) {
+            colorTarget = dyna[0].colorTarget;
+            color = dyna[0].color;
+        }
+    }
+
+    scene.add(root);
+    // Not selectable itself (its layers' contents are, through their own
+    // loadedModels entries); listed so clearAllModels takes it off the scene.
+    loadedModelsNotSelectable.push({ name: rowName, mesh: root, edges: null });
+    addModelCheckbox(scene, rowName, root, null, false, true, color, false, colorTarget, groupBody);
 }
 
 ////////////////////////////////////////
@@ -1798,6 +1887,8 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
     if (!setup) return;
 
     clearTexturedPairs();
+    layerGroups.length = 0;
+    layerScene = scene;
     for (const key of [GROUP_MODELS, GROUP_MARKERS]) resetGroupModelState(key);
 
     const sceneDv = new DataView(sceneBuffer);
@@ -1814,14 +1905,28 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
 
     // ---- decode every spawn
     const instances = [];
+    // The same spawns, before any `place` (a draw-only adjustment), for the
+    // dynapoly collision.
+    const dynaSpawns = [];
     const addInstance = (entry, first, roomIndex) => {
         const base = actorModels[first.actorId] ?? null;
         const name = base?.name ?? `Actor ${hex(first.actorId, 3)}`;
         const override = overrides[name] ?? null;
         const spawns = override?.spawns ? override.spawns({ ...first, position: entry.position }) : [{ ...first, position: entry.position }];
-        for (const spawn of spawns) addSpawn(spawn, base, name, override, roomIndex);
+        for (const spawn of spawns) {
+            // A spawn can be another actor (a child its Init spawns: Demo_Kankyo's
+            // Door_Toki), drawn with that actor's own table entry and overrides.
+            if (spawn.actorId === first.actorId) {
+                addSpawn(spawn, base, name, override, roomIndex);
+                continue;
+            }
+            const childBase = actorModels[spawn.actorId] ?? null;
+            const childName = childBase?.name ?? `Actor ${hex(spawn.actorId, 3)}`;
+            addSpawn(spawn, childBase, childName, overrides[childName] ?? null, roomIndex);
+        }
     };
     const addSpawn = (spawn, base, name, override, roomIndex) => {
+        dynaSpawns.push({ spawn, position: spawn.position, room: roomIndex });
         // The shape.rot the actor's Init leaves (MM: MM_ACTOR_INIT_SHAPE_ROT in
         // render_actors.js, shared with the DynaPoly rows -- rot fields that
         // carry switch flags are zeroed, Bg_Dblue_Movebg's by type), then
@@ -1860,18 +1965,27 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
     }));
     for (const inst of instances) if (inst.model && !built.has(inst.model.key)) inst.model = null;
 
-    const rowLabel = (name, list) => list.length > 1 ? `${name} (x${list.length})` : name;
-    const byType = [...groupBy(instances, i => i.name)].sort((a, b) => a[0].localeCompare(b[0]));
+    // Dynapoly collision, keyed by actor name like the rows.
+    const dyna = await buildDynaPolyActors(scene, game, sceneName, dynaSpawns);
+
+    const rowLabel = (name, count) => count > 1 ? `${name} (x${count})` : name;
+    const byType = groupBy(instances, i => i.name);
+    for (const name of dyna.keys()) if (!byType.has(name)) byType.set(name, []);
+    const types = [...byType].sort((a, b) => a[0].localeCompare(b[0]));
 
     let modelRows = 0, markerRows = 0, triangles = 0, missing = 0;
-    for (const [name, list] of byType) {
+    for (const [name, list] of types) {
         // An actor type can have both modelled and marker instances (a variant
-        // this cannot draw); they are split between the two groups.
+        // this cannot draw); they are split between the two groups. Its
+        // collision goes with the modelled ones, in the "Actors" group, even
+        // when no instance has a model.
         const withModel = list.filter(i => i.model);
         const markers = list.filter(i => !i.model);
-        if (withModel.length) {
+        const collision = dyna.get(name) ?? [];
+        if (withModel.length || collision.length) {
             const group = getModelGroup(GROUP_MODELS, 'Actors');
-            addModelRow(scene, group.body, rowLabel(name, withModel), withModel, built);
+            const count = withModel.length || collision.length;
+            addActorRow(scene, group.body, rowLabel(name, count), withModel, built, collision);
             modelRows++;
             for (const key of new Set(withModel.map(i => i.model.key))) {
                 triangles += built.get(key).triangles * withModel.filter(i => i.model.key === key).length;
@@ -1880,7 +1994,7 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
         }
         if (markers.length) {
             const group = getModelGroup(GROUP_MARKERS, 'Actors (no model)');
-            addTypeRow(scene, group.body, rowLabel(name, markers), markers, ACTOR_COLOR, true, buildMarkerInstance);
+            addTypeRow(scene, group.body, rowLabel(name, markers.length), markers, ACTOR_COLOR, true, buildMarkerInstance);
             markerRows++;
         }
     }

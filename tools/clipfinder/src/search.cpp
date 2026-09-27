@@ -105,16 +105,30 @@ static vector<Pair> wallPairCandidates(const Model& m) {
 	std::unordered_set<int64_t> seen;
 	const double R = m.radius, E = R + REACH;
 	const double reach = 2 * m.radius + 42;
-	for (const auto& sub : m.colCtx.subWalls) {
-		if (sub.size() < 2) continue;
-		vector<int> walls;
+	// (pairWalls: the subdivisions' walls, dynapoly walls included.) The
+	// pusher can also be a sloped floor: moving more than the radius, the
+	// frame's line test includes floors and snaps Link the radius out along a
+	// floor's slope too (BgCheck_CheckWallImpl), which can put him behind the
+	// wall the slope runs up to (OoT Bottom of the Well TRI 863 -> 876).
+	// Those pairs are crossings only: floors don't push in the wall check.
+	for (size_t ci = 0; ci < m.pairWalls.size(); ci++) {
+		const auto& sub = m.pairWalls[ci];
+		if (sub.empty()) continue;
+		vector<int> walls, pushers;
 		for (int id : sub) { const Poly& p = m.polys[id]; if (p.exists && p.isWall && p.nXZ > 0) walls.push_back(id); }
-		for (size_t i = 0; i < walls.size(); i++) {
+		pushers = walls;
+		for (int id : m.colCtx.subFloors[ci]) {
+			const Poly& p = m.polys[id];
+			if (p.exists && p.isFloor && !isZero(p.nXZ)) pushers.push_back(id);
+		}
+		if (walls.empty() || pushers.size() < 2) continue;
+		for (size_t i = 0; i < pushers.size(); i++) {
 			for (size_t j = 0; j < walls.size(); j++) {
-				if (i == j) continue;
-				const Poly& A = m.polys[walls[i]];
+				if (pushers[i] == walls[j]) continue;
+				const Poly& A = m.polys[pushers[i]];
 				const Poly& B = m.polys[walls[j]];
-				int64_t key = (int64_t)A.id * 65536 + B.id;
+				int64_t key = (int64_t)A.id << 32 | (uint32_t)B.id;
+				if (m.dynaPairsOnly && A.bg < 0 && B.bg < 0) continue;
 				if (seen.count(key)) continue;
 				double cosAB = (A.nx * B.nx + A.nz * B.nz) * A.invNXZ * B.invNXZ;
 				if (cosAB > -0.02) continue;
@@ -182,7 +196,8 @@ static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, c
 		if (dA > R || dA < -(4 / A.nXZ) - 1) return false;
 		double dB = planeDist(B, x, h, z);
 		if (dB < 0 || dB > R + 4) return false;
-		if (dB + (R - dA) * cosAB > -3) return false;
+		// (anywhere behind B: a shallow push can still hold with the stick held, ClipResult::hold)
+		if (dB + (R - dA) * cosAB > 0) return false;
 		// near the triangles themselves, not just their planes (slack: the
 		// extended plane and pushes from walls before A in the list)
 		const double slack = R;
@@ -212,7 +227,7 @@ static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, c
 		le(-dA0 - (4 / A.nXZ) - 1, -dA1);
 		le(-dB0, -dB1);
 		le(dB0 - R - 4, dB1);
-		le(dB0 + (R - dA0) * cosAB + 3, dB1 - dA1 * cosAB);
+		le(dB0 + (R - dA0) * cosAB, dB1 - dA1 * cosAB);
 		return hMin <= hMax;
 	};
 	vector<double> ys;
@@ -272,9 +287,15 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 	};
 	const double c45 = SQRT1_2;
 	const double outDirs[3][2] = { { nx, nz }, { (nx - nz) * c45, (nz + nx) * c45 }, { (nx + nz) * c45, (nz - nx) * c45 } };
+	// A sloped floor pusher: the line test (at Link's feet + checkHeight -
+	// GROUND_DROP) only meets the slope where it has risen that far above
+	// the floor he stands on, which can be a whole frame's move away (OoT
+	// Shadow Temple TRI 1182: 29+ units), so look that far for his floor.
+	vector<double> sides = { -12.0, -2.0, 4.0, 14.0, 28.0 };
+	if (A.isFloor) for (double d = 40; d <= REACH_DIST + 4; d += 12) sides.push_back(d);
 	auto floorsBeside = [&](std::pair<double, double> q) {
 		vector<double> out;
-		for (double side : { -12.0, -2.0, 4.0, 14.0, 28.0 })
+		for (double side : sides)
 			for (const auto& od : outDirs)
 				for (double y : m.floorsNear(s, q.first + side * od[0], q.second + side * od[1]))
 					if (std::find(out.begin(), out.end(), y) == out.end()) out.push_back(y);
@@ -348,12 +369,16 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 	vector<int> yaws;
 	std::optional<CrossFound> first;
 	std::set<std::pair<double, double>> tried;
+	// (a sloped floor pusher needs a start far enough back for the line to
+	// reach it at all: up to a whole frame's move, see floorsBeside)
+	vector<double> steps = MOVE_STEPS;
+	if (A.isFloor) for (double d = steps.back() + 4; d <= REACH_DIST; d += 4) steps.push_back(d);
 	for (int i = 0; i < 32; i++) {
 		int yaw0 = i * 0x800;
 		double dx0 = std::sin(yaw0 / 65536.0 * 2 * PI), dz0 = std::cos(yaw0 / 65536.0 * 2 * PI);
 		if (std::fabs(dx0 * A.nx + dz0 * A.nz) * A.invNXZ < 0.1) continue;
 		std::optional<CrossFound> found;
-		for (double dist : MOVE_STEPS) {
+		for (double dist : steps) {
 			// standing still at the start, moving from there through the point
 			// (cached for falling points only: a walking point's starts are
 			// hardly ever tried again, so the cache just costs time there)
@@ -373,14 +398,15 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 			if (cp.drop > 0) next.y = cp.p.y;
 			auto f = lineFrame(m, s, prev, next, tol);
 			if (!f || f->hit.poly != A.id) continue;
-			auto clip = clipFromFrame(m, s, prev, f->res, f->trace, tol, cp.drop > 0 ? NAN : prev.y);
+			const Move mv{ yaw, speed };
+			auto clip = clipFromFrame(m, s, prev, f->res, f->trace, tol, cp.drop > 0 ? NAN : prev.y, &mv);
 			if (!clip || !m.isInBounds(s, prev)) continue;
 			bool noFloor = false;
 			if (cp.drop > 0) {
-				auto end = landing(m, s, f->res, cp.floorY, noFloor);
+				auto end = landing(m, s, f->res, cp.floorY, noFloor, clip->crossed);
 				if (!end) continue;
 				clip->end = *end;
-			} else if (m.isInBounds(s, clip->end)) {
+			} else if (!m.endCounts(s, clip->crossed, clip->end)) {
 				continue;
 			}
 			found = CrossFound{ *clip, prev, next, f->res, { f->hit.x, next.y, f->hit.z }, noFloor, yaw, speed };
@@ -417,8 +443,15 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 	V3 res = m.sphereStep(p, LOOSE, &trace);
 	if (trace.empty()) return std::nullopt;
 	auto clip = clipFromFrame(m, s, p, res, trace, LOOSE, floorPt.y);
-	if (!clip) return std::nullopt;
-	if (!m.isInBounds(s, floorPt) || m.isInBounds(s, clip->end)) return std::nullopt;
+	if (!m.isInBounds(s, floorPt)) return std::nullopt;
+	if (clip) {
+		if (!m.endCounts(s, clip->crossed, clip->end)) return std::nullopt;
+	} else {
+		// Not through standing still afterwards: maybe with the stick held one
+		// more frame, which needs the move (below). Only if he went through a
+		// wall at all.
+		if (m.crossedWall(s, { p.x, res.y, p.z }, res) < 0) return std::nullopt;
+	}
 	// Link walks there himself: the game's move
 	// stops a hair off p, so the frame is checked again where he ends up.
 	for (double dist : MOVE_STEPS) {
@@ -434,16 +467,18 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 			V3 next = moveStep(prev, yaw, speed);
 			if (lineFrame(m, s, prev, next, LOOSE)) continue;
 			PushList tr;
-			V3 wres = m.sphereStep(next, LOOSE, &tr);
-			auto wclip = clipFromFrame(m, s, prev, wres, tr, LOOSE, prev.y);
-			if (!wclip || m.isInBounds(s, wclip->end) || !m.isInBounds(s, prev)) continue;
+			V3 wres = m.sphereStep(next, LOOSE, &tr, &prev);
+			const Move mv{ yaw, speed };
+			auto wclip = clipFromFrame(m, s, prev, wres, tr, LOOSE, prev.y, &mv);
+			if (!wclip || !m.endCounts(s, wclip->crossed, wclip->end) || !m.isInBounds(s, prev)) continue;
 			PushList st;
-			V3 sres = m.sphereStep(next, STRICT, &st);
+			V3 sres = m.sphereStep(next, STRICT, &st, &prev);
 			// acute: it clips without the extended planes, and the push starts
 			// in front of the pusher's face (not beside it, see pushOnFace)
-			auto sclip = clipFromFrame(m, s, prev, sres, st, STRICT, prev.y);
+			auto sclip = clipFromFrame(m, s, prev, sres, st, STRICT, prev.y, &mv);
 			Clip c;
 			c.acutePoint = sclip && sclip->onFace;
+			c.hold = wclip->hold;
 			c.from = next; c.floorY = prev.y; c.hasFloorY = true; c.prev = prev; c.res = wres; c.end = wclip->end;
 			c.next = next; c.hasNext = true; c.yaw = yaw; c.speed = speed; c.hasMove = true;
 			c.crossed = wclip->crossed; c.pusher = wclip->pusher;
@@ -462,7 +497,7 @@ static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int 
 	if (!clip) return std::nullopt;
 	if (!m.isInBounds(s, p)) return std::nullopt;
 	bool noFloor = false;
-	auto end = landing(m, s, res, p.y, noFloor);
+	auto end = landing(m, s, res, p.y, noFloor, clip->crossed);
 	if (!end) return std::nullopt;
 	auto prev = reachFrom(m, s, low, p.y);
 	if (!prev) return std::nullopt;
@@ -565,6 +600,8 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 			if (pi >= pairs.size()) break;
 			s.clearCache();
 			const Pair& pr = pairs[pi];
+			// (a floor pusher only snaps Link through the line test: crossings only)
+			if (m.polys[pr.A].isFloor) { progress("wall pairs", ++pairsDone, pairs.size()); continue; }
 			nextPositionsForPair(m, s, pr, [&](const NextPos& np) {
 				if (pairFound(pr.A, pr.B)) return;
 				const V3& p = np.p;
@@ -626,14 +663,15 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 				V3 snapped = { F(F(k * A.nx) + cp.p.x), cp.p.y, F(F(k * A.nz) + cp.p.z) };
 				V3 res = m.sphereStep(snapped, LOOSE, nullptr);
 				double h = cp.p.y + m.checkHeight;
-				bool behind = false;
+				bool behind = false, behindDyna = false;
 				for (int bid : partners) {
 					const Poly& B = m.polys[bid];
 					double d = planeDist(B, res.x, h, res.z);
-					if (d >= -3.5 || d < -4 * m.radius) continue;
+					if (d >= 0 || d < -4 * m.radius) continue;
 					double t = d / B.nMag;
 					if (pointInTri3D(B, res.x - t * B.nx, h - t * B.ny, res.z - t * B.nz, 1) && !pairFound(A.id, bid)) {
 						behind = true;
+						behindDyna = B.bg >= 0;
 						break;
 					}
 				}
@@ -649,7 +687,8 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 				// there and from 2 units around it, don't search for the move.
 				// (About 90% of the falling points; in Kakariko / Kokiri Forest
 				// it lost 1 point of ~7400, one that a 0.01 unit change flips.)
-				if (cp.drop > 0) {
+				// (behind a dynapoly, landing in bounds counts too: Model::endCounts)
+				if (cp.drop > 0 && !behindDyna) {
 					bool landsOut = false, noFloor;
 					const double offs[5][2] = { { 0, 0 }, { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 } };
 					for (const auto& o : offs) {
@@ -672,6 +711,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 				Clip c;
 				c.acutePoint = strict;
 				c.cross = true; c.drop = cp.drop;
+				c.hold = f.clip.hold;
 				c.from = f.at; c.floorY = cp.floorY; c.hasFloorY = true;
 				c.prev = f.prev; c.next = f.next; c.hasNext = true; c.res = f.res; c.end = f.clip.end; c.endNoFloor = f.noFloor;
 				c.yaws = r->second;
@@ -686,6 +726,15 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	};
 
 	fprintf(stderr, "  %zu wall pairs, %zu pushing walls, %d threads\n", pairs.size(), pushers.size(), threads);
+	if (!m.bgActors.empty()) {
+		size_t one = 0, both = 0;
+		for (const Pair& p : pairs) {
+			int n = (m.polys[p.A].bg >= 0) + (m.polys[p.B].bg >= 0);
+			if (n == 1) one++;
+			else if (n == 2) both++;
+		}
+		fprintf(stderr, "  (dynapoly: %zu pairs with one dynapoly wall, %zu dynapoly with dynapoly)\n", one, both);
+	}
 	{
 		vector<std::thread> ts;
 		for (int i = 0; i < threads; i++) ts.emplace_back(worker1);

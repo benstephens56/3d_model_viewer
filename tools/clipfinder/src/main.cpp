@@ -11,7 +11,8 @@
 // The source files, from the bottom up:
 //   common.h         f32 helpers (F = Math.fround), V3, the sine table, a frame's walk
 //   scene.h/.cpp     the scene file's collision header and its subdivisions
-//   collision.h/.cpp the game's static collision checks, as a Model
+//   collision.h/.cpp the game's collision checks (static and dynapoly), as a Model
+//   dyna.h/.cpp      --dyna: the viewer's dynapoly export, added to the Model
 //   frame.h/.cpp     one frame: does it clip; where Link can stand; --max-move
 //   search.h/.cpp    the scan over a whole map
 //   reach.h/.cpp     --min-speed, --refine, --angles, --yaw
@@ -25,12 +26,16 @@
 //     (--first-per-pair: one clip point per wall pair, the first found - much faster)
 //   clipfinder --game OOT --all --form Adult [--falling] --out-dir results/
 //   clipfinder --game OOT --map "Spot 01 - Kakariko Village" --form All -o kak.json
+//   clipfinder --game MM --map "South Clock Town" --form Human --dyna sct_dyna.json [--dyna-only] -o sct.json
+//     (--dyna: the scene's dynapoly actors too, from the viewer's "Export dynapolys";
+//      --dyna-only: just the wall pairs with a dynapoly wall in them)
 //     (--form All: every form's clips in the one JSON, each marked with its form;
 //      --form Adult,Child: just those forms, the same way)
 // Options: --root <viewer dir> (default: two levels up from the exe's dir, or
 // the current dir if it has models/), --threads N, --radius R (overrides --form).
 // Every option is explained in README.md next to this file.
 
+#include "dyna.h"
 #include "output.h"
 #include "reach.h"
 #include "scene.h"
@@ -76,7 +81,8 @@ static string safeName(const string& s) {
 }
 
 int main(int argc, char** argv) {
-	string game, mapName, form, out, outDir, root, after;
+	string game, mapName, form, out, outDir, root, after, dynaPath;
+	bool dynaOnly = false;
 	double radius = 0;
 	bool falling = false, all = false, extendedOnly = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
 	int onlyPusher = -1, onlyCrossed = -1;
@@ -133,6 +139,8 @@ int main(int argc, char** argv) {
 			if (!(gridSpeed > 0)) { fprintf(stderr, "--speed wants a speed > 0\n"); return 2; }
 		}
 		else if (a == "--sim") simArg = val();
+		else if (a == "--dyna") dynaPath = val();
+		else if (a == "--dyna-only") dynaOnly = true;
 		else if (a == "--pair") {
 			string v = val();
 			if (sscanf(v.c_str(), "%d,%d", &onlyPusher, &onlyCrossed) != 2) { fprintf(stderr, "--pair wants PUSHER,CROSSED (TRI ids), e.g. --pair 757,714\n"); return 2; }
@@ -170,6 +178,7 @@ int main(int argc, char** argv) {
 			"                  [--speed S (with --yaw: the CSV grids at exactly speed S; stands in for --max-speed)]\n"
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP]]  (one frame from a standing start, printed step by step)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
+			"                  [--dyna FILE [--dyna-only]]  (the viewer's dynapoly export for the map: its actors' collision too)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -236,6 +245,20 @@ int main(int argc, char** argv) {
 		fprintf(stderr, "starting after %s: %zu maps to go\n", after.c_str(), todo.size());
 	}
 
+	// --dyna: the dynapoly actors the viewer had loaded (one map's)
+	DynaFile dyna;
+	if (dynaOnly && dynaPath.empty()) { fprintf(stderr, "--dyna-only needs --dyna FILE\n"); return 2; }
+	if (!dynaPath.empty()) {
+		if (all) { fprintf(stderr, "--dyna is one map's export: use --map, not --all\n"); return 2; }
+		string err;
+		if (!readDynaFile(dynaPath, dyna, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+		if (!dyna.game.empty() && upper(dyna.game) != game) { fprintf(stderr, "%s is a %s export, not %s\n", dynaPath.c_str(), dyna.game.c_str(), game.c_str()); return 1; }
+		if (!dyna.map.empty() && dyna.map != mapName) { fprintf(stderr, "%s is %s's export, not %s's\n", dynaPath.c_str(), dyna.map.c_str(), mapName.c_str()); return 1; }
+		size_t n = 0;
+		for (const DynaActorIn& a : dyna.actors) n += a.polys.size();
+		fprintf(stderr, "dynapolys: %zu actors, %zu polys from %s\n", dyna.actors.size(), n, dynaPath.c_str());
+	}
+
 	int failures = 0;
 	for (const MapEntry& e : todo) {
 		vector<uint8_t> buf;
@@ -245,13 +268,17 @@ int main(int argc, char** argv) {
 		try {
 			if (!parseScene(buf, game, ch, tris)) { fprintf(stderr, "%s - %s: no collision header\n", game.c_str(), e.name.c_str()); failures++; continue; }
 		} catch (const std::exception& ex) { fprintf(stderr, "%s - %s: bad scene file: %s\n", game.c_str(), e.name.c_str(), ex.what()); failures++; continue; }
+		if (!dynaPath.empty() && dyna.numPolygons >= 0 && dyna.numPolygons != ch.numPolygons) {
+			fprintf(stderr, "%s was exported with %d static polys, the scene file has %d\n", dynaPath.c_str(), dyna.numPolygons, ch.numPolygons);
+			return 1;
+		}
 		// The output file is opened before the scan, so a path that can't be
 		// written (e.g. a missing directory) stops the run straight away
 		// instead of after the scan, and a write that fails stops it too.
 		string path = out;
 		if (path.empty() || all) {
 			string dir = outDir.empty() ? "." : outDir;
-			path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + ".json";
+			path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + (dynaPath.empty() ? "" : "_dyna") + ".json";
 		}
 		// (--sim writes nothing, so it doesn't open, and leave empty, the file)
 		std::ofstream f;
@@ -286,6 +313,8 @@ int main(int argc, char** argv) {
 			m.lowDrop = falling ? 30 : 0;
 			m.extendedOnly = extendedOnly;
 			m.build(tris, ch.numPolygons);
+			addDynaActors(m, dyna);
+			m.dynaPairsOnly = dynaOnly;
 			if (!simArg.empty()) return runSim(m, simArg);
 			vector<Clip> found = scan(m, threads, firstPerPair);
 			// --pair: just the clips of that wall pair
@@ -417,7 +446,7 @@ int main(int argc, char** argv) {
 			}
 			results.push_back({ v.form, v.radius, F(v.checkHeight), std::move(found) });
 		}
-		f << toJson(game, e.name, ch.numPolygons, falling, extendedOnly, results);
+		f << toJson(game, e.name, ch.numPolygons, falling, extendedOnly, results, dyna.raw);
 		f.close();
 		if (!f) {
 			fprintf(stderr, "can't write %s - stopping\n", path.c_str());

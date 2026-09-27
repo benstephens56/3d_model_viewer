@@ -312,6 +312,24 @@ export const MM_ACTOR_OVERRIDES = {
         },
     },
 
+    // z_obj_tokei_tobira.c ObjTokeiTobira_Init: the scene places only the
+    // left door (type 0, params & 1); its Init spawns the right one (type 1)
+    // as a child at the same spot and rotation, and then each door moves
+    // itself 80 to its side: world.pos += RotY(D_80ABD76C[type] + shape.rot.y)
+    // * (0, 0, 80), with -0x4000 for type 0 and +0x4000 for type 1. Both the
+    // models and the dynapoly collision use these spawns.
+    "Obj_Tokei_Tobira": {
+        spawns: (spawn) => {
+            const place = (s) => {
+                const a = ((((s.params & 1) ? 0x4000 : -0x4000) + s.rot[1]) << 16 >> 16) * Math.PI / 0x8000;
+                const [x, y, z] = s.position;
+                return { ...s, position: [x + Math.fround(Math.sin(a) * 80), y, z + Math.fround(Math.cos(a) * 80)] };
+            };
+            if (spawn.params & 1) return [place(spawn)];
+            return [place(spawn), place({ ...spawn, params: 1 })];
+        },
+    },
+
     // z_en_fall.c: EN_FALL_TYPE ((params >> 7) & 0x1F) picks the draw and
     // scale from EN_FALL_SCALE (params & 0x7F: 1-4 -> 0.08 / 0.04 / 0.02 /
     // 0.01, else 0.16). The moons draw gMoonDL (the LOD moons object_lodmoon's

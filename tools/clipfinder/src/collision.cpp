@@ -1,30 +1,33 @@
 #include "collision.h"
 
+static void initPoly(Poly& p, int id, const int v[3][3], const int n[3], int d) {
+	p.exists = true;
+	p.id = id;
+	p.ax = v[0][0]; p.ay = v[0][1]; p.az = v[0][2];
+	p.bx = v[1][0]; p.by = v[1][1]; p.bz = v[1][2];
+	p.cx = v[2][0]; p.cy = v[2][1]; p.cz = v[2][2];
+	p.sx = n[0]; p.sy = n[1]; p.sz = n[2];
+	p.nx = F(p.sx * NORMAL_FRAC); p.ny = F(p.sy * NORMAL_FRAC); p.nz = F(p.sz * NORMAL_FRAC);
+	p.nXZ = F(std::sqrt(F(sq(p.nx) + sq(p.nz))));
+	p.dist = d;
+	p.nMag = F(std::sqrt(F(F(sq(p.nx) + sq(p.ny)) + sq(p.nz))));
+	p.invNXZ = p.nXZ > 0 ? F(1 / p.nXZ) : 0;
+	p.minX = std::min({ p.ax, p.bx, p.cx }); p.maxX = std::max({ p.ax, p.bx, p.cx });
+	p.minY = std::min({ p.ay, p.by, p.cy }); p.maxY = std::max({ p.ay, p.by, p.cy });
+	p.minZ = std::min({ p.az, p.bz, p.cz }); p.maxZ = std::max({ p.az, p.bz, p.cz });
+	p.isFloor = p.sy > SNORMAL_FLOOR;
+	p.isCeiling = p.sy < SNORMAL_CEIL;
+	p.isWall = !p.isFloor && !p.isCeiling;
+	p.sortY = (p.sy == 32767 || p.sy == -32767) ? p.ay : p.minY;
+	p.tz = p.nXZ > 0 ? F(std::fabs(p.nz) * p.invNXZ) : 0;
+	p.tx = p.nXZ > 0 ? F(std::fabs(p.nx) * p.invNXZ) : 0;
+}
+
 void Model::build(const vector<Tri>& tris, int numPolygons) {
 	polys.assign(numPolygons, Poly{});
-	for (const Tri& t : tris) {
-		Poly& p = polys[t.id];
-		p.exists = true;
-		p.id = t.id;
-		p.ax = t.v[0][0]; p.ay = t.v[0][1]; p.az = t.v[0][2];
-		p.bx = t.v[1][0]; p.by = t.v[1][1]; p.bz = t.v[1][2];
-		p.cx = t.v[2][0]; p.cy = t.v[2][1]; p.cz = t.v[2][2];
-		p.sx = t.n[0]; p.sy = t.n[1]; p.sz = t.n[2];
-		p.nx = F(p.sx * NORMAL_FRAC); p.ny = F(p.sy * NORMAL_FRAC); p.nz = F(p.sz * NORMAL_FRAC);
-		p.nXZ = F(std::sqrt(F(sq(p.nx) + sq(p.nz))));
-		p.dist = t.d;
-		p.nMag = F(std::sqrt(F(F(sq(p.nx) + sq(p.ny)) + sq(p.nz))));
-		p.invNXZ = p.nXZ > 0 ? F(1 / p.nXZ) : 0;
-		p.minX = std::min({ p.ax, p.bx, p.cx }); p.maxX = std::max({ p.ax, p.bx, p.cx });
-		p.minY = std::min({ p.ay, p.by, p.cy }); p.maxY = std::max({ p.ay, p.by, p.cy });
-		p.minZ = std::min({ p.az, p.bz, p.cz }); p.maxZ = std::max({ p.az, p.bz, p.cz });
-		p.isFloor = p.sy > SNORMAL_FLOOR;
-		p.isCeiling = p.sy < SNORMAL_CEIL;
-		p.isWall = !p.isFloor && !p.isCeiling;
-		p.sortY = (p.sy == 32767 || p.sy == -32767) ? p.ay : p.minY;
-		p.tz = p.nXZ > 0 ? F(std::fabs(p.nz) * p.invNXZ) : 0;
-		p.tx = p.nXZ > 0 ? F(std::fabs(p.nx) * p.invNXZ) : 0;
-	}
+	numStatic = numPolygons;
+	for (const Tri& t : tris) initPoly(polys[t.id], t.id, t.v, t.n, t.d);
+	pairWalls = colCtx.subWalls;
 	auto sorted = [&](const vector<int>& ids, bool walls) {
 		vector<int> out;
 		for (int id : ids) {
@@ -53,6 +56,52 @@ void Model::build(const vector<Tri>& tris, int numPolygons) {
 	}
 }
 
+int Model::addBgActor(const string& name, const vector<DynaPolyIn>& in, const double center[3], double radius, double minY, double maxY) {
+	BgActor bg;
+	bg.name = name;
+	bg.cx = center[0]; bg.cy = center[1]; bg.cz = center[2]; bg.r = radius;
+	bg.minY = minY; bg.maxY = maxY;
+	const int first = (int)polys.size();
+	const int bgId = (int)bgActors.size();
+	vector<int> cells;
+	for (const DynaPolyIn& d : in) {
+		Poly p;
+		initPoly(p, (int)polys.size(), d.v, d.n, d.d);
+		p.bg = bgId;
+		// DynaPoly_ExpandSRT sorts on the float normal (newNormal.y > 0.5 /
+		// < -0.8), which the export passes as `type`; the s16 one can be a
+		// hair different.
+		p.isFloor = d.type == 'f';
+		p.isCeiling = d.type == 'c';
+		p.isWall = d.type == 'w';
+		polys.push_back(p);
+		if (p.isWall) {
+			dynaWalls.push_back(p.id);
+			Tri t;
+			t.id = p.id;
+			memcpy(t.v, d.v, sizeof t.v);
+			memcpy(t.n, d.n, sizeof t.n);
+			t.d = d.d;
+			cells.clear();
+			subdivisionCellsOf(colCtx, t, cells);
+			for (int c : cells) pairWalls[c].push_back(p.id);
+		}
+		if (p.isFloor) {
+			int64_t x0 = (int64_t)std::floor(p.minX / floorCell), x1 = (int64_t)std::floor(p.maxX / floorCell);
+			int64_t z0 = (int64_t)std::floor(p.minZ / floorCell), z1 = (int64_t)std::floor(p.maxZ / floorCell);
+			for (int64_t gx = x0; gx <= x1; gx++)
+				for (int64_t gz = z0; gz <= z1; gz++) floorGrid[key2(gx, gz)].push_back(p.id);
+		}
+	}
+	// head insertion: the lists run from the last poly to the first
+	for (int id = (int)polys.size() - 1; id >= first; id--) {
+		if (polys[id].isWall) bg.walls.push_back(id);
+		else if (polys[id].isFloor) bg.floors.push_back(id);
+	}
+	bgActors.push_back(bg);
+	return first;
+}
+
 FloorList Model::floorsAt(double x, double z) const {
 	FloorList out;
 	auto it = floorGrid.find(key2((int64_t)std::floor(x / floorCell), (int64_t)std::floor(z / floorCell)));
@@ -60,7 +109,9 @@ FloorList Model::floorsAt(double x, double z) const {
 	for (int id : it->second) {
 		const Poly& p = polys[id];
 		if (x < p.minX - 1 || x > p.maxX + 1 || z < p.minZ - 1 || z > p.maxZ + 1) continue;
-		if (!triChkY(p, z, x, 0, 1)) continue;
+		// static: CollisionPoly_CheckYIntersect (detMax 0); dynapoly:
+		// CollisionPoly_CheckYIntersectApprox1 (Math3D_TriChkPointParaYIntersectDist, detMax 300)
+		if (!triChkY(p, z, x, p.bg >= 0 ? 300 : 0, 1)) continue;
 		out.push_back(F(F(F(F(-p.nx * x) - F(p.nz * z)) - p.dist) / p.ny));
 	}
 	return out;
@@ -83,39 +134,105 @@ const FloorList& Model::floorsNear(Scratch& s, double x, double z) const {
 	return s.cacheVal[i];
 }
 
-V3 Model::sphereStep(const V3& pos, const Tol& tol, PushList* trace) const {
+// One wall's push in a Z (pass 0) or X (pass 1) pass: BgCheck_SphVsStaticWall and
+// BgCheck_SphVsDynaWallInBgActor do the same per poly.
+static inline bool wallPush(const Poly& p, int pass, double R, double sphY, double rx, double rz, const Tol& tol) {
+	if (pass == 0) {
+		if (p.tz < F(0.4)) return false;
+		if (rz < F(p.minZ - R) || rz > F(p.maxZ + R)) return false;
+		if (isZero(p.nz) || !triChkZ(p, rx, sphY, tol.detMax, tol.chkDist)) return false;
+		double inter = F(F(F(F(-p.nx * rx) - F(p.ny * sphY)) - p.dist) / p.nz);
+		double d = F(inter - rz);
+		return std::fabs(d) <= F(R / p.tz) && F(d * p.nz) <= 4.0;
+	}
+	if (p.tx < F(0.4)) return false;
+	if (rx < F(p.minX - R) || F(p.maxX + R) < rx) return false;
+	if (isZero(p.nx) || !triChkX(p, sphY, rz, tol.detMax, tol.chkDist)) return false;
+	double inter = F(F(F(F(-p.ny * sphY) - F(p.nz * rz)) - p.dist) / p.nx);
+	double d = F(inter - rx);
+	return std::fabs(d) <= F(R / p.tx) && F(d * p.nx) <= 4.0;
+}
+
+// The lineHit scratch for sphereStep's final line check (it has no Scratch
+// of its own): one per thread, sized on first use. A pointer, never freed: a
+// thread_local object with a destructor is freed twice at thread exit in a
+// static mingw build.
+static Scratch& lineScratch(size_t numPolys) {
+	static thread_local Scratch* s = nullptr;
+	if (!s) s = new Scratch();
+	if (s->stamp.size() < numPolys) s->stamp.assign(numPolys, 0);
+	return *s;
+}
+
+V3 Model::sphereStep(const V3& pos, const Tol& tol, PushList* trace, const V3* prev, bool lineDyna) const {
 	const double R = radius;
 	const double sphY = F(pos.y + checkHeight);
-	const vector<int>& list = cellWalls(pos.x, pos.y, pos.z);
 	double rx = pos.x, rz = pos.z;
+	// BgCheck_ComputeWallDisplacement
+	auto push = [&](const Poly& p, int id, double pd) {
+		double disp = F(F(R - pd) * p.invNXZ);
+		V3 from = { rx, pos.y, rz };
+		rx = F(rx + F(disp * p.nx));
+		rz = F(rz + F(disp * p.nz));
+		if (trace) trace->push_back({ id, from, { rx, pos.y, rz } });
+	};
+
+	// BgCheck_SphVsDynaWall: each bg actor in bgId order whose Y range and
+	// bounding sphere (grown by the radius, as an s16) take the sphere centre;
+	// all its walls' Z pushes, then all their X pushes (unsorted, no early out).
+	bool dynaHit = false;
+	if (!bgActors.empty()) {
+		const double grow = (double)(int16_t)toI32(R); // TRUNCF_BINANG(radius)
+		for (const BgActor& bg : bgActors) {
+			if (bg.minY > sphY || bg.maxY < sphY) continue;
+			const double r = (double)(int16_t)toI32(bg.r + grow);
+			const double r2 = F(r * r);
+			const double dx = F(bg.cx - rx), dz = F(bg.cz - rz);
+			if (r2 < F(F(dx * dx) + F(dz * dz))) continue;
+			const double dy = F(bg.cy - sphY);
+			const bool xy = F(F(dx * dx) + F(dy * dy)) <= r2;  // Math3D_XYInSphere
+			const bool yz = F(F(dy * dy) + F(dz * dz)) <= r2;  // Math3D_YZInSphere
+			if (!xy && !yz) continue;
+			for (int pass = 0; pass < 2; pass++) {
+				for (int id : bg.walls) {
+					const Poly& p = polys[id];
+					double pd = planeDist(p, rx, sphY, rz);
+					if (R < std::fabs(pd)) continue;
+					if (wallPush(p, pass, R, sphY, rx, rz, tol)) { push(p, id, pd); dynaHit = true; }
+				}
+			}
+		}
+	}
+
+	// BgCheck_SphVsStaticWall, in the subdivision of where the dynapolys left him
+	const vector<int>& list = cellWalls(rx, pos.y, rz);
+	bool staticHit = false;
 	for (int pass = 0; pass < 2; pass++) {
 		for (int id : list) {
 			const Poly& p = polys[id];
 			if (sphY < p.minY) break;
 			double pd = planeDist(p, rx, sphY, rz);
 			if (R < std::fabs(pd)) continue;
-			bool hit = false;
-			if (pass == 0) {
-				if (p.tz < F(0.4)) continue;
-				if (rz < F(p.minZ - R) || rz > F(p.maxZ + R)) continue;
-				if (isZero(p.nz) || !triChkZ(p, rx, sphY, tol.detMax, tol.chkDist)) continue;
-				double inter = F(F(F(F(-p.nx * rx) - F(p.ny * sphY)) - p.dist) / p.nz);
-				double d = F(inter - rz);
-				hit = std::fabs(d) <= F(R / p.tz) && F(d * p.nz) <= 4.0;
-			} else {
-				if (p.tx < F(0.4)) continue;
-				if (rx < F(p.minX - R) || F(p.maxX + R) < rx) continue;
-				if (isZero(p.nx) || !triChkX(p, sphY, rz, tol.detMax, tol.chkDist)) continue;
-				double inter = F(F(F(F(-p.ny * sphY) - F(p.nz * rz)) - p.dist) / p.nx);
-				double d = F(inter - rx);
-				hit = std::fabs(d) <= F(R / p.tx) && F(d * p.nx) <= 4.0;
-			}
-			if (hit) {
-				double disp = F(F(R - pd) * p.invNXZ);
-				V3 from = { rx, pos.y, rz };
-				rx = F(rx + F(disp * p.nx));
-				rz = F(rz + F(disp * p.nz));
-				if (trace) trace->push_back({ id, from, { rx, pos.y, rz } });
+			if (wallPush(p, pass, R, sphY, rx, rz, tol)) { push(p, id, pd); staticHit = true; }
+		}
+	}
+
+	// A dynapoly collision (a dynapoly push, or the line test's poly with no
+	// static push after it): BgCheck_CheckLineImpl from posPrev to the result
+	// against static walls, from their front only (BGCHECK_CHECK_ONE_FACE |
+	// BGCHECK_CHECK_WALL, no BGCHECK_CHECK_DYNA), putting him the radius in
+	// front of the first one crossed.
+	if (dynaHit || (lineDyna && !staticHit)) {
+		V3 from = prev ? *prev : V3{ pos.x, F(pos.y + GROUND_DROP), pos.z };
+		V3 to = { rx, pos.y, rz };
+		auto hit = lineHit(lineScratch(polys.size()), from, to, tol, false, true, false);
+		if (hit) {
+			const Poly& p = polys[hit->poly];
+			if (!isZero(p.nXZ)) {
+				double k = F(R * F(1 / p.nXZ));
+				rx = F(F(k * p.nx) + hit->x);
+				rz = F(F(k * p.nz) + hit->z);
+				if (trace) trace->push_back({ hit->poly, to, { rx, pos.y, rz }, true });
 			}
 		}
 	}
@@ -137,6 +254,32 @@ std::optional<V3> Model::restingSpot(const V3& pos) const {
 }
 
 std::optional<double> Model::floorCheck(double x, double z, double y) const {
+	auto best = staticFloorCheck(x, z, y);
+	if (bgActors.empty()) return best;
+	// BgCheck_RaycastFloorDyna: each bg actor whose minY is under y and whose
+	// bounding sphere takes (x, z) top down: its floors (detMax 300), then -
+	// only while nothing, static or dynapoly, has been found yet - its walls
+	// whose normal doesn't point down (flags 0x1C).
+	for (const BgActor& bg : bgActors) {
+		if (y < bg.minY) continue;
+		const double dx = F(bg.cx - x), dz = F(bg.cz - z);
+		if (!(F(F(dx * dx) + F(dz * dz)) <= F(bg.r * bg.r))) continue;
+		auto scan = [&](const vector<int>& list, bool walls) {
+			for (int id : list) {
+				const Poly& p = polys[id];
+				if (walls && p.sy < 0) continue;
+				if (isZero(p.ny) || !triChkY(p, z, x, 300, 1)) continue;
+				double yi = F(F(F(F(-p.nx * x) - F(p.nz * z)) - p.dist) / p.ny);
+				if (yi < y && (!best || *best < yi)) best = yi;
+			}
+		};
+		scan(bg.floors, false);
+		if (!best) scan(bg.walls, true);
+	}
+	return best;
+}
+
+std::optional<double> Model::staticFloorCheck(double x, double z, double y) const {
 	const double* mn = colCtx.minB;
 	const double* mx = colCtx.maxB;
 	if (x < mn[0] || x > mx[0] || z < mn[2] || z > mx[2]) return std::nullopt;
@@ -175,7 +318,7 @@ std::optional<V3> Model::lineVsPoly(const Poly& p, const V3& a, const V3& b, dou
 	return std::nullopt;
 }
 
-std::optional<Hit> Model::lineHit(Scratch& s, const V3& a, const V3& b, const Tol& tol, bool floors, bool oneFace) const {
+std::optional<Hit> Model::lineHit(Scratch& s, const V3& a, const V3& b, const Tol& tol, bool floors, bool oneFace, bool dyna) const {
 	CellIdx ia = pointCell(colCtx, a.x, a.y, a.z), ib = pointCell(colCtx, b.x, b.y, b.z);
 	int cells[64];
 	int nCells = 0;
@@ -214,7 +357,47 @@ std::optional<Hit> Model::lineHit(Scratch& s, const V3& a, const V3& b, const To
 	};
 	if (nCells) doCell(cells[0]);
 	for (int index : many) doCell(index);
+	if (!dyna) return best;
+	// BgCheck_CheckLineAgainstDyna, on the line as far as the static test left
+	// it: each bg actor whose Y range and bounding sphere (Math3D_LineVsSph)
+	// the line touches, its walls then (floors) its floors, nearest hit to a.
+	auto scanDyna = [&](const vector<int>& list) {
+		for (int id : list) {
+			auto i = lineVsPoly(polys[id], a, end, tol.lineChkDist, oneFace);
+			if (!i) continue;
+			double d = F(F(sq(F(a.x - i->x)) + sq(F(a.y - i->y))) + sq(F(a.z - i->z)));
+			if (d < bestDistSq) {
+				bestDistSq = d;
+				best = Hit{ id, i->x, i->y, i->z };
+				end = *i;
+			}
+		}
+	};
+	for (const BgActor& bg : bgActors) {
+		if (a.y < bg.minY && end.y < bg.minY) continue;
+		if (a.y > bg.maxY && end.y > bg.maxY) continue;
+		if (!lineVsSphere(bg, a, end)) continue;
+		scanDyna(bg.walls);
+		if (floors) scanDyna(bg.floors);
+	}
 	return best;
+}
+
+// Math3D_LineVsSph on a bg actor's Sphere16
+bool Model::lineVsSphere(const BgActor& bg, const V3& a, const V3& b) const {
+	const double r2 = F(bg.r * bg.r);
+	auto inSph = [&](const V3& p) {
+		double dx = F(bg.cx - p.x), dy = F(bg.cy - p.y), dz = F(bg.cz - p.z);
+		return F(F(F(dx * dx) + F(dy * dy)) + F(dz * dz)) <= r2;
+	};
+	if (inSph(a) || inSph(b)) return true;
+	double lx = F(b.x - a.x), ly = F(b.y - a.y), lz = F(b.z - a.z);
+	double len2 = F(F(F(lx * lx) + F(ly * ly)) + F(lz * lz));
+	if (isZero(len2)) return false;
+	double t = F(F(F(F(F(bg.cx - a.x) * lx) + F(F(bg.cy - a.y) * ly)) + F(F(bg.cz - a.z) * lz)) / len2);
+	if (t < 0 || t > 1) return false;
+	V3 q = { F(F(lx * t) + a.x), F(F(ly * t) + a.y), F(F(lz * t) + a.z) };
+	return inSph(q);
 }
 
 const vector<int>& Model::wallsAlong(Scratch& s, const V3& a, const V3& b) const {
@@ -241,31 +424,55 @@ int Model::crossedWall(Scratch& s, const V3& a, const V3& b, bool exiting) const
 	double y = a.y + checkHeight;
 	int best = -1;
 	double bestT = INFINITY;
-	for (int id : wallsAlong(s, a, b)) {
+	auto test = [&](int id) {
 		const Poly& p = polys[id];
-		if (y < p.minY || y > p.maxY) continue;
+		if (y < p.minY || y > p.maxY) return;
 		double dA = planeDist(p, a.x, y, a.z), dB = planeDist(p, b.x, y, b.z);
 		if (exiting) { dA = -dA; dB = -dB; }
-		if (!(dA > 0 && dB < 0)) continue;
+		if (!(dA > 0 && dB < 0)) return;
 		double t = dA / (dA - dB);
-		if (t >= bestT) continue;
+		if (t >= bestT) return;
 		double ix = a.x + (b.x - a.x) * t, iz = a.z + (b.z - a.z) * t;
 		if (pointInTri3D(p, ix, y, iz, 0.25)) { best = id; bestT = t; }
+	};
+	for (int id : wallsAlong(s, a, b)) test(id);
+	if (!dynaWalls.empty()) {
+		const double x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), z0 = std::min(a.z, b.z), z1 = std::max(a.z, b.z);
+		for (int id : dynaWalls) {
+			const Poly& p = polys[id];
+			if (p.maxX < x0 || p.minX > x1 || p.maxZ < z0 || p.minZ > z1) continue;
+			test(id);
+		}
 	}
 	return best;
 }
 
 bool Model::behindWall(const V3& pos) const {
 	double y = pos.y + checkHeight;
-	for (int id : cellWalls(pos.x, pos.y, pos.z)) {
-		const Poly& p = polys[id];
-		if (y < p.minY || y > p.maxY) continue;
+	auto inside = [&](const Poly& p) {
+		if (y < p.minY || y > p.maxY) return false;
 		double d = planeDist(p, pos.x, y, pos.z);
-		if (!(d < 0 && d > -2 * radius)) continue;
+		if (!(d < 0 && d > -2 * radius)) return false;
 		double k = d / p.nMag;
-		if (pointInTri3D(p, pos.x - k * p.nx, y - k * p.ny, pos.z - k * p.nz, 0)) return true;
+		return pointInTri3D(p, pos.x - k * p.nx, y - k * p.ny, pos.z - k * p.nz, 0);
+	};
+	for (int id : cellWalls(pos.x, pos.y, pos.z)) if (inside(polys[id])) return true;
+	const double reach = 2 * radius;
+	for (int id : dynaWalls) {
+		const Poly& p = polys[id];
+		if (pos.x < p.minX - reach || pos.x > p.maxX + reach || pos.z < p.minZ - reach || pos.z > p.maxZ + reach) continue;
+		if (inside(p)) return true;
 	}
 	return false;
+}
+
+bool Model::behindPoly(const Poly& p, const V3& pos) const {
+	double y = pos.y + checkHeight;
+	if (y < p.minY || y > p.maxY) return false;
+	double d = planeDist(p, pos.x, y, pos.z);
+	if (!(d < 0)) return false;
+	double k = d / p.nMag;
+	return pointInTri3D(p, pos.x - k * p.nx, y - k * p.ny, pos.z - k * p.nz, 0.25);
 }
 
 bool Model::isInBounds(Scratch& s, const V3& pos) const {

@@ -1,4 +1,5 @@
-// clipfinder: the game's static wall / floor collision in f32 (BgCheck_*), as a Model.
+// clipfinder: the game's wall / floor collision in f32 (BgCheck_*), as a Model: the
+// scene's static collision, plus the dynapoly actors from a viewer export (--dyna).
 #pragma once
 
 #include "scene.h"
@@ -18,6 +19,17 @@ struct Poly {
 	double nx, ny, nz, dist, nMag, nXZ, invNXZ;
 	double minX, maxX, minY, maxY, minZ, maxZ, sortY, tz, tx;
 	bool isFloor, isCeiling, isWall;
+	int bg = -1; // dynapoly: its BgActor (Model::bgActors), -1 for static
+};
+
+// One dynapoly actor's collision as DynaPoly_ExpandSRT leaves it (dyna.cpp
+// reads it from the viewer's export). walls / floors are its dynaLookup lists:
+// DynaSSNodeList_SetSSListHead puts each poly at the head, so they run in
+// reverse poly order, unsorted. The bounding sphere is a Sphere16 (s16s).
+struct BgActor {
+	string name;
+	vector<int> walls, floors;
+	double cx, cy, cz, r, minY, maxY;
 };
 
 struct Tol { double detMax, chkDist, lineChkDist; };
@@ -140,7 +152,11 @@ struct Model {
 	double radius, checkHeight;
 	int lowDrop;
 	bool extendedOnly = false; // leave out wall pairs with an acute clip (see pushOnFace)
-	vector<Poly> polys;
+	vector<Poly> polys;          // the scene's polys by index, then the dynapolys (ids from numStatic)
+	int numStatic = 0;
+	vector<BgActor> bgActors;    // in bgId order
+	vector<int> dynaWalls;       // every dynapoly wall, for the checks that aren't the game's
+	vector<vector<int>> pairWalls; // subWalls with the dynapoly walls added: wall pair candidates only
 	vector<vector<int>> cellWallsL, cellFloorsL; // sorted, per subdivision
 	std::unordered_map<int64_t, vector<int>> floorGrid;
 	const double floorCell = 128;
@@ -149,13 +165,23 @@ struct Model {
 
 	void build(const vector<Tri>& tris, int numPolygons);
 
+	// Adds a dynapoly actor (after build): its tangible polys, in poly index
+	// order, already in world space. Returns the first poly's id.
+	struct DynaPolyIn { int v[3][3]; int n[3]; int d; char type; };
+	int addBgActor(const string& name, const vector<DynaPolyIn>& in, const double center[3], double radius, double minY, double maxY);
+
 	const vector<int>& cellWalls(double x, double y, double z) const { return cellWallsL[pointCell(colCtx, x, y, z).index]; }
 
 	FloorList floorsAt(double x, double z) const;
 
 	const FloorList& floorsNear(Scratch& s, double x, double z) const;
 
-	V3 sphereStep(const V3& pos, const Tol& tol, PushList* trace) const;
+	// BgCheck_CheckWallImpl after its line test: the dynapoly walls
+	// (BgCheck_SphVsDynaWall), then the static ones (BgCheck_SphVsStaticWall),
+	// then - if a dynapoly pushed, or lineDyna (the line test hit one) and no
+	// static wall did - the one-face static line check from `prev`. prev null:
+	// standing still, prev is pos + GROUND_DROP.
+	V3 sphereStep(const V3& pos, const Tol& tol, PushList* trace, const V3* prev = nullptr, bool lineDyna = false) const;
 
 	// Where Link comes to rest standing at `pos` (pushes until they stop, at
 	// most 4 frames), or none.
@@ -166,10 +192,13 @@ struct Model {
 	// the highest static floor, or wall whose normal doesn't point down, under
 	// (x, z) and below y, stepping down a subdivision at a time.
 	std::optional<double> floorCheck(double x, double z, double y) const;
+	std::optional<double> staticFloorCheck(double x, double z, double y) const;
+	bool lineVsSphere(const BgActor& bg, const V3& a, const V3& b) const;
 
 	std::optional<V3> lineVsPoly(const Poly& p, const V3& a, const V3& b, double chkDist, bool oneFace) const;
 
-	std::optional<Hit> lineHit(Scratch& s, const V3& a, const V3& b, const Tol& tol, bool floors, bool oneFace = false) const;
+	// BgCheck_CheckLineImpl: static, then (dyna) the dynapoly actors'.
+	std::optional<Hit> lineHit(Scratch& s, const V3& a, const V3& b, const Tol& tol, bool floors, bool oneFace = false, bool dyna = true) const;
 
 	// wallsAlong, as a list of poly ids (deduplicated): the cell's own list, or
 	// s.wallsBuf.
@@ -180,4 +209,29 @@ struct Model {
 	bool behindWall(const V3& pos) const;
 
 	bool isInBounds(Scratch& s, const V3& pos) const;
+
+	// Whether a clip through `crossed` that leaves Link at `end` counts: out of
+	// bounds, or - through a dynapoly (a gate, a fence, a crate) - still behind
+	// it, wherever that is: getting past it is the point. Behind means at his
+	// check height, on its back side and within the triangle's span (so not
+	// landed on top of it: two touching crates, pushed from one into the other
+	// while falling, he just lands on the other's top).
+	bool endCounts(Scratch& s, int crossed, const V3& end) const {
+		if (crossed >= 0 && polys[crossed].bg >= 0 && behindPoly(polys[crossed], end)) return true;
+		return !isInBounds(s, end);
+	}
+	bool behindPoly(const Poly& p, const V3& pos) const;
+
+	bool dynaPairsOnly = false; // --dyna-only: wall pairs with a dynapoly wall in them
+
+	// "TRI 12", or "TRI 1300 (Obj_Tokei_Tobira dynapoly 3)" for a dynapoly
+	string polyName(int id) const {
+		string s = "TRI " + std::to_string(id);
+		if (id >= 0 && id < (int)polys.size() && polys[id].bg >= 0) {
+			int first = id;
+			while (first > numStatic && polys[first - 1].bg == polys[id].bg) first--;
+			s += " (" + bgActors[polys[id].bg].name + " dynapoly " + std::to_string(id - first) + ")";
+		}
+		return s;
+	}
 };

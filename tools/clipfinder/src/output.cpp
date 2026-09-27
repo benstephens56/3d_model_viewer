@@ -21,7 +21,7 @@ static string jsonStr(const string& s) {
 // Format 2: every form's clips in one file, each clip marked with its form
 // (one of `forms`), so the viewer can show them all at once.
 string toJson(const string& game, const string& map, int numPolygons, bool falling, bool extendedOnly,
-	const vector<FormResult>& forms) {
+	const vector<FormResult>& forms, const string& dynaRaw) {
 	static const char* kinds[] = { "acute", "extended" };
 	std::ostringstream o;
 	o << "{\n  \"format\": \"wall-push-clips-2\",\n";
@@ -46,6 +46,8 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 		if (c.hasNext) o << ",\"next\":" << vec(c.next);
 		o << ",\"res\":" << vec(c.res) << ",\"end\":" << vec(c.end);
 		if (c.endNoFloor) o << ",\"endNoFloor\":true";
+		// only with the stick held one more frame (the same yaw and speed)
+		if (c.hold) o << ",\"hold\":true";
 		if (c.hasFloorY) o << ",\"floorY\":" << num(c.floorY);
 		if (c.cross) {
 			o << ",\"yaws\":[";
@@ -60,6 +62,13 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 		}
 		o << "}";
 	}
-	o << "\n  ]\n}\n";
+	o << "\n  ]";
+	// --dyna: the export as read, so the viewer rebuilds the same dynapolys
+	// (and poly ids) when it imports the results
+	if (!dynaRaw.empty()) {
+		size_t e = dynaRaw.find_last_not_of(" \t\r\n");
+		o << ",\n  \"dyna\": " << dynaRaw.substr(0, e + 1);
+	}
+	o << "\n}\n";
 	return o.str();
 }

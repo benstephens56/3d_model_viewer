@@ -5,7 +5,6 @@ import { renderStandableSurfaceXZ, STANDABLE_DET_MAX_DYNAPOLY } from './standabl
 import { renderCollisionWallsXY, renderCollisionWallsYZ } from './render_walls.js'
 import { scanAndBuildFlatGroundMarkers, buildSurfaceTypeMarkers, scanAndBuildSubdivision, scanAndBuildSectorSortingErrorMarkers, scanAndBuildSubdivisionSkipMarkers } from './poly_markers.js'
 import { buildWaterBoxModel } from './waterboxes.js';
-import { renderZeldaObjectsInScene } from './render_actors.js';
 import { buildTexturedMesh, attachTextured, clearTexturedPairs } from './bk_textured.js';
 import { mapAppendageVisibility, parseBKModelGeometry } from './bk_model.js';
 
@@ -1039,13 +1038,8 @@ export function parseZeldaSceneBinary(scene, buffer, fresh, mapName, sceneName){
         addModelCheckbox(scene, "Waterboxes", waterMesh, waterEdges, false, false, "#00FFFF");
     });
 
-    // RENDER ACTORS (OOT/MM ONLY)
-
-    // Get actor data for this scene, if available. This is only done for OOT/MM, since the other games 
-    // don't have a known actors_by_scene JSON file to reference.
-    if ((game == "OOT" || game == "MM") && renderDynaCheckbox.checked && areaActors != undefined) {
-        renderZeldaObjectsInScene(scene, game, sceneName)
-    }
+    // OOT / MM dynapoly actors are drawn with the rest of the actors, in the
+    // same sidebar rows (oot_actors.js, via render_actors.js).
 
     // ADDITIONAL SURFACE RENDERING OPTIONS
 

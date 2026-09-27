@@ -20,8 +20,10 @@ tools/clipfinder/wall_clip_tester.lua.
 
 The collision model below is the game's (BgCheck_CheckWallImpl's line test and
 BgCheck_SphVsStaticWall's pushes, the floor check), all in f32 in the decomp's
-operation order, for reachability. Dynapolys are ignored (static collision
-only). How the clips work and how they're categorised: tools/clipfinder.
+operation order, for reachability. It has the dynapoly actors too when the
+results were scanned with them (clipfinder --dyna, from "Export dynapolys"
+here): the same checks as tools/clipfinder/src/collision.cpp. How the clips
+work and how they're categorised: tools/clipfinder.
 */
 
 // R_RUN_SPEED_LIMIT / 100 of each form's boots (z_player_lib.c): the default
@@ -116,6 +118,22 @@ function buildPoly(tri) {
     return p;
 }
 
+// A dynapoly from an export (exportDynapolys): world-space s16 vertices and the
+// normal / dist DynaPoly_ExpandSRT recomputes, sorted on its float normal (`type`).
+function buildDynaPoly(id, q, bg, actorName, index) {
+    const v = q.v.map(([x, y, z]) => ({ x, y, z }));
+    const p = buildPoly({ id, vtxs: v, normals: q.n, d: q.d });
+    p.bg = bg;
+    p.isFloor = q.type === "floor";
+    p.isCeiling = q.type === "ceiling";
+    p.isWall = q.type === "wall";
+    p.label = `TRI ${id} (${actorName} dynapoly ${index})`;
+    return p;
+}
+
+// "TRI 12", or "TRI 1300 (Obj_Tokei_Tobira dynapoly 3)"
+const polyLabel = p => p.label ?? `TRI ${p.id}`;
+
 // Math3D_DistPlaneToPos
 function planeDist(p, x, y, z) {
     if (isZero(p.nMag)) return 0;
@@ -168,13 +186,35 @@ const triChkZ = (p, x, y, detMax, chk) => triChkPara(p.ax, p.ay, p.bx, p.by, p.c
 const LOOSE = { detMax: 300, chkDist: 1, lineChkDist: 1 };
 const STRICT = { detMax: 0, chkDist: 0, lineChkDist: 0 };
 
+// f32 -> s16 as the game stores it (truncating)
+const toS16 = v => (Math.trunc(v) << 16) >> 16;
+
 class CollisionModel {
-    constructor(colCtx, triangles, radius, checkHeight) {
+    // dyna: an export's actors (exportDynapolys), in bgId order; their polys
+    // get the ids after the scene's own, in order (as tools/clipfinder does).
+    constructor(colCtx, triangles, radius, checkHeight, dyna = null) {
         this.colCtx = colCtx;
         this.radius = F(radius);
         this.checkHeight = F(checkHeight);
         this.polys = new Map();
         for (const tri of triangles) this.polys.set(tri.id, buildPoly(tri));
+        // dynapoly actors: bgActors[i] = { name, walls, floors (dynaLookup
+        // lists: head insertion, so last poly first), sphere, minY, maxY }
+        this.bgActors = [];
+        this.dynaWalls = [];
+        let id = colCtx.colHeader.numPolygons;
+        for (const a of dyna?.actors ?? []) {
+            const bg = this.bgActors.length;
+            const polys = a.polys.map((q, k) => buildDynaPoly(id++, q, bg, a.actor, k));
+            for (const p of polys) this.polys.set(p.id, p);
+            const rev = polys.slice().reverse();
+            this.bgActors.push({
+                name: a.actor, walls: rev.filter(p => p.isWall), floors: rev.filter(p => p.isFloor),
+                cx: a.sphere.center[0], cy: a.sphere.center[1], cz: a.sphere.center[2], r: a.sphere.radius,
+                minY: a.minY, maxY: a.maxY,
+            });
+            this.dynaWalls.push(...polys.filter(p => p.isWall));
+        }
         this.cellCache = new Map();
         this.buildFloorGrid();
     }
@@ -230,55 +270,98 @@ class CollisionModel {
         if (!cell) return out;
         for (const p of cell) {
             if (x < p.minX - 1 || x > p.maxX + 1 || z < p.minZ - 1 || z > p.maxZ + 1) continue;
-            if (!triChkY(p, z, x, 0, 1)) continue;
+            // (dynapolys: CollisionPoly_CheckYIntersectApprox1, detMax 300)
+            if (!triChkY(p, z, x, p.bg !== undefined ? 300 : 0, 1)) continue;
             out.push(F(F(F(F(-p.nx * x) - F(p.nz * z)) - p.dist) / p.ny));
         }
         return out;
     }
 
-    // BgCheck_SphVsStaticWall on the sphere at `pos` + checkHeight, looked up in
-    // the subdivision of `pos` (BgCheck_GetNearestStaticLookup(posResult)).
-    // Returns the displaced feet position; each push is appended to `trace` as
-    // { poly, from, to }.
-    sphereStep(pos, tol, trace) {
+    // BgCheck_CheckWallImpl after its line test, on the sphere at `pos` +
+    // checkHeight: the dynapoly walls (BgCheck_SphVsDynaWall), then the static
+    // ones (BgCheck_SphVsStaticWall) in the subdivision of where those left him
+    // (BgCheck_GetNearestStaticLookup(posResult)), then - after a dynapoly
+    // collision - the one-face static line check from `prev` (null: standing
+    // still, pos + GROUND_DROP). lineDyna: the frame's line test stopped him
+    // on a dynapoly. Returns the displaced feet position; each push is appended
+    // to `trace` as { poly, from, to }.
+    sphereStep(pos, tol, trace, prev = null, lineDyna = false) {
         const R = this.radius;
         const sphY = F(pos.y + this.checkHeight);
-        const list = this.cellWalls(pos.x, pos.y, pos.z);
         let rx = pos.x, rz = pos.z;
 
+        // One wall's push in a Z (pass 0) or X (pass 1) pass
+        const tryPush = (p, pass) => {
+            const pd = planeDist(p, rx, sphY, rz);
+            if (R < Math.abs(pd)) return false;
+            let hit = false;
+            if (pass === 0) {
+                if (p.tz < F(0.4)) return false;
+                if (rz < F(p.minZ - R) || rz > F(p.maxZ + R)) return false;
+                // CollisionPoly_CheckZIntersectApprox
+                if (isZero(p.nz) || !triChkZ(p, rx, sphY, tol.detMax, tol.chkDist)) return false;
+                const inter = F(F(F(F(-p.nx * rx) - F(p.ny * sphY)) - p.dist) / p.nz);
+                const d = F(inter - rz);
+                hit = Math.abs(d) <= F(R / p.tz) && F(d * p.nz) <= 4.0;
+            } else {
+                if (p.tx < F(0.4)) return false;
+                if (rx < F(p.minX - R) || F(p.maxX + R) < rx) return false;
+                // CollisionPoly_CheckXIntersectApprox
+                if (isZero(p.nx) || !triChkX(p, sphY, rz, tol.detMax, tol.chkDist)) return false;
+                const inter = F(F(F(F(-p.ny * sphY) - F(p.nz * rz)) - p.dist) / p.nx);
+                const d = F(inter - rx);
+                hit = Math.abs(d) <= F(R / p.tx) && F(d * p.nx) <= 4.0;
+            }
+            if (!hit) return false;
+            // BgCheck_ComputeWallDisplacement
+            const disp = F(F(R - pd) * p.invNXZ);
+            const from = { x: rx, y: pos.y, z: rz };
+            rx = F(rx + F(disp * p.nx));
+            rz = F(rz + F(disp * p.nz));
+            if (trace) trace.push({ poly: p, from, to: { x: rx, y: pos.y, z: rz } });
+            return true;
+        };
+
+        // BgCheck_SphVsDynaWall: each bg actor whose Y range and bounding
+        // sphere (grown by the radius, as an s16) take the sphere centre; all
+        // its walls' Z pushes, then their X pushes (unsorted, no early out)
+        let dynaHit = false;
+        const grow = toS16(R); // TRUNCF_BINANG(radius)
+        for (const bg of this.bgActors) {
+            if (bg.minY > sphY || bg.maxY < sphY) continue;
+            const r = toS16(bg.r + grow);
+            const r2 = F(r * r);
+            const dx = F(bg.cx - rx), dz = F(bg.cz - rz), dy = F(bg.cy - sphY);
+            if (r2 < F(F(dx * dx) + F(dz * dz))) continue;
+            if (!(F(F(dx * dx) + F(dy * dy)) <= r2) && !(F(F(dy * dy) + F(dz * dz)) <= r2)) continue;
+            for (let pass = 0; pass < 2; pass++) {
+                for (const p of bg.walls) if (tryPush(p, pass)) dynaHit = true;
+            }
+        }
+
+        const list = this.cellWalls(rx, pos.y, rz);
+        let staticHit = false;
         for (let pass = 0; pass < 2; pass++) {
             for (let i = 0; i < list.length; i++) {
                 const p = list[i];
                 if (sphY < p.minY) break;
-                const pd = planeDist(p, rx, sphY, rz);
-                if (R < Math.abs(pd)) continue;
+                if (tryPush(p, pass)) staticHit = true;
+            }
+        }
 
-                let hit = false;
-                if (pass === 0) {
-                    if (p.tz < F(0.4)) continue;
-                    if (rz < F(p.minZ - R) || rz > F(p.maxZ + R)) continue;
-                    // CollisionPoly_CheckZIntersectApprox
-                    if (isZero(p.nz) || !triChkZ(p, rx, sphY, tol.detMax, tol.chkDist)) continue;
-                    const inter = F(F(F(F(-p.nx * rx) - F(p.ny * sphY)) - p.dist) / p.nz);
-                    const d = F(inter - rz);
-                    hit = Math.abs(d) <= F(R / p.tz) && F(d * p.nz) <= 4.0;
-                } else {
-                    if (p.tx < F(0.4)) continue;
-                    if (rx < F(p.minX - R) || F(p.maxX + R) < rx) continue;
-                    // CollisionPoly_CheckXIntersectApprox
-                    if (isZero(p.nx) || !triChkX(p, sphY, rz, tol.detMax, tol.chkDist)) continue;
-                    const inter = F(F(F(F(-p.ny * sphY) - F(p.nz * rz)) - p.dist) / p.nx);
-                    const d = F(inter - rx);
-                    hit = Math.abs(d) <= F(R / p.tx) && F(d * p.nx) <= 4.0;
-                }
-                if (hit) {
-                    // BgCheck_ComputeWallDisplacement
-                    const disp = F(F(R - pd) * p.invNXZ);
-                    const from = { x: rx, y: pos.y, z: rz };
-                    rx = F(rx + F(disp * p.nx));
-                    rz = F(rz + F(disp * p.nz));
-                    if (trace) trace.push({ poly: p, from, to: { x: rx, y: pos.y, z: rz } });
-                }
+        // A dynapoly collision: BgCheck_CheckLineImpl from posPrev to the
+        // result, static walls from their front only (BGCHECK_CHECK_ONE_FACE |
+        // BGCHECK_CHECK_WALL, no BGCHECK_CHECK_DYNA), putting him the radius in
+        // front of the first one crossed.
+        if (dynaHit || (lineDyna && !staticHit)) {
+            const from = prev ?? { x: pos.x, y: F(pos.y + GROUND_DROP), z: pos.z };
+            const to = { x: rx, y: pos.y, z: rz };
+            const hit = this.lineHit(from, to, tol, false, true, false);
+            if (hit && !isZero(hit.poly.nXZ)) {
+                const k = F(R * F(1 / hit.poly.nXZ));
+                rx = F(F(k * hit.poly.nx) + hit.x);
+                rz = F(F(k * hit.poly.nz) + hit.z);
+                if (trace) trace.push({ poly: hit.poly, from: to, to: { x: rx, y: pos.y, z: rz }, line: true });
             }
         }
         return { x: rx, y: pos.y, z: rz };
@@ -308,11 +391,12 @@ class CollisionModel {
         return null;
     }
 
-    // BgCheck_CheckLineImpl over static floors (if `floors`) and walls: the
-    // nearest intersection from a to b, or null. Subdivisions are every cell
-    // between the two ends' (the Math3D_LineVsCube cull only skips cells the
-    // segment misses, which can't produce a hit anyway).
-    lineHit(a, b, tol, floors, oneFace = false) {
+    // BgCheck_CheckLineImpl over static floors (if `floors`) and walls, then
+    // (`dyna`) the dynapoly actors': the nearest intersection from a to b, or
+    // null. Subdivisions are every cell between the two ends' (the
+    // Math3D_LineVsCube cull only skips cells the segment misses, which can't
+    // produce a hit anyway).
+    lineHit(a, b, tol, floors, oneFace = false, dyna = true) {
         const ia = getPointSubdivisionIndex(this.colCtx, a);
         const ib = getPointSubdivisionIndex(this.colCtx, b);
         const cells = [];
@@ -348,6 +432,29 @@ class CollisionModel {
             if (floors) scan(c.floors);
             scan(c.walls);
         }
+        if (!dyna) return best;
+        // BgCheck_CheckLineAgainstDyna, on the line as far as the static test
+        // left it: each bg actor whose Y range and bounding sphere
+        // (Math3D_LineVsSph) the line touches, its walls then (floors) floors
+        const scanDyna = list => {
+            for (const p of list) {
+                const i = this.lineVsPoly(p, a, end, tol.lineChkDist, oneFace);
+                if (!i) continue;
+                const d = F(F(sq(F(a.x - i.x)) + sq(F(a.y - i.y))) + sq(F(a.z - i.z)));
+                if (d < bestDistSq) {
+                    bestDistSq = d;
+                    best = { poly: p, ...i };
+                    end = i;
+                }
+            }
+        };
+        for (const bg of this.bgActors) {
+            if (a.y < bg.minY && end.y < bg.minY) continue;
+            if (a.y > bg.maxY && end.y > bg.maxY) continue;
+            if (!lineVsSphere(bg, a, end)) continue;
+            scanDyna(bg.walls);
+            if (floors) scanDyna(bg.floors);
+        }
         return best;
     }
 
@@ -372,19 +479,25 @@ class CollisionModel {
     crossedWall(a, b, exiting = false) {
         const y = a.y + this.checkHeight;
         let best = null, bestT = Infinity;
-        for (const p of this.wallsAlong(a, b)) {
-            if (y < p.minY || y > p.maxY) continue;
+        const test = p => {
+            if (y < p.minY || y > p.maxY) return;
             let dA = planeDist(p, a.x, y, a.z);
             let dB = planeDist(p, b.x, y, b.z);
             if (exiting) { dA = -dA; dB = -dB; }
-            if (!(dA > 0 && dB < 0)) continue;
+            if (!(dA > 0 && dB < 0)) return;
             const t = dA / (dA - dB);
-            if (t >= bestT) continue;
+            if (t >= bestT) return;
             const ix = a.x + (b.x - a.x) * t, iz = a.z + (b.z - a.z) * t;
             if (pointInTri3D(p, ix, y, iz, 0.25)) {
                 best = p;
                 bestT = t;
             }
+        };
+        for (const p of this.wallsAlong(a, b)) test(p);
+        const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), z0 = Math.min(a.z, b.z), z1 = Math.max(a.z, b.z);
+        for (const p of this.dynaWalls) {
+            if (p.maxX < x0 || p.minX > x1 || p.maxZ < z0 || p.minZ > z1) continue;
+            test(p);
         }
         return best;
     }
@@ -410,7 +523,31 @@ class CollisionModel {
     // highest static floor, or wall whose normal doesn't point down, under
     // (x, z) and below y, from the subdivision y is in (stepping down a
     // subdivision at a time while there's nothing). Null if none.
+    // Then BgCheck_RaycastFloorDyna: each bg actor whose minY is under y and
+    // whose bounding sphere takes (x, z) top down: its floors (detMax 300),
+    // then - only while nothing, static or dynapoly, has been found yet - its
+    // walls whose normal doesn't point down.
     floorCheck(x, z, y) {
+        let best = this.staticFloorCheck(x, z, y);
+        for (const bg of this.bgActors) {
+            if (y < bg.minY) continue;
+            const dx = F(bg.cx - x), dz = F(bg.cz - z);
+            if (!(F(F(dx * dx) + F(dz * dz)) <= F(bg.r * bg.r))) continue;
+            const scan = (list, walls) => {
+                for (const p of list) {
+                    if (walls && p.sy < 0) continue;
+                    if (isZero(p.ny) || !triChkY(p, z, x, 300, 1)) continue;
+                    const yi = F(F(F(F(-p.nx * x) - F(p.nz * z)) - p.dist) / p.ny);
+                    if (yi < y && (best === null || best < yi)) best = yi;
+                }
+            };
+            scan(bg.floors, false);
+            if (best === null) scan(bg.walls, true);
+        }
+        return best;
+    }
+
+    staticFloorCheck(x, z, y) {
         const c = this.colCtx, mn = c.minBounds, mx = c.maxBounds;
         if (x < mn.x || x > mx.x || z < mn.z || z > mx.z) return null;
         for (let cy = y; cy >= mn.y; cy = F(cy - c.subdivLength.y)) {
@@ -437,12 +574,18 @@ class CollisionModel {
     // it and within its triangle, i.e. inside the solid it bounds.
     behindWall(pos) {
         const y = pos.y + this.checkHeight;
-        for (const p of this.cellWalls(pos.x, pos.y, pos.z)) {
-            if (y < p.minY || y > p.maxY) continue;
+        const inside = p => {
+            if (y < p.minY || y > p.maxY) return false;
             const d = planeDist(p, pos.x, y, pos.z);
-            if (!(d < 0 && d > -2 * this.radius)) continue;
+            if (!(d < 0 && d > -2 * this.radius)) return false;
             const k = d / p.nMag;
-            if (pointInTri3D(p, pos.x - k * p.nx, y - k * p.ny, pos.z - k * p.nz, 0)) return p;
+            return pointInTri3D(p, pos.x - k * p.nx, y - k * p.ny, pos.z - k * p.nz, 0);
+        };
+        for (const p of this.cellWalls(pos.x, pos.y, pos.z)) if (inside(p)) return p;
+        const reach = 2 * this.radius;
+        for (const p of this.dynaWalls) {
+            if (pos.x < p.minX - reach || pos.x > p.maxX + reach || pos.z < p.minZ - reach || pos.z > p.maxZ + reach) continue;
+            if (inside(p)) return p;
         }
         return null;
     }
@@ -462,6 +605,42 @@ class CollisionModel {
         }
         return true;
     }
+}
+
+// Whether a clip through `crossed` ending at `end` counts: out of bounds, or -
+// through a dynapoly (a gate, a fence, a crate) - just behind it, wherever
+// that is (tools/clipfinder Model::endCounts)
+function endCounts(model, crossed, end) {
+    if (crossed && crossed.bg !== undefined && behindPoly(model, crossed, end)) return true;
+    return !model.isInBounds(end);
+}
+
+// Still behind wall p at `pos`: at his check height, on its back side and
+// within the triangle's span (not, say, landed on top of the crate it's a
+// side of)
+function behindPoly(model, p, pos) {
+    const y = pos.y + model.checkHeight;
+    if (y < p.minY || y > p.maxY) return false;
+    const d = planeDist(p, pos.x, y, pos.z);
+    if (!(d < 0)) return false;
+    const k = d / p.nMag;
+    return pointInTri3D(p, pos.x - k * p.nx, y - k * p.ny, pos.z - k * p.nz, 0.25);
+}
+
+// Math3D_LineVsSph on a bg actor's Sphere16
+function lineVsSphere(bg, a, b) {
+    const r2 = F(bg.r * bg.r);
+    const inSph = p => {
+        const dx = F(bg.cx - p.x), dy = F(bg.cy - p.y), dz = F(bg.cz - p.z);
+        return F(F(F(dx * dx) + F(dy * dy)) + F(dz * dz)) <= r2;
+    };
+    if (inSph(a) || inSph(b)) return true;
+    const lx = F(b.x - a.x), ly = F(b.y - a.y), lz = F(b.z - a.z);
+    const len2 = F(F(F(lx * lx) + F(ly * ly)) + F(lz * lz));
+    if (isZero(len2)) return false;
+    const t = F(F(F(F(F(bg.cx - a.x) * lx) + F(F(bg.cy - a.y) * ly)) + F(F(bg.cz - a.z) * lz)) / len2);
+    if (t < 0 || t > 1) return false;
+    return inSph({ x: F(F(lx * t) + a.x), y: F(F(ly * t) + a.y), z: F(F(lz * t) + a.z) });
 }
 
 function pointInTri3D(p, x, y, z, tolerance) {
@@ -499,7 +678,9 @@ function pointInTri3D(p, x, y, z, tolerance) {
 // wall facing up at all - under where he was pushed to, and he lands on it if
 // it's above him or at most 11 below. Pushed into a sloped rock he can land on
 // top of it that way, in front of the wall he went through.
-function clipFromFrame(model, prev, res, trace, tol, rayFromY = null) {
+// `move` ({ yaw, speed }, walking frames): if standing still afterwards puts
+// him back, try keeping the stick held for one more frame (clip.hold).
+function clipFromFrame(model, prev, res, trace, tol, rayFromY = null, move = null) {
     if (trace.length === 0) return null;
     // (at the frame's height: prevPos.xz, posNext.y)
     const from = { x: prev.x, y: res.y, z: prev.z };
@@ -515,18 +696,39 @@ function clipFromFrame(model, prev, res, trace, tol, rayFromY = null) {
             at = { x: res.x, y: F(fy - GROUND_DROP), z: res.z };
         }
     }
-    const s1 = model.sphereStep(at, tol, null);
-    const s2 = model.sphereStep(s1, tol, null);
-    const from2 = { x: prev.x, y: at.y, z: prev.z };
-    // Still through the same wall - or, landed at another height, through any:
-    // there it can be another triangle (MM Treasure Chest Shop: pushed through
-    // the 40 high counter front TRI 90, he lands on its top, behind TRI 73/74
-    // of the wall above it - in-game that clips walking at speed 11)
-    const held = model.crossedWall(from2, s2);
-    if (landY === null ? held !== crossed : !held) return null;
-    // Out the other side of a thin wall: through it, not out of bounds.
-    if (model.crossedWall(from2, s2, true)) return null;
-    const end = landY === null ? s2 : { x: s2.x, y: landY, z: s2.z };
+    // Two more frames standing still from at0: still through the same wall -
+    // or, landed at another height, through any: there it can be another
+    // triangle (MM Treasure Chest Shop: pushed through the 40 high counter
+    // front TRI 90, he lands on its top, behind TRI 73/74 of the wall above
+    // it - in-game that clips walking at speed 11). Null if not.
+    const standStill = (at0, landY0) => {
+        const s1 = model.sphereStep(at0, tol, null);
+        const s2 = model.sphereStep(s1, tol, null);
+        const from2 = { x: prev.x, y: at0.y, z: prev.z };
+        const held = model.crossedWall(from2, s2);
+        if (landY0 === null ? held !== crossed : !held) return null;
+        // Out the other side of a thin wall: through it, not out of bounds.
+        // (through a dynapoly - a gate, a fence - that's what the clip is for)
+        if (crossed.bg === undefined && model.crossedWall(from2, s2, true)) return null;
+        return landY0 === null ? s2 : { x: s2.x, y: landY0, z: s2.z };
+    };
+    let end = standStill(at, landY);
+    let hold = false;
+    if (!end) {
+        // Standing still, the wall he went through pushes him back out (he's
+        // less than 4 behind it); holding the stick, the next frame's move can
+        // take him further behind it first (tools/clipfinder clipFromFrame).
+        if (!move || landY === null) return null;
+        const st2 = { x: res.x, y: landY, z: res.z };
+        const nx2 = moveStep(st2, move.yaw, move.speed);
+        const lf = lineFrame(model, st2, nx2, tol);
+        const r2 = lf ? lf.res : model.sphereStep(nx2, tol, null, st2);
+        const fy = model.floorCheck(r2.x, r2.z, F(st2.y + 50));
+        if (fy === null || F(fy - r2.y) < -11) return null;
+        end = standStill({ x: r2.x, y: F(fy - GROUND_DROP), z: r2.z }, fy);
+        if (!end) return null;
+        hold = true;
+    }
 
     // The push that took Link through `crossed`.
     const sphY = res.y + model.checkHeight;
@@ -543,7 +745,7 @@ function clipFromFrame(model, prev, res, trace, tol, rayFromY = null) {
         }
     }
     if (!pusher) return null;
-    return { crossed, pusher: pusher.poly, end };
+    return { crossed, pusher: pusher.poly, end, hold };
 }
 
 // Link moving from prev to next crosses a wall: BgCheck_CheckWallImpl's line
@@ -561,7 +763,7 @@ function lineFrame(model, prev, next, tol) {
     const k = F(model.radius * F(1 / hit.poly.nXZ));
     const snapped = { x: F(F(k * hit.poly.nx) + hit.x), y: next.y, z: F(F(k * hit.poly.nz) + hit.z) };
     const trace = [{ poly: hit.poly, from: { ...next }, to: { ...snapped }, line: true }];
-    const res = model.sphereStep(snapped, tol, trace);
+    const res = model.sphereStep(snapped, tol, trace, prev, hit.poly.bg !== undefined);
     return { hit, res, trace };
 }
 
@@ -595,14 +797,15 @@ function standSpot(model, x, z, floorY) {
 // at the height of the floor at floorY), so the highest floor under res at most
 // 50 above that one, then two frames standing there. No floor: he falls out of
 // bounds. Null if he lands in bounds.
-function landing(model, res, floorY) {
+// crossed: the wall clipped through; behind a dynapoly counts wherever he lands (endCounts)
+function landing(model, res, floorY, crossed = null) {
     // (the game's floor check: floors and upward-facing walls, see floorCheck)
     const land = model.floorCheck(res.x, res.z, F(floorY + 50));
     if (land === null) return { x: res.x, y: res.y, z: res.z, noFloor: true };
     const low = F(land - GROUND_DROP);
     const s = model.sphereStep(model.sphereStep({ x: res.x, y: low, z: res.z }, LOOSE, null), LOOSE, null);
     const end = { x: s.x, y: land, z: s.z };
-    return model.isInBounds(end) ? null : end;
+    return endCounts(model, crossed, end) ? end : null;
 }
 
 // Can Link get to clip `c` from standing still somewhere? A standable start:
@@ -641,9 +844,9 @@ function reachability(model, c) {
                 if (c.drop > 0) next.y = P.y;
                 const f = lineFrame(model, start, next, LOOSE);
                 if (!f || f.hit.poly !== c.pusher) continue;
-                const clip = clipFromFrame(model, start, f.res, f.trace, LOOSE, c.drop > 0 ? null : start.y);
+                const clip = clipFromFrame(model, start, f.res, f.trace, LOOSE, c.drop > 0 ? null : start.y, { yaw, speed });
                 if (!clip || clip.crossed !== c.crossed) continue;
-                if (c.drop > 0 ? !landing(model, f.res, floorRef) : model.isInBounds(clip.end)) continue;
+                if (c.drop > 0 ? !landing(model, f.res, floorRef, clip.crossed) : !endCounts(model, clip.crossed, clip.end)) continue;
             } else {
                 const h = F(P.y + model.checkHeight);
                 if (model.lineHit({ x: start.x, y: h, z: start.z }, { x: P.x, y: h, z: P.z }, LOOSE, false, true)) continue;
@@ -722,31 +925,40 @@ function pairLine(g) {
     if (g.cat === "low") return [];
     return [g.cat.endsWith("acute")
         ? `  wall pair: acute angle (at least one of its points clips with the extended planes removed)`
-        : `  wall pair: extended plane only (every point needs TRI ${g.pusher.id}'s extended plane: its 1 unit tolerance, or Link beside it, past its edge)`];
+        : `  wall pair: extended plane only (every point needs ${polyLabel(g.pusher)}'s extended plane: its 1 unit tolerance, or Link beside it, past its edge)`];
 }
 
 function describeClipLines(g, c, checkHeight) {
+    const lines = describeClipLinesBase(g, c, checkHeight);
+    if (!c.hold) return lines;
+    // (after the frame's line; clipfinder ClipResult::hold)
+    const at = lines.indexOf("\n", lines.indexOf("\n") + 1);
+    const note = `  keep holding the stick (same yaw and speed) one more frame: standing still, ${polyLabel(g.crossed)} pushes him back out`;
+    return at < 0 ? lines + "\n" + note : lines.slice(0, at) + "\n" + note + lines.slice(at);
+}
+
+function describeClipLinesBase(g, c, checkHeight) {
     const behind = -planeDist(g.crossed, c.end.x, F(c.from.y + checkHeight), c.end.z);
     const title = CAT_TITLES[g.cat];
     if (c.cross) {
         return [
-            `WALL CROSSING CLIP (${title}): crossing TRI ${g.pusher.id} puts Link through TRI ${g.crossed.id}`,
+            `WALL CROSSING CLIP (${title}): crossing ${polyLabel(g.pusher)} puts Link through ${polyLabel(g.crossed)}`,
             `  move through: ${fmt(c.from)} (feet; the crossing is ${+checkHeight.toPrecision(7)} above)`,
             ...(c.drop > 0 ? [`  that's ${c.drop} below the floor (y ${f32Str(c.floorY)}): falling at y velocity ` +
                 `${(-c.drop / 1.5).toFixed(2)} or faster this frame`] : []),
-            `  works moving at yaw ${c.yaws.map(hex4).join(", ")} (any speed that gets past TRI ${g.pusher.id}'s plane)`,
+            `  works moving at yaw ${c.yaws.map(hex4).join(", ")} (any speed that gets past ${polyLabel(g.pusher)}'s plane)`,
             `  e.g. standing still at ${fmt(c.prev)} (feet), moving to ${fmt(c.next)}` +
                 (c.speed !== undefined ? ` (yaw ${hex4(c.yaw)}, speed ${f32Str(c.speed).split(" ")[0]})` : ""),
             `  line check + pushes put Link at: ${fmt(c.res)}`,
             c.drop > 0
                 ? (c.end.noFloor ? `  no floor under where he's pushed to: falls out of bounds` : `  lands at: ${fmt(c.end)} (out of bounds)`)
-                : `  after 2 more frames: ${fmt(c.end)} (${behind.toFixed(3)} units behind TRI ${g.crossed.id})`,
+                : `  after 2 more frames: ${fmt(c.end)} (${behind.toFixed(3)} units behind ${polyLabel(g.crossed)})`,
             ...pairLine(g),
         ].join("\n");
     }
     if (c.drop > 0) {
         return [
-            `LOW WALL CLIP (${title}): TRI ${g.pusher.id} pushes Link through TRI ${g.crossed.id}`,
+            `LOW WALL CLIP (${title}): ${polyLabel(g.pusher)} pushes Link through ${polyLabel(g.crossed)}`,
             `  Link at:   ${fmt(c.from)} (after moving there, e.g. from ${fmt(c.prev)})`,
             `  that's ${c.drop} below the floor (y ${f32Str(c.floorY)}): falling at y velocity ${(-c.drop / 1.5).toFixed(2)} or faster this frame`,
             `  pushed to: ${fmt(c.res)}`,
@@ -756,13 +968,13 @@ function describeClipLines(g, c, checkHeight) {
     }
     return [
         `WALL PUSH CLIP (${title}): ` +
-            `TRI ${g.pusher.id} pushes Link through TRI ${g.crossed.id}`,
+            `${polyLabel(g.pusher)} pushes Link through ${polyLabel(g.crossed)}`,
         ...(c.speed !== undefined ? [
             `  stand still at ${fmt(c.prev)} (feet), move at yaw ${hex4(c.yaw)} with speed ${f32Str(c.speed).split(" ")[0]}`,
             `  Link at:   ${fmt(c.from)} (after that move)`,
         ] : [`  Link at:   ${fmt(c.from)} (after moving there, e.g. from ${fmt(c.prev)})`]),
         `  pushed to: ${fmt(c.res)}`,
-        `  after 2 more frames: ${fmt(c.end)} (${behind.toFixed(3)} units behind TRI ${g.crossed.id})`,
+        `  after 2 more frames: ${fmt(c.end)} (${behind.toFixed(3)} units behind ${polyLabel(g.crossed)})`,
         ...pairLine(g),
     ].join("\n");
 }
@@ -893,6 +1105,7 @@ function exportJson(groups, info) {
             if (c.next) f.push(`"next":${vec(c.next)}`);
             f.push(`"res":${vec(c.res)}`, `"end":${vec(c.end)}`);
             if (c.end.noFloor) f.push(`"endNoFloor":true`);
+            if (c.hold) f.push(`"hold":true`);
             if (c.floorY !== undefined) f.push(`"floorY":${num(c.floorY)}`);
             if (c.yaws) f.push(`"yaws":[${c.yaws.join(",")}]`);
             if (c.speed !== undefined) f.push(`"yaw":${c.yaw & 0xFFFF}`, `"speed":${num(c.speed)}`);
@@ -912,6 +1125,46 @@ function exportJson(groups, info) {
         `  ],`,
         `  "clips": [`,
         clips.join(",\n"),
+        `  ]` + (info.dyna ? `,\n  "dyna": ${JSON.stringify(info.dyna)}` : ""),
+        `}`,
+        ``,
+    ].join("\n");
+}
+
+// The dynapoly actors of the loaded map, for tools/clipfinder --dyna: each one
+// render_actors.js built (actorGroup.userData.dynaExport) whose actor row is
+// shown -- hide a row to leave that actor out (a door you'll have opened, say).
+// The "Actor display" menu's layers don't count: only the rows do.
+// Order: the order they were spawned in, which is the order they take bg
+// actor slots (bgId), and so the order the game checks them in.
+function dynapolyExport(map, numPolygons) {
+    const rowShown = obj => {
+        for (let o = obj; o; o = o.parent) {
+            if (!o.visible && o.userData.actorLayer === undefined) return false;
+        }
+        return true;
+    };
+    const actors = loadedModels
+        .map(m => m.mesh)
+        .filter(o => o && o.userData.dynaExport && rowShown(o))
+        .map(o => o.userData.dynaExport)
+        .sort((a, b) => a.order - b.order)
+        .map(({ order, ...rest }) => rest);
+    return { format: "dynapoly-1", game, map, numPolygons, actors };
+}
+
+// One actor / poly per line, so the file stays readable
+function exportDynapolyJson(data) {
+    const actor = a => {
+        const { polys, ...head } = a;
+        const h = JSON.stringify(head);
+        return `    ${h.slice(0, -1)},"polys":[\n` + polys.map(q => `      ${JSON.stringify(q)}`).join(",\n") + `\n    ]}`;
+    };
+    return [
+        `{`,
+        `  "format": ${JSON.stringify(data.format)}, "game": ${JSON.stringify(data.game)}, "map": ${JSON.stringify(data.map)}, "numPolygons": ${data.numPolygons},`,
+        `  "actors": [`,
+        data.actors.map(actor).join(",\n"),
         `  ]`,
         `}`,
         ``,
@@ -1033,13 +1286,35 @@ export function setupWallPushClipUI(scene) {
         const map = document.getElementById("mapDropdown").value;
         const text = exportJson(window.wallPushClips, {
             game, map, falling: last.falling, extendedOnly: last.extendedOnly,
-            numPolygons: last.numPolygons,
+            numPolygons: last.numPolygons, dyna: last.dyna,
         });
         const a = document.createElement("a");
         a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
         a.download = `${game}_${map}_${last.formLabel}`.replace(/[^A-Za-z0-9_-]/g, "_") + ".json";
         a.click();
         URL.revokeObjectURL(a.href);
+    });
+
+    // The loaded map's dynapoly actors (render_actors.js), for clipfinder --dyna
+    document.getElementById("wallClipDynaExport").addEventListener("click", () => {
+        const colCtx = currentColCtx;
+        if (!colCtx) {
+            status.textContent = "Load the map first";
+            return;
+        }
+        const map = document.getElementById("mapDropdown").value;
+        const data = dynapolyExport(map, colCtx.colHeader.numPolygons);
+        if (!data.actors.length) {
+            status.textContent = "No dynapoly actors loaded (Render Actors on, and their rows shown)";
+            return;
+        }
+        const text = exportDynapolyJson(data);
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+        a.download = `${game}_${map}_dyna`.replace(/[^A-Za-z0-9_-]/g, "_") + ".json";
+        a.click();
+        URL.revokeObjectURL(a.href);
+        status.textContent = `Exported ${data.actors.length} dynapoly actors (${data.actors.reduce((n, x) => n + x.polys.length, 0)} polys)`;
     });
 
     // Max move a frame: how far away reachability looks for starts (the
@@ -1078,6 +1353,11 @@ export function setupWallPushClipUI(scene) {
             return;
         }
         const map = document.getElementById("mapDropdown").value;
+        if (data.format === "dynapoly-1") {
+            status.textContent = `${file.name} is a dynapoly export: scan with it first ` +
+                `(clipfinder.exe --game ${data.game} --map "${data.map}" --dyna ${file.name} -o results.json), then import the results`;
+            return;
+        }
         if (data.format !== "wall-push-clips-1" && data.format !== "wall-push-clips-2") {
             status.textContent = `${file.name}: not a clipfinder results file`;
             return;
@@ -1096,7 +1376,7 @@ export function setupWallPushClipUI(scene) {
         // and each clip marked with its form, each form getting its own model.
         const forms = (data.forms ?? [{ form: data.form, radius: data.radius, checkHeight: data.checkHeight }]).map(f => ({
             form: f.form,
-            model: new CollisionModel(colCtx, main.mesh.userData.triangles, f.radius, f.checkHeight),
+            model: new CollisionModel(colCtx, main.mesh.userData.triangles, f.radius, f.checkHeight, data.dyna ?? null),
         }));
         // Max speed: the first form's run speed ("Human/Deku": Human's)
         const runSpeed = FORM_RUN_SPEED[String(forms[0].form).split("/")[0]];
@@ -1117,6 +1397,7 @@ export function setupWallPushClipUI(scene) {
                 form: f.form, model: f.model,
             };
             if (c.next) clip.next = vec(c.next);
+            if (c.hold) clip.hold = true;
             if (c.floorY !== undefined) clip.floorY = c.floorY;
             if (c.yaws) clip.yaws = c.yaws;
             if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
@@ -1139,7 +1420,9 @@ export function setupWallPushClipUI(scene) {
         last = {
             groups, forms, formLabel: forms.map(f => f.form).join("_"),
             falling: !!data.falling, extendedOnly: !!data.extendedOnly, numPolygons: data.numPolygons,
-            note: `imported ${forms.map(f => f.form).join(", ")}${data.falling ? ", falling" : ""}${data.extendedOnly ? ", extended plane only" : ""}`,
+            note: `imported ${forms.map(f => f.form).join(", ")}${data.falling ? ", falling" : ""}${data.extendedOnly ? ", extended plane only" : ""}` +
+                (data.dyna ? `, with ${data.dyna.actors.length} dynapoly actors` : ""),
+            dyna: data.dyna ?? null,
         };
         if (clips.every(c => c.reach !== undefined)) last.reachDone = true;
         if (data.map !== map) console.warn(`wall push clips: ${file.name} says map "${data.map}", "${map}" is loaded (same polygon count)`);

@@ -159,51 +159,59 @@ static void subdivMaxBounds(const ColCtx& c, const double pos[3], int out[3]) {
 	}
 }
 
-void initializeSubdivisions(ColCtx& c, const vector<Tri>& tris) {
+// The subdivisions a poly goes in (StaticLookup_AddPoly's cube test).
+void subdivisionCellsOf(const ColCtx& c, const Tri& t, vector<int>& out) {
 	const double lenX = F(c.len[0] + F(2 * OVERLAP)), lenY = F(c.len[1] + F(2 * OVERLAP)), lenZ = F(c.len[2] + F(2 * OVERLAP));
 	const int amtXY = c.amt[0] * c.amt[1];
-	for (const Tri& t : tris) {
-		double mn[3], mx[3];
-		for (int ax = 0; ax < 3; ax++) mn[ax] = mx[ax] = F(t.v[0][ax]);
-		for (int k = 1; k < 3; k++) {
-			for (int ax = 0; ax < 3; ax++) {
-				double v = F(t.v[k][ax]);
-				if (mn[ax] > v) mn[ax] = v; else if (mx[ax] < v) mx[ax] = v;
-			}
+	double mn[3], mx[3];
+	for (int ax = 0; ax < 3; ax++) mn[ax] = mx[ax] = F(t.v[0][ax]);
+	for (int k = 1; k < 3; k++) {
+		for (int ax = 0; ax < 3; ax++) {
+			double v = F(t.v[k][ax]);
+			if (mn[ax] > v) mn[ax] = v; else if (mx[ax] < v) mx[ax] = v;
 		}
-		int lo[3], hi[3];
-		subdivMinBounds(c, mn, lo);
-		subdivMaxBounds(c, mx, hi);
-		double ny = F(t.n[1] * NORMAL_FRAC);
-		int baseZ = lo[2] * amtXY;
-		double curMinZ = F(F(c.len[2] * lo[2]) + c.minB[2] - OVERLAP);
-		double curMaxZ = F(curMinZ + lenZ);
-		for (int sz = lo[2]; sz <= hi[2]; sz++) {
-			int baseY = lo[1] * c.amt[0];
-			double curMinY = F(F(c.len[1] * lo[1]) + c.minB[1] - OVERLAP);
-			double curMaxY = F(curMinY + lenY);
-			for (int sy = lo[1]; sy <= hi[1]; sy++) {
-				int index = baseZ + baseY + lo[0];
-				double curMinX = F(F(c.len[0] * lo[0]) + c.minB[0] - OVERLAP);
-				double curMaxX = F(curMinX + lenX);
-				for (int sx = lo[0]; sx <= hi[0]; sx++) {
-					double box[6] = { curMinX, curMaxX, curMinY, curMaxY, curMinZ, curMaxZ };
-					if (index >= 0 && index < (int)c.subWalls.size() && triIntersectsCube(t, box)) {
-						if (ny > 0.5) c.subFloors[index].push_back(t.id);
-						else if (ny < -0.8) { /* ceiling */ }
-						else c.subWalls[index].push_back(t.id);
-					}
-					curMinX = F(curMinX + c.len[0]);
-					curMaxX = F(curMaxX + c.len[0]);
-					index++;
-				}
-				curMinY = F(curMinY + c.len[1]);
-				curMaxY = F(curMaxY + c.len[1]);
-				baseY += c.amt[0];
+	}
+	int lo[3], hi[3];
+	subdivMinBounds(c, mn, lo);
+	subdivMaxBounds(c, mx, hi);
+	int baseZ = lo[2] * amtXY;
+	double curMinZ = F(F(c.len[2] * lo[2]) + c.minB[2] - OVERLAP);
+	double curMaxZ = F(curMinZ + lenZ);
+	for (int sz = lo[2]; sz <= hi[2]; sz++) {
+		int baseY = lo[1] * c.amt[0];
+		double curMinY = F(F(c.len[1] * lo[1]) + c.minB[1] - OVERLAP);
+		double curMaxY = F(curMinY + lenY);
+		for (int sy = lo[1]; sy <= hi[1]; sy++) {
+			int index = baseZ + baseY + lo[0];
+			double curMinX = F(F(c.len[0] * lo[0]) + c.minB[0] - OVERLAP);
+			double curMaxX = F(curMinX + lenX);
+			for (int sx = lo[0]; sx <= hi[0]; sx++) {
+				double box[6] = { curMinX, curMaxX, curMinY, curMaxY, curMinZ, curMaxZ };
+				if (index >= 0 && index < (int)c.subWalls.size() && triIntersectsCube(t, box)) out.push_back(index);
+				curMinX = F(curMinX + c.len[0]);
+				curMaxX = F(curMaxX + c.len[0]);
+				index++;
 			}
-			curMinZ = F(curMinZ + c.len[2]);
-			curMaxZ = F(curMaxZ + c.len[2]);
-			baseZ += amtXY;
+			curMinY = F(curMinY + c.len[1]);
+			curMaxY = F(curMaxY + c.len[1]);
+			baseY += c.amt[0];
+		}
+		curMinZ = F(curMinZ + c.len[2]);
+		curMaxZ = F(curMaxZ + c.len[2]);
+		baseZ += amtXY;
+	}
+}
+
+void initializeSubdivisions(ColCtx& c, const vector<Tri>& tris) {
+	vector<int> cells;
+	for (const Tri& t : tris) {
+		cells.clear();
+		subdivisionCellsOf(c, t, cells);
+		double ny = F(t.n[1] * NORMAL_FRAC);
+		for (int index : cells) {
+			if (ny > 0.5) c.subFloors[index].push_back(t.id);
+			else if (ny < -0.8) { /* ceiling */ }
+			else c.subWalls[index].push_back(t.id);
 		}
 	}
 }

@@ -36,19 +36,21 @@ void reachability(const Model& m, Scratch& s, Clip& c) {
 			if (c.cross) {
 				auto f = lineFrame(m, s, start, next, LOOSE);
 				if (!f || f->hit.poly != c.pusher) continue;
-				auto clip = clipFromFrame(m, s, start, f->res, f->trace, LOOSE, c.drop > 0 ? NAN : start.y);
+				const Move mv{ yaw, speed };
+				auto clip = clipFromFrame(m, s, start, f->res, f->trace, LOOSE, c.drop > 0 ? NAN : start.y, &mv);
 				if (!clip || clip->crossed != c.crossed) continue;
 				bool noFloor;
-				if (c.drop > 0 ? !landing(m, s, f->res, floorRef, noFloor) : m.isInBounds(s, clip->end)) continue;
+				if (c.drop > 0 ? !landing(m, s, f->res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end)) continue;
 			} else {
 				// nothing in the way, then the frame's pushes clip through the same wall
 				if (lineFrame(m, s, start, next, LOOSE)) continue;
 				PushList tr;
-				V3 res = m.sphereStep(next, LOOSE, &tr);
-				auto clip = clipFromFrame(m, s, start, res, tr, LOOSE, c.drop > 0 ? NAN : start.y);
+				V3 res = m.sphereStep(next, LOOSE, &tr, &start);
+				const Move mv{ yaw, speed };
+				auto clip = clipFromFrame(m, s, start, res, tr, LOOSE, c.drop > 0 ? NAN : start.y, &mv);
 				if (!clip || clip->crossed != c.crossed) continue;
 				bool noFloor;
-				if (c.drop > 0 ? !landing(m, s, res, floorRef, noFloor) : m.isInBounds(s, clip->end)) continue;
+				if (c.drop > 0 ? !landing(m, s, res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end)) continue;
 			}
 			if (!m.isInBounds(s, start)) continue;
 			have = true;
@@ -70,10 +72,11 @@ static std::optional<ClipResult> walkFrameClips(const Model& m, Scratch& s, cons
 	PushList trace;
 	auto f = lineFrame(m, s, start, next, LOOSE);
 	if (f) { res = f->res; trace = f->trace; }
-	else res = m.sphereStep(next, LOOSE, &trace);
-	auto clip = clipFromFrame(m, s, start, res, trace, LOOSE, start.y);
+	else res = m.sphereStep(next, LOOSE, &trace, &start);
+	const Move mv{ yaw, speed };
+	auto clip = clipFromFrame(m, s, start, res, trace, LOOSE, start.y, &mv);
 	if (!clip || clip->crossed != crossed || clip->pusher != pusher) return std::nullopt;
-	if (m.isInBounds(s, clip->end)) return std::nullopt;
+	if (!m.endCounts(s, clip->crossed, clip->end)) return std::nullopt;
 	return clip;
 }
 
@@ -330,8 +333,9 @@ std::optional<Clip> refinedClip(const Model& m, const Refined& r, int pusher, in
 		auto f = lineFrame(m, s, r.start, nx, tol);
 		cross = (bool)f;
 		if (f) { res = f->res; trace = f->trace; at = { f->hit.x, nx.y, f->hit.z }; }
-		else { res = m.sphereStep(nx, tol, &trace); at = nx; }
-		auto cl = clipFromFrame(m, s, r.start, res, trace, tol, r.start.y);
+		else { res = m.sphereStep(nx, tol, &trace, &r.start); at = nx; }
+		const Move mv{ r.yaw, r.speed };
+		auto cl = clipFromFrame(m, s, r.start, res, trace, tol, r.start.y, &mv);
 		if (cl && (cl->crossed != crossed || cl->pusher != pusher)) cl.reset();
 		return cl;
 	};

@@ -23,7 +23,8 @@
 //   4. vtx    = (Vec3s)vtxT   <-- C float->s16 cast: TRUNCATE TOWARD ZERO
 //   5. normal = normalize(cross(B-A, C-A)) built from the TRUNCATED verts,
 //              then quantised again via COLPOLY_SNORMAL: (s16)(n * 32767)
-//   6. dist   = (s16)-dot(normal, vtxA)                [truncated]
+//   6. dist   = -dot(normal, vtxA) as an s16: OoT truncates, MM rounds
+//              (nearbyint, ties to even)
 //
 // Trig is the libultra binang table (sins/coss), not Math.sin/Math.cos.
 // sins() throws away the low 4 bits of the angle and returns a 16-bit
@@ -372,6 +373,62 @@ export function dynaTransformVertices(verts, xform) {
     return out;
 }
 
+/** C nearbyint in the default rounding mode: to nearest, ties to even. */
+function nearbyint(v) {
+    const r = Math.round(v);
+    return (Math.abs(v - Math.trunc(v)) === 0.5 && r % 2 !== 0) ? r - 1 : r;
+}
+
+/**
+ * The bg actor's bounding sphere and Y range, as DynaPoly_ExpandSRT sets them
+ * (what the game's dynapoly checks cull with): minY / maxY are the f32
+ * transformed vertices'; the centre is their mean, and the radius 1.1 times
+ * the farthest s16 vertex from it, both stored in a Sphere16 (truncated s16s).
+ * All the collision's vertices count, the intangible polys' too.
+ *
+ * @param {Array<Array<number>>} verts source vertices (s16)
+ * @param {{scale:{x,y,z}, rot:{x,y,z}, pos:{x,y,z}}} xform as dynaTransformVertices
+ * @returns {{center:number[], radius:number, minY:number, maxY:number}|null}
+ */
+export function dynaBoundingSphere(verts, xform) {
+    if (!verts.length) return null;
+    const mtx = skinMatrixSetTranslateRotateYXZScale(
+        xform.scale.x, xform.scale.y, xform.scale.z,
+        xform.rot.x, xform.rot.y, xform.rot.z,
+        xform.pos.x, xform.pos.y, xform.pos.z
+    );
+    const inv = F(1.0 / verts.length);
+    let cx = 0, cy = 0, cz = 0, minY = 0, maxY = 0;
+    const ints = [];
+    for (let i = 0; i < verts.length; i++) {
+        const t = skinMatrixVec3fMultXYZ(mtx, verts[i][0], verts[i][1], verts[i][2]);
+        ints.push([f32ToS16(t[0]), f32ToS16(t[1]), f32ToS16(t[2])]);
+        // (the game's else-if chain)
+        if (i === 0) minY = maxY = t[1];
+        else if (t[1] < minY) minY = t[1];
+        else if (maxY < t[1]) maxY = t[1];
+        cx = F(cx + t[0]);
+        cy = F(cy + t[1]);
+        cz = F(cz + t[2]);
+    }
+    cx = F(cx * inv);
+    cy = F(cy * inv);
+    cz = F(cz * inv);
+    // Math3D_Vec3fDistSq from the f32 centre
+    let r2 = F(-100.0);
+    for (const v of ints) {
+        const dx = F(v[0] - cx), dy = F(v[1] - cy), dz = F(v[2] - cz);
+        const d = F(F(F(dx * dx) + F(dy * dy)) + F(dz * dz));
+        if (r2 < d) r2 = d;
+    }
+    return {
+        center: [f32ToS16(cx), f32ToS16(cy), f32ToS16(cz)],
+        radius: f32ToS16(F(F(Math.sqrt(r2)) * F(1.1))),
+        minY,
+        maxY,
+    };
+}
+
 /**
  * Build the world-space position the game feeds into the matrix.
  * Mirrors the first two lines of DynaPoly_ExpandSRT.
@@ -406,7 +463,7 @@ export function dynaActorPos(posXYZ, scaleY, yOffset = 0) {
  * @param {Array<Object>} triangleData per-poly metadata from the parser
  * @param {Function} makeVec3 constructor for vtxs entries (e.g. THREE.Vector3)
  */
-export function dynaRecomputePolyData(intVerts, tris, triangleData, makeVec3) {
+export function dynaRecomputePolyData(intVerts, tris, triangleData, makeVec3, game = "OOT") {
     const out = new Array(tris.length);
 
     for (let i = 0; i < tris.length; i++) {
@@ -442,12 +499,13 @@ export function dynaRecomputePolyData(intVerts, tris, triangleData, makeVec3) {
             normals = [colpolySNormal(nx), colpolySNormal(ny), colpolySNormal(nz)];
         }
 
-        // dist = (s16)-DOTXYZ(newNormal, vtxA). Note this uses newNormal even
-        // in the degenerate case, where it is still unnormalised.
+        // dist = -DOTXYZ(newNormal, vtxA): OoT stores it as (s16), MM as
+        // (s16)nearbyint(...). Note this uses newNormal even in the degenerate
+        // case, where it is still unnormalised.
         let dot = F(nx * a[0]);
         dot = F(dot + F(ny * a[1]));
         dot = F(dot + F(nz * a[2]));
-        const dist = f32ToS16(F(-dot));
+        const dist = f32ToS16(game === "MM" ? nearbyint(F(-dot)) : F(-dot));
 
         // Floor/wall/ceiling classification, also done on the float normal.
         let surfaceType;

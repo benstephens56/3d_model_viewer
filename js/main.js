@@ -277,6 +277,7 @@ gameSel.addEventListener('change',(e)=>{
     bkViewModeLabel.style.display = (game == "BK" || game == "BT" || game == "OOT" || game == "MM") ? "block" : "none";
     bkPropCollisionLabel.style.display = (game == "BK" || game == "BT") ? "" : "none";
     bkActorHitboxesLabel.style.display = (game == "BK" || game == "BT") ? "block" : "none";
+    document.getElementById('actorDisplay').style.display = (game == "OOT" || game == "MM") ? "" : "none";
 
     if (game == "BK" || game == "BT") {
         display_fwc_label.style.display = "none";
@@ -459,7 +460,7 @@ async function loadSelectedMap(game) {
             }
 
             // OOT / MM: every actor of the selected setup, drawn with its model
-            // (oot_actors.js). The DynaPoly rows come from parseZeldaSceneBinary.
+            // (oot_actors.js), dynapoly collision in the same rows.
             if ((game == "OOT" || game == "MM") && renderActorsCheckbox.checked && areaActors) {
                 await showLoading(`${mapName}: actors…`);
                 await renderOOTActors(scene, buffer1, mapFilename, game);

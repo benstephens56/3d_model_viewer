@@ -12,6 +12,7 @@ struct Clip {
 	// front of the pusher's face (pushOnFace)
 	bool acutePoint = false;
 	bool cross = false;
+	bool hold = false;    // only with the stick held one more frame (ClipResult::hold)
 	int drop = 0;         // falling: posNext this far below the floor (0 walking)
 	int pusher = -1, crossed = -1;
 	V3 from, prev, next, res, end;

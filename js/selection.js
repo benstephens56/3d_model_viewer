@@ -40,6 +40,12 @@ export function updateSelectionUI() {
             continue;
         }
 
+        // A dynapoly actor's collision: which actor it belongs to, then the
+        // triangle / waterbox itself.
+        if (t.actorInfo) {
+            lines.push(t.actorInfo);
+        }
+
         if (t.type === "waterbox") {
             const wb = t.waterbox;
             lines.push(
@@ -278,7 +284,7 @@ function pickClipSpot(camera, renderer) {
     let best = null;
 
     for (const m of loadedModels) {
-        if (!m.mesh || !m.mesh.visible) continue;
+        if (!m.mesh || !isShown(m.mesh)) continue;
         m.mesh.traverseVisible(obj => {
             const spots = obj.userData.clipSpots;
             if (!spots) return;
@@ -296,6 +302,28 @@ function pickClipSpot(camera, renderer) {
         });
     }
     return best;
+}
+
+// Whether obj and every ancestor are visible. A model's own flag isn't enough:
+// an OOT / MM actor row hides its root group, and the "Actor display" menu a
+// layer group, above the objects registered in loadedModels -- and the
+// raycaster ignores visibility altogether.
+// The info line of the dynapoly actor an object belongs to (render_actors.js:
+// its collision meshes, waterboxes, standable surface and seams all sit under
+// something tagged with userData.dynaPolyActor), or null.
+function dynaActorInfo(obj) {
+    for (let o = obj; o; o = o.parent) {
+        const actor = o.userData?.dynaPolyActor;
+        if (actor) return actor.userData.actorInfo ?? null;
+    }
+    return null;
+}
+
+function isShown(obj) {
+    for (let o = obj; o; o = o.parent) {
+        if (!o.visible) return false;
+    }
+    return true;
 }
 
 // Handle triangle/point selection
@@ -341,7 +369,7 @@ export function performSelection(ev, renderer, camera, scene) {
     const pointHits = [];
 
     for (const m of loadedModels) {
-        if (!m.mesh || !m.mesh.visible) continue;
+        if (!m.mesh || !isShown(m.mesh)) continue;
 
         if (m.mesh.geometry === undefined)
             continue;
@@ -402,7 +430,7 @@ export function performSelection(ev, renderer, camera, scene) {
         // account for a parent group being hidden (e.g. Subdivision's cube
         // outline is a child of the group the checkbox actually toggles) -
         // check that too so a hidden model's edges aren't still pickable.
-        if (m.mesh && !m.mesh.visible) continue;
+        if (m.mesh && !isShown(m.mesh)) continue;
 
         const pos = m.edges.geometry.attributes.position;
 
@@ -450,7 +478,7 @@ export function performSelection(ev, renderer, camera, scene) {
     // ----- END EDGE PASS -----
     
     const visibleMeshes = loadedModels
-        .filter(m => m.mesh && m.mesh.visible)
+        .filter(m => m.mesh && isShown(m.mesh))
         .map(m => m.mesh);
 
     const inter = raycaster.intersectObjects(visibleMeshes, true);
@@ -519,7 +547,8 @@ export function performSelection(ev, renderer, camera, scene) {
             modelName: model.name,
             index: cubeIndex,
             waterbox: wbMeta.waterbox,
-            bbox: wbMeta.bbox
+            bbox: wbMeta.bbox,
+            actorInfo: dynaActorInfo(model)
         };
 
         selectedTriangles.push(sel);
@@ -615,6 +644,7 @@ export function performSelection(ev, renderer, camera, scene) {
         verts: [va, vb, vc],
         modelName: hit.object.name,
         bkInfo: hit.object.userData.bkInfo ?? null,
+        actorInfo: dynaActorInfo(hit.object),
 
         // include metadata if available:
         normals: meta ? meta.normals : null,

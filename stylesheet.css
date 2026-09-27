@@ -551,3 +551,26 @@ a.download-link {
 .dropdown.show .dropdown-content {
     display: block;
 }
+
+/* OOT / MM "Actor display" menu: which layers every actor row draws. */
+.actor-display {
+    margin: 6px 0;
+    font-size: 13px;
+}
+
+.actor-display > summary {
+    cursor: pointer;
+    user-select: none;
+}
+
+.actor-display-content {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 12px;
+    padding: 4px 0 0 14px;
+}
+
+.actor-display-content label {
+    display: inline;
+    margin: 0;
+}
