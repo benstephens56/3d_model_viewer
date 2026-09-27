@@ -122,11 +122,15 @@ V3 Model::sphereStep(const V3& pos, const Tol& tol, PushList* trace) const {
 	return { rx, pos.y, rz };
 }
 
+// (Still means not moved at all: pushes under 0.01 used to count as still,
+// but the game does push Link those last thousandths - e.g. out to exactly
+// the radius from a wall's stored plane - and a start there isn't one he
+// stays at: MM Treasure Chest Shop Deku, TRI 90, 0.0007-0.01 off.)
 std::optional<V3> Model::restingSpot(const V3& pos) const {
 	V3 cur = pos;
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 8; i++) {
 		V3 next = sphereStep({ cur.x, F(pos.y - GROUND_DROP), cur.z }, LOOSE, nullptr);
-		if (std::fabs(next.x - cur.x) <= 0.01 && std::fabs(next.z - cur.z) <= 0.01) return cur;
+		if (next.x == cur.x && next.z == cur.z) return cur;
 		cur = { next.x, pos.y, next.z };
 	}
 	return std::nullopt;

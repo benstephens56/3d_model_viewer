@@ -41,7 +41,7 @@
 -- wall_clip_tests.json next to this script. Its clips are turned into tests,
 -- with the walls read from RAM (load that map first). (A .lua test file from
 -- an older viewer still works too.)
-local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\oot2\OOT_Spirit_Temple_Adult_Child_falling.json]]
+local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\tcs_50_90.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
 local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --falling scans)
@@ -55,7 +55,7 @@ local FAST = true                 -- skip drawing while testing (client.invisibl
 -- facing the way he'll go, and Z is tapped - Z-targeting nothing swings the
 -- camera behind him), and pauses RECORD_BUFFER emulated frames (60 a second)
 -- before and after each one. Off by default.
-local RECORD = true
+local RECORD = false
 local RECORD_BUFFER = 90
 local RECORD_ONE_PER_PAIR = true  -- recording: once a wall pair's test works, skip the rest of that pair's
 if RECORD then FAST = false end
@@ -73,6 +73,16 @@ local MODE = "auto"
 -- from RAM (OoT: "Crawlspace" if he has the crawling flag, else "Adult" /
 -- "Child"; MM: "Human", "Deku", "Zora", "Goron", "FierceDeity"), or set a name.
 local FORM = nil
+-- Checking clipfinder --yaw's CSV grids (<output>_<YAW>.csv, Yes / No per
+-- x, z) in game: set TESTS_FILE to that run's JSON (the CSVs and their
+-- _speeds.csv are found next to it, one per yaw in it) and CSV_TESTS = true.
+-- Every cell is tried in "move" mode (the game moves Link from exactly that
+-- x, z at the yaw): a Yes at its lowest speed (should clip), a No at the max
+-- speed (shouldn't). Each grid's in-game result goes to <that CSV>_ingame.csv,
+-- mismatches marked, and the summary lists them.
+local CSV_TESTS = true
+local CSV_CELLS = "all"           -- "all", or "border": only cells next to one with the other answer
+local CSV_DRIFT = 0.0001          -- Link pushed further than this off a cell's start before the move: No
 
 ---------------------------------------------------------------------------
 -- Game / memory
@@ -284,6 +294,91 @@ local function testsFromJson(path)
 	end
 	local groupOf, nGroups, seen = {}, 0, {}
 	local vec = function(a) return { a[1], a[2], a[3] } end
+	-- CSV_TESTS: the cells of clipfinder --yaw's CSV grids instead of the
+	-- clips. The JSON's clip for each yaw gives the wall pair, form and floor
+	-- height; <json name>_<YAW>.csv the grid, <...>_speeds.csv each cell's speed.
+	if CSV_TESTS then
+		T.csvGrids = {}
+		local skipped = {}  -- yaws in the JSON with no CSV next to it (moved away to test fewer)
+		local base = path:gsub("%.[jJ][sS][oO][nN]$", "")
+		local function readCsv(file)
+			local f = io.open(file, "r")
+			if not f then return nil end
+			local rows = {}
+			for l in f:lines() do
+				l = l:gsub("\r$", "")
+				if l ~= "" then
+					local cells = {}
+					for c in (l .. ","):gmatch("([^,]*),") do cells[#cells + 1] = c end
+					rows[#rows + 1] = cells
+				end
+			end
+			f:close()
+			return rows
+		end
+		for _, c in ipairs(data.clips) do
+			if c.yaw and c.speed then
+				local yawName = string.format("%04X", c.yaw)
+				-- (with several forms the file has the form in its name too)
+				local names = {}
+				for part in tostring(c.form or ""):gmatch("[^/]+") do
+					names[#names + 1] = base .. "_" .. part:gsub("[^%w%-_]", "_") .. "_" .. yawName
+				end
+				names[#names + 1] = base .. "_" .. yawName
+				local grid, speeds, name
+				for _, n in ipairs(names) do
+					grid, speeds = readCsv(n .. ".csv"), readCsv(n .. "_speeds.csv")
+					if grid and speeds then name = n; break end
+				end
+				if not name then
+					skipped[#skipped + 1] = "0x" .. yawName
+				else
+					local g = { name = name, yaw = c.yaw, form = c.form, header = grid[1], rows = {} }
+					T.csvGrids[#T.csvGrids + 1] = g
+					local expect = {}
+					for zi = 2, #grid do
+						expect[zi] = {}
+						for xi = 2, #grid[zi] do expect[zi][xi] = grid[zi][xi] == "Yes" end
+					end
+					local function border(zi, xi)
+						for _, d in ipairs({ { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } }) do
+							local e = expect[zi + d[1]] and expect[zi + d[1]][xi + d[2]]
+							if e ~= nil and e ~= expect[zi][xi] then return true end
+						end
+						return false
+					end
+					local y = c.prev[2]
+					local ang = c.yaw / 32768 * math.pi
+					for zi = 2, #grid do
+						g.rows[zi] = { label = grid[zi][1], cells = {} }
+						local z = tonumber(grid[zi][1])
+						for xi = 2, #grid[zi] do
+							if CSV_CELLS ~= "border" or border(zi, xi) then
+								local x, speed = tonumber(grid[1][xi]), tonumber(speeds[zi][xi])
+								nGroups = nGroups + 1
+								local t = {
+									group = nGroups, form = data.forms and c.form or nil, kind = "csv 0x" .. yawName, type = "cell",
+									pusher = c.pusher, crossed = c.crossed, prev = { x, y, z },
+									-- (roughly: move mode lets the game work out the move itself)
+									next = { x + speed * math.sin(ang) * 1.5, y - 7.5, z + speed * math.cos(ang) * 1.5 },
+									yaw = c.yaw, speed = speed, csv = g, zi = zi, xi = xi, expectClip = expect[zi][xi],
+								}
+								T.tests[#T.tests + 1] = t
+								g.rows[zi].cells[xi] = t
+							end
+						end
+					end
+					T.walls[c.pusher] = true
+					T.walls[c.crossed] = true
+				end
+			end
+		end
+		if #skipped > 0 then
+			print(string.format("CSV_TESTS: %d yaws have no CSV next to the JSON, skipped: %s", #skipped, table.concat(skipped, ", ")))
+		end
+		if #T.tests == 0 then error("CSV_TESTS: no CSV grids found next to " .. path .. " (run clipfinder --yaw with -o that JSON)") end
+		return T
+	end
 	local key3 = function(v) return string.format("%.9g,%.9g,%.9g", v[1], v[2], v[3]) end
 	for _, c in ipairs(data.clips) do
 		local form = data.forms and c.form or nil
@@ -740,9 +835,11 @@ end
 
 -- Pick the mode on the first test: a hook that never catches Link's bg check
 -- falls through to the next one.
-local mode = MODE
+-- (CSV_TESTS: always "move" - the game works out the move from exactly
+-- that start, yaw and speed, which is what the grid is about)
+local mode = T.csvGrids and "move" or MODE
 local first
-if MODE == "auto" then
+if mode == "auto" then
 	for _, m in ipairs({ "exec", "read", "move" }) do
 		if (m == "exec" and not a1Reg) or (m == "read" and not pcReg) then
 			print("  " .. m .. ": skipped (register not found)")
@@ -760,11 +857,11 @@ if MODE == "auto" then
 	unhook()
 	if mode ~= "move" then hook(mode) end
 else
-	hook(MODE)
-	first = runTest(queue[1], MODE)
+	hook(mode)
+	first = runTest(queue[1], mode)
 	if first.status == "hook" then
 		cleanUp()
-		error(string.format("the %s hook never caught Link's bg check (callback ran %d times)", MODE, calls))
+		error(string.format("the %s hook never caught Link's bg check (callback ran %d times)", mode, calls))
 	end
 end
 print("Mode: " .. mode)
@@ -774,12 +871,22 @@ local pairDone = {}  -- recording: wall pairs (pusher:crossed) that already have
 local skipped = 0
 for i, t in ipairs(queue) do
 	local pairKey = t.pusher .. ":" .. t.crossed
-	if RECORD and RECORD_ONE_PER_PAIR and pairDone[pairKey] then
+	-- (not the CSV cells: they're all the one wall pair)
+	if RECORD and RECORD_ONE_PER_PAIR and pairDone[pairKey] and not t.csv then
 		skipped = skipped + 1
 	else
 		local r = i == 1 and first or runTest(t, mode)
 		results[#results + 1] = r
-		print(string.format("  %d / %d: %s %s TRI %d -> %d: %s", i, #queue, t.kind, t.type, t.pusher, t.crossed, r.status))
+		if t.csv then
+			-- (Link pushed off the start before the move frame: that start isn't
+			-- one he can stand at, which the summary counts as No - said here too)
+			local drift = r.start and math.sqrt((r.start[1] - t.prev[1]) ^ 2 + (r.start[3] - t.prev[3]) ^ 2) or 0
+			local status = drift > CSV_DRIFT and string.format("No (pushed %.6f off the start first)", drift) or r.status
+			print(string.format("  %d / %d: %s x %s z %s speed %s (expect %s): %s", i, #queue, t.kind,
+				t.csv.header[t.xi], t.csv.rows[t.zi].label, t.speed, t.expectClip and "Yes" or "No", status))
+		else
+			print(string.format("  %d / %d: %s %s TRI %d -> %d: %s", i, #queue, t.kind, t.type, t.pusher, t.crossed, r.status))
+		end
 		if r.status == "clipped" or r.status == "fell" or r.status == "voided" then pairDone[pairKey] = true end
 	end
 end
@@ -832,78 +939,151 @@ local function setupStr(r)
 		yaw and string.format("0x%04X", yaw % 0x10000) or "-", speed and string.format("%.9g", speed) or "-")
 end
 
-local totalWorked, groupsWorked = 0, 0
-line("WORKED")
-for _, gi in ipairs(order) do
-	local b = byGroup[gi]
-	if b and b.worked > 0 then
-		local t = groups[gi].first
-		groupsWorked = groupsWorked + 1
-		totalWorked = totalWorked + b.worked
-		line(string.format("  %s %s: TRI %d through TRI %d - %d of %d tried (%d points in the group)",
-			t.kind, t.type, t.pusher, t.crossed, b.worked, b.tried, #groups[gi].tests))
-		for _, r in ipairs(b.hits) do
-			line(string.format("    [%s] prev %s -> next %s  => after %s, final %s",
-				r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final)))
-			line("        " .. setupStr(r))
-		end
-		-- and the ones in the group that didn't
-		for _, r in ipairs(results) do
-			if r.test.group == gi and r.after and r.status ~= "clipped" and r.status ~= "fell" and r.status ~= "voided" then
-				line(string.format("    [%s] prev %s -> next %s  => after %s, final %s (expected %s)",
-					r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final), fmt(r.test.expect)))
-				for _, l in ipairs(r.log or {}) do line("        " .. l) end
+-- CSV_TESTS: per grid, how many cells came out as the CSV says, each
+-- mismatch, and the grid as it went in game (<CSV>_ingame.csv): Yes / No,
+-- "Yes (expected No)" / "No (expected Yes)" where it differs, "?" + the
+-- status where the test didn't run properly, "-" where not tried (border).
+-- "setup", or Link pushed off the cell's start before the move frame (by more
+-- than CSV_DRIFT: that exact start isn't somewhere he can stand) are No, even
+-- if he then clips from where the push left him: the clip can't be done from
+-- there. The list of mismatches says when that's why.
+local function csvDrift(r)
+	if not r.start then return 0 end
+	return math.sqrt((r.start[1] - r.test.prev[1]) ^ 2 + (r.start[3] - r.test.prev[3]) ^ 2)
+end
+local function csvResult(r)
+	if csvDrift(r) > CSV_DRIFT then return false, "moved" end
+	if r.status == "clipped" or r.status == "fell" or r.status == "voided" then return true end
+	if r.status == "no" or r.status == "setup" then return false end
+	return nil
+end
+if T.csvGrids then
+	local byTest = {}
+	for _, r in ipairs(results) do byTest[r.test] = r end
+	local allMatched, allTried = 0, 0
+	for _, g in ipairs(T.csvGrids) do
+		local matched, tried, moved, bad = 0, 0, 0, {}
+		local rowsOut = { table.concat(g.header, ",") }
+		for zi = 2, #g.rows + 1 do
+			local row = g.rows[zi]
+			if row then
+				local cells = { row.label }
+				for xi = 2, #g.header do
+					local t = row.cells[xi]
+					local r = t and byTest[t]
+					local v = "-"
+					if r then
+						local got, why = csvResult(r)
+						tried = tried + 1
+						if why == "moved" then moved = moved + 1 end
+						if got == nil then
+							v = "? " .. r.status
+							bad[#bad + 1] = string.format("    x %s z %s: expected %s, test %s", g.header[xi], row.label, t.expectClip and "Yes" or "No", r.status)
+						elseif got == t.expectClip then
+							v = got and "Yes" or "No"
+							matched = matched + 1
+						else
+							v = string.format("%s (expected %s)", got and "Yes" or "No", t.expectClip and "Yes" or "No")
+							if why == "moved" then
+								bad[#bad + 1] = string.format("    x %s z %s: expected %s, got No: the game pushed Link %.6f off the start (to %s) before the move",
+									g.header[xi], row.label, t.expectClip and "Yes" or "No", csvDrift(r), fmt(r.start))
+							else
+								bad[#bad + 1] = string.format("    x %s z %s speed %s: expected %s, got %s (%s)  start read back %s, after %s, final %s",
+									g.header[xi], row.label, t.speed, t.expectClip and "Yes" or "No", got and "Yes" or "No", r.status,
+									fmt(r.start), fmt(r.after), fmt(r.final))
+							end
+						end
+					end
+					cells[#cells + 1] = v
+				end
+				rowsOut[#rowsOut + 1] = table.concat(cells, ",")
 			end
 		end
+		allMatched, allTried = allMatched + matched, allTried + tried
+		local outPath = g.name .. "_ingame.csv"
+		local f = io.open(outPath, "w")
+		if f then f:write(table.concat(rowsOut, "\n"), "\n"); f:close() end
+		line(string.format("CSV 0x%04X (%s): %d of %d cells as the CSV says%s%s", g.yaw, g.name .. ".csv", matched, tried,
+			moved > 0 and string.format(" (%d No where the game pushed Link off the start)", moved) or "",
+			f and ("; in game: " .. outPath) or ("; couldn't write " .. outPath)))
+		for _, b in ipairs(bad) do line(b) end
 	end
-end
-if groupsWorked == 0 then line("  (none)") end
-line("")
-
-line("DIDN'T WORK")
-for _, gi in ipairs(order) do
-	local b = byGroup[gi]
-	if b and b.worked == 0 then
-		local t = groups[gi].first
-		local st = {}
-		for k, v in pairs(b.statuses) do st[#st + 1] = k .. " " .. v end
-		line(string.format("  %s %s: TRI %d through TRI %d - 0 of %d (%s)",
-			t.kind, t.type, t.pusher, t.crossed, b.tried, table.concat(st, ", ")))
-		for _, r in ipairs(results) do
-			if r.test.group == gi and r.after then
-				line(string.format("    [%s] prev %s -> next %s  => after %s, final %s (expected %s)",
-					r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final), fmt(r.test.expect)))
-				for _, l in ipairs(r.log or {}) do line("        " .. l) end
-			end
-		end
-	end
-end
--- (recording: groups never run because their wall pair had already clipped)
-local skippedGroups = {}
-for _, gi in ipairs(order) do
-	if not byGroup[gi] then
-		local t = groups[gi].first
-		skippedGroups[#skippedGroups + 1] = string.format("  %s %s: TRI %d through TRI %d - skipped (the pair already clipped)",
-			t.kind, t.type, t.pusher, t.crossed)
-	end
-end
-if #skippedGroups > 0 then
 	line("")
-	line("SKIPPED")
-	for _, l in ipairs(skippedGroups) do line(l) end
+	line(string.format("%d of %d cells as the CSVs say", allMatched, allTried))
+else
+	local totalWorked, groupsWorked = 0, 0
+	line("WORKED")
+	for _, gi in ipairs(order) do
+		local b = byGroup[gi]
+		if b and b.worked > 0 then
+			local t = groups[gi].first
+			groupsWorked = groupsWorked + 1
+			totalWorked = totalWorked + b.worked
+			line(string.format("  %s %s: TRI %d through TRI %d - %d of %d tried (%d points in the group)",
+				t.kind, t.type, t.pusher, t.crossed, b.worked, b.tried, #groups[gi].tests))
+			for _, r in ipairs(b.hits) do
+				line(string.format("    [%s] prev %s -> next %s  => after %s, final %s",
+					r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final)))
+				line("        " .. setupStr(r))
+			end
+			-- and the ones in the group that didn't
+			for _, r in ipairs(results) do
+				if r.test.group == gi and r.after and r.status ~= "clipped" and r.status ~= "fell" and r.status ~= "voided" then
+					line(string.format("    [%s] prev %s -> next %s  => after %s, final %s (expected %s)",
+						r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final), fmt(r.test.expect)))
+					for _, l in ipairs(r.log or {}) do line("        " .. l) end
+				end
+			end
+		end
+	end
+	if groupsWorked == 0 then line("  (none)") end
+	line("")
+
+	line("DIDN'T WORK")
+	for _, gi in ipairs(order) do
+		local b = byGroup[gi]
+		if b and b.worked == 0 then
+			local t = groups[gi].first
+			local st = {}
+			for k, v in pairs(b.statuses) do st[#st + 1] = k .. " " .. v end
+			line(string.format("  %s %s: TRI %d through TRI %d - 0 of %d (%s)",
+				t.kind, t.type, t.pusher, t.crossed, b.tried, table.concat(st, ", ")))
+			for _, r in ipairs(results) do
+				if r.test.group == gi and r.after then
+					line(string.format("    [%s] prev %s -> next %s  => after %s, final %s (expected %s)",
+						r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final), fmt(r.test.expect)))
+					for _, l in ipairs(r.log or {}) do line("        " .. l) end
+				end
+			end
+		end
+	end
+	-- (recording: groups never run because their wall pair had already clipped)
+	local skippedGroups = {}
+	for _, gi in ipairs(order) do
+		if not byGroup[gi] then
+			local t = groups[gi].first
+			skippedGroups[#skippedGroups + 1] = string.format("  %s %s: TRI %d through TRI %d - skipped (the pair already clipped)",
+				t.kind, t.type, t.pusher, t.crossed)
+		end
+	end
+	if #skippedGroups > 0 then
+		line("")
+		line("SKIPPED")
+		for _, l in ipairs(skippedGroups) do line(l) end
+	end
+	line("")
+	-- Wall pairs (pushing wall, clipped wall), not groups: a pair can have both
+	-- standing and crossing points.
+	local pairsAll, pairsWorked, nAll, nWorked = {}, {}, 0, 0
+	for _, gi in ipairs(order) do
+		local t = groups[gi].first
+		local k = t.pusher .. ":" .. t.crossed
+		if not pairsAll[k] then pairsAll[k] = true; nAll = nAll + 1 end
+		local b = byGroup[gi]
+		if b and b.worked > 0 and not pairsWorked[k] then pairsWorked[k] = true; nWorked = nWorked + 1 end
+	end
+	line(string.format("%d of %d wall pairs had a point that worked (%d points)", nWorked, nAll, totalWorked))
 end
-line("")
--- Wall pairs (pushing wall, clipped wall), not groups: a pair can have both
--- standing and crossing points.
-local pairsAll, pairsWorked, nAll, nWorked = {}, {}, 0, 0
-for _, gi in ipairs(order) do
-	local t = groups[gi].first
-	local k = t.pusher .. ":" .. t.crossed
-	if not pairsAll[k] then pairsAll[k] = true; nAll = nAll + 1 end
-	local b = byGroup[gi]
-	if b and b.worked > 0 and not pairsWorked[k] then pairsWorked[k] = true; nWorked = nWorked + 1 end
-end
-line(string.format("%d of %d wall pairs had a point that worked (%d points)", nWorked, nAll, totalWorked))
 
 local text = table.concat(out, "\n")
 print(text)

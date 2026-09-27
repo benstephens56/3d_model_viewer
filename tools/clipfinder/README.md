@@ -44,6 +44,12 @@ tools/clipfinder/clipfinder.exe --game MM --all --form All --after "Laundry Pool
 tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --pair 50,90 --refine -o tools/clipfinder/results/tcs_50_90.json
 tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --pair 50,90 --angles --out-dir tools/clipfinder/results
 
+# That clip at one yaw, at speed 15 or less
+tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --pair 50,90 --yaw 0xF000 --max-speed 15 -o tools/clipfinder/results/tcs_50_90_f000.json
+
+# A start for each yaw from 0xFF80 to 0x0000, at speed 10.5 or less
+tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Deku --pair 50,90 --yaw 0xFF80-0x0000 --max-speed 10.5 -o tools/clipfinder/results/tcs_50_90_range.json
+
 # One frame, step by step
 tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --sim "-239.859,0,824.246,0xFF9D,11" --out-dir tools/clipfinder/results
 ```
@@ -89,6 +95,9 @@ the radius, so scan each form you care about.
 | `--refine` | With `--pair`: the exact lowest **walking** speed for that clip. It searches every standable in-bounds start within 24 of the best coarse one (0.25 grid), every yaw toward the clip points (then single steps), and speeds every 0.02, bisected down to the exact f32 boundary. A speed only counts if the clip also works at +0.0025 … +0.01, which rules out single-value flukes (like posNext landing exactly on a wall's plane). The JSON's `clips` then holds **only the refined clip** (its `prev` is the start, its `yaw` and `speed` the move), so the tester runs exactly that move. If the refine finds nothing, the ordinary clips are written. Implies `--min-speed`. |
 | `--angles` | With `--pair`: after refining, try all 4096 directions from the refined start. The game's sine table ignores the yaw's low 4 bits, so e.g. `0xFFC0`–`0xFFCF` move Link the same way. Prints the yaws that clip at the refined speed, the yaws that clip at any speed up to 30 (`--max-move` / 1.5), and each direction's lowest speed. Implies `--refine`. |
 | `--from X,Y,Z[,SPEED]` | With `--pair`: `--angles` from this start (feet position) instead of the refined one, and at SPEED if given. Warns if Link wouldn't stand still there or if it's out of bounds. |
+| `--yaw YAW --max-speed S` | With `--pair`: the lowest **walking** speed up to S that does that clip moving at exactly YAW (`0x1234` or decimal), from any standable in-bounds start. `--yaw FROM-TO` (e.g. `0xFF80-0x0040`, going up through `0xFFFF` → `0` when TO is below FROM) does every yaw from FROM to TO in steps of `0x10` (the low 4 bits don't change the move), prints each yaw's answer as it goes (with the slowest start's exact position), then a table on stdout, one row per yaw: its minimum speed and the x and z range of the starts that clip at some speed up to S (or `none`). Every start is tried, not just until a slower one turns up. Starts within 0.75 of each other are grouped into regions; a yaw with several separate regions gets a `region` row for each under its own. Each yaw that clips also gets a CSV next to the JSON, `<output>_<YAW>.csv` (e.g. `tcs.json` → `tcs_FFC0.csv`; with several forms the form is in the name too): a grid of round x values (columns) and z values (rows), about 20 × 40, stepped 1, 2 or 5 × a power of ten, and each cell `Yes` if Link standing exactly there (the nearest f32 to that number) clips at some speed up to S, else `No`. Each cell is tested at its own coordinates, so the grid shows the shape of where the clip works. It starts over the starts found and grows until its edge rows and columns are all `No`, so it covers the whole shape even without `--exact`. The ranges are the bounding box of the sampled starts that work, so they're only as fine as the sampling, and not every point inside a box works: the regions are usually thin strips, e.g. along the edge of a wall Link is pressed against. The JSON then holds one clip per yaw that works. Starts are every resting spot behind the scan's clip points of the pair along YAW (up to S × 1.5 back and 3 either side, every 0.002 across YAW (`--side-step D` to change it: smaller finds more positions but takes longer, e.g. 0.0005 about 4x) and 0.5 along it: a start pressed against a wall can have to be right to a few thousandths); speeds as for `--refine` (every 0.02, bisected, robust to +0.01). Prints the speed and start, or that none works. The JSON's `clips` holds only those clips, or nothing if none works at those yaws (unlike `--refine`, the scan's clips are never written instead). Slower at high S (Treasure Chest Shop at 30: 35–90 s; at 10: about 5 s). Can't be combined with `--min-speed` / `--refine` / `--angles`. |
+| `--exact` | With `--yaw`: after the sampled search, try **every f32 x and z** around each region it found: the region's box, one side-step bigger each way, growing until nothing that works is within a side-step of its edge (only the new strip is tried each time). A point counts if Link stands still there (his resting spot is that exact point), it's in bounds, and it clips at some speed up to S. The table and the minimum speeds then come from these (the CSVs test their own grid either way). It only fills in around what the sampling found: a separate spot narrower than `--side-step` that no sampled start landed in is still missed. Treasure Chest Shop Deku 50 → 90 at 0xFFD0, speed 9.9: 12 sampled positions became 28,238 (min speed 9.8214 → 9.8047), about 12 s. A region that would grow past 50 million points is left as sampled. |
+| `--speed S` | With `--yaw`: make the CSV grids at **exactly** speed S: a cell is `Yes` if Link standing exactly there clips moving at the yaw at speed S, and its `_speeds.csv` is S everywhere, so the tester tries every cell at S. Stands in for `--max-speed` if that's not given (the search for starts goes up to S). |
 | `--max-move N` | How far Link can move in one frame, in units. Default 45 (speed 30), which glitches can beat (55+). Crossing points are tried from starts up to 32 back by default, and every 4 past that out to N when N is over 45. `--min-speed`, `--refine` and `--angles` look for starts up to N away (speed N / 1.5). Written to the JSON as `"maxMove"` when it isn't 45; the viewer's max move box picks it up on import. Scans take longer the further out it goes. |
 
 ### Debugging one frame
@@ -149,6 +158,16 @@ and the tester.
   It reads the walls from RAM, runs the tests for the form Link is in, and
   writes `wall_clip_results.txt`. See the settings at the top of that script
   (`SKIP_FALLING`, `MAX_PER_GROUP`, `FORM`, …).
+- **Checking a `--yaw` run's CSVs in game:** each `<output>_<YAW>.csv` comes
+  with `<output>_<YAW>_speeds.csv`, the same grid with the speed to try each
+  cell at (a Yes cell's lowest speed that clips, a No cell's max speed). Set
+  `TESTS_FILE` to the run's JSON and `CSV_TESTS = true`: every cell is tried
+  in "move" mode (Link moved by the game from exactly that x, z at the yaw),
+  and each grid's result is written to `<output>_<YAW>_ingame.csv`, with
+  `No (expected Yes)` / `Yes (expected No)` where the game disagrees. The
+  summary counts the cells that match and lists the rest. `CSV_CELLS =
+  "border"` tries only the cells next to one with the other answer (about a
+  quarter of them). Turn `RECORD` off for this: it adds 3 s a cell.
 
 ## Acute or extended
 

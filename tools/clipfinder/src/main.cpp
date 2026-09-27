@@ -14,7 +14,7 @@
 //   collision.h/.cpp the game's static collision checks, as a Model
 //   frame.h/.cpp     one frame: does it clip; where Link can stand; --max-move
 //   search.h/.cpp    the scan over a whole map
-//   reach.h/.cpp     --min-speed, --refine, --angles
+//   reach.h/.cpp     --min-speed, --refine, --angles, --yaw
 //   output.h/.cpp    the results JSON
 //   sim.h/.cpp       --sim
 //   main.cpp         options, forms and the loop over maps
@@ -83,6 +83,11 @@ int main(int argc, char** argv) {
 	string simArg;  // --sim x,y,z,yaw,speed[,drop]
 	bool haveFrom = false;
 	double fromX = 0, fromY = 0, fromZ = 0, fromSpeed = 0;  // --from
+	int atYaw = -1, yawTo = -1;  // --yaw YAW or FROM-TO
+	double maxSpeed = 0;    // --max-speed (with --yaw)
+	double sideStep = 0.002;  // --side-step (with --yaw)
+	bool exact = false;       // --exact (with --yaw)
+	double gridSpeed = 0;     // --speed (with --yaw): the CSV at exactly this speed
 	int threads = (int)std::max(1u, std::thread::hardware_concurrency());
 	for (int i = 1; i < argc; i++) {
 		string a = argv[i];
@@ -105,6 +110,28 @@ int main(int argc, char** argv) {
 			haveFrom = true;
 			angles = refine = minSpeed = true;
 		}
+		else if (a == "--yaw") {
+			// YAW, or a range FROM-TO (going up from FROM, through 0xFFFF -> 0 if TO is below it)
+			string v = val();
+			char* end;
+			atYaw = (int)strtol(v.c_str(), &end, 0) & 0xFFFF;
+			yawTo = atYaw;
+			if (*end == '-') yawTo = (int)strtol(end + 1, &end, 0) & 0xFFFF;
+			if (end == v.c_str() || *end) { fprintf(stderr, "--yaw wants YAW or FROM-TO, e.g. 0xFFC0 or 0xFF80-0x0040\n"); return 2; }
+		}
+		else if (a == "--max-speed") {
+			maxSpeed = std::stod(val());
+			if (!(maxSpeed > 0)) { fprintf(stderr, "--max-speed wants a speed > 0\n"); return 2; }
+		}
+		else if (a == "--side-step") {
+			sideStep = std::stod(val());
+			if (!(sideStep > 0 && sideStep <= 3)) { fprintf(stderr, "--side-step wants a distance > 0 and <= 3\n"); return 2; }
+		}
+		else if (a == "--exact") exact = true;
+		else if (a == "--speed") {
+			gridSpeed = std::stod(val());
+			if (!(gridSpeed > 0)) { fprintf(stderr, "--speed wants a speed > 0\n"); return 2; }
+		}
 		else if (a == "--sim") simArg = val();
 		else if (a == "--pair") {
 			string v = val();
@@ -123,6 +150,12 @@ int main(int argc, char** argv) {
 		else if (a == "--threads") threads = std::max(1, std::stoi(val()));
 		else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
 	}
+	if (exact && atYaw < 0) { fprintf(stderr, "--exact needs --yaw\n"); return 2; }
+	if (gridSpeed > 0 && atYaw < 0) { fprintf(stderr, "--speed needs --yaw\n"); return 2; }
+	// (--speed without --max-speed: the search for starts goes up to that speed)
+	if (gridSpeed > 0 && maxSpeed <= 0) maxSpeed = gridSpeed;
+	if (atYaw >= 0 && (onlyPusher < 0 || maxSpeed <= 0)) { fprintf(stderr, "--yaw needs --pair PUSHER,CROSSED and --max-speed S\n"); return 2; }
+	if (atYaw >= 0 && minSpeed) { fprintf(stderr, "--yaw can't be used with --min-speed / --refine / --angles / --from\n"); return 2; }
 	for (auto& ch : game) ch = (char)toupper((unsigned char)ch);
 	if ((game != "OOT" && game != "MM") || (mapName.empty() && !all)) {
 		fprintf(stderr,
@@ -131,6 +164,10 @@ int main(int argc, char** argv) {
 			"                  [--min-speed] [--pair PUSHER,CROSSED] [--refine (with --pair: the exact lowest walking speed)]\n"
 			"                  [--angles (with --pair: also every yaw that works from the refined start)]\n"
 			"                  [--from X,Y,Z[,SPEED] (--angles from this start instead, and at this speed)]\n"
+			"                  [--yaw YAW|FROM-TO --max-speed S (with --pair: the lowest speed up to S that clips moving at exactly YAW, or at each yaw FROM-TO every 0x10)]\n"
+			"                  [--side-step D (with --yaw: starts every D across the yaw, default 0.002)]\n"
+			"                  [--exact (with --yaw: then every f32 x, z around each region found)]\n"
+			"                  [--speed S (with --yaw: the CSV grids at exactly speed S; stands in for --max-speed)]\n"
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP]]  (one frame from a standing start, printed step by step)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
@@ -216,8 +253,10 @@ int main(int argc, char** argv) {
 			string dir = outDir.empty() ? "." : outDir;
 			path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + ".json";
 		}
-		std::ofstream f(path, std::ios::binary);
-		if (!f) {
+		// (--sim writes nothing, so it doesn't open, and leave empty, the file)
+		std::ofstream f;
+		if (simArg.empty()) f.open(path, std::ios::binary);
+		if (simArg.empty() && !f) {
 			// (the full path: a Windows exe reads "/dir" as the root of the
 			// current drive, not as relative to the current directory)
 			std::error_code ec;
@@ -228,6 +267,7 @@ int main(int argc, char** argv) {
 		// Forms with the same radius and check height (Human / Deku) share a
 		// scan, listed once as "Human/Deku".
 		vector<FormResult> results;
+		vector<string> csvPaths;  // --yaw: the CSV written per yaw
 		for (const Variant& v : variants) {
 			auto same = std::find_if(results.begin(), results.end(),
 				[&](const FormResult& r) { return r.radius == v.radius && r.checkHeight == v.checkHeight; });
@@ -254,7 +294,92 @@ int main(int argc, char** argv) {
 					[&](const Clip& c) { return c.pusher != onlyPusher || c.crossed != onlyCrossed; }), found.end());
 				fprintf(stderr, "  %zu clip points of TRI %d through TRI %d\n", found.size(), onlyPusher, onlyCrossed);
 			}
-			if (minSpeed && !found.empty()) {
+			// --yaw / --max-speed: that pair at each yaw, from any start. A
+			// range goes every 0x10 (the sine table ignores the low 4 bits).
+			if (atYaw >= 0 && !found.empty()) {
+				// (only clips at those yaws are written: none found, no clips)
+				vector<Clip> atYaws;
+				vector<Refined> rs;
+				const int n = ((yawTo - atYaw) & 0xFFFF) / 16 + 1;
+				for (int k = 0; k < n; k++) {
+					const int yaw = (atYaw + k * 16) & 0xFFFF;
+					auto ty = std::chrono::steady_clock::now();
+					Refined r = clipAtYaw(m, found, onlyPusher, onlyCrossed, yaw, maxSpeed, sideStep, exact, gridSpeed, threads);
+					double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - ty).count();
+					if (!r.found) fprintf(stderr, "  YAW 0x%04X TRI %d -> %d: no clip at speeds up to %g (%d starts tried, %.1fs)\n",
+						yaw, onlyPusher, onlyCrossed, maxSpeed, r.starts, secs);
+					else {
+						fprintf(stderr, "  YAW 0x%04X TRI %d -> %d: min speed %.9g  start %.9g, %.9g, %.9g  -> end %.9g, %.9g, %.9g  (%d starts tried, %.1fs)\n",
+							yaw, onlyPusher, onlyCrossed, r.speed, r.start.x, r.start.y, r.start.z, r.end.x, r.end.y, r.end.z, r.starts, secs);
+						if (auto c = refinedClip(m, r, onlyPusher, onlyCrossed)) {
+							c->kind = found.front().kind; // the pair's category
+							atYaws.push_back(*c);
+						}
+					}
+					rs.push_back(r);
+				}
+				// every yaw's answer together, on stdout, one row each: its
+				// minimum speed and the x / z range of all the starts that clip at
+				// up to maxSpeed. Several separate regions: each on a row below.
+				printf("\nTRI %d -> %d, %s, speed up to %g\n", onlyPusher, onlyCrossed, v.form.c_str(), maxSpeed);
+				printf("  yaw      min speed    x range                  z range\n");
+				for (const Refined& r : rs) {
+					if (!r.found) { printf("  0x%04X   none\n", r.yaw); continue; }
+					double x0 = INFINITY, x1 = -INFINITY, z0 = INFINITY, z1 = -INFINITY;
+					for (const StartRegion& g : r.regions) {
+						x0 = std::min(x0, g.x0); x1 = std::max(x1, g.x1);
+						z0 = std::min(z0, g.z0); z1 = std::max(z1, g.z1);
+					}
+					printf("  0x%04X   %-11.7f  %10.4f .. %-10.4f  %10.4f .. %.4f\n", r.yaw, r.speed, x0, x1, z0, z1);
+					if (r.regions.size() > 1)
+						for (const StartRegion& g : r.regions)
+							printf("    region %-11.7f  %10.4f .. %-10.4f  %10.4f .. %.4f\n", g.speed, g.x0, g.x1, g.z0, g.z1);
+				}
+				// then a CSV per yaw that clips, <output>_<YAW>.csv (with the form
+				// too when there are several): a grid of round x (columns) and z
+				// (rows) values over its starts that clip, each Yes if Link
+				// standing exactly there clips at some speed up to maxSpeed, else No.
+				// And <output>_<YAW>_speeds.csv, the same grid with the speed to
+				// check each cell at in game (wall_clip_tester.lua CSV_TESTS): a
+				// Yes cell's lowest speed that clips, a No cell's maxSpeed.
+				const string base = path.size() > 5 && path.compare(path.size() - 5, 5, ".json") == 0 ? path.substr(0, path.size() - 5) : path;
+				auto writeGrid = [](const string& file, const YawGrid& G, const std::function<string(size_t)>& cell) {
+					FILE* cf = fopen(file.c_str(), "w");
+					if (!cf) return false;
+					fprintf(cf, "z \\ x");
+					for (double x : G.xs) fprintf(cf, ",%.*f", G.xDecimals, x);
+					fprintf(cf, "\n");
+					for (size_t zi = 0; zi < G.zs.size(); zi++) {
+						fprintf(cf, "%.*f", G.zDecimals, G.zs[zi]);
+						for (size_t xi = 0; xi < G.xs.size(); xi++) fprintf(cf, ",%s", cell(zi * G.xs.size() + xi).c_str());
+						fprintf(cf, "\n");
+					}
+					bool bad = ferror(cf) != 0;
+					return fclose(cf) == 0 && !bad;
+				};
+				for (const Refined& r : rs) {
+					if (!r.found) continue;
+					char yawName[8];
+					snprintf(yawName, sizeof yawName, "%04X", r.yaw);
+					const string csvBase = base + (variants.size() > 1 ? "_" + safeName(v.form) : "") + "_" + yawName;
+					const YawGrid& G = r.grid;
+					if (!writeGrid(csvBase + ".csv", G, [&](size_t i) { return string(G.ok[i] ? "Yes" : "No"); })) {
+						fprintf(stderr, "can't write %s.csv - stopping\n", csvBase.c_str());
+						return 1;
+					}
+					if (!writeGrid(csvBase + "_speeds.csv", G, [&](size_t i) {
+						char b[40];
+						snprintf(b, sizeof b, "%.9g", G.ok[i] ? G.speed[i] : F(gridSpeed > 0 ? gridSpeed : maxSpeed));
+						return string(b);
+					})) {
+						fprintf(stderr, "can't write %s_speeds.csv - stopping\n", csvBase.c_str());
+						return 1;
+					}
+					csvPaths.push_back(csvBase + ".csv");
+				}
+				found = std::move(atYaws);
+			}
+			else if (minSpeed && !found.empty()) {
 				findMinSpeeds(m, found, threads);
 				if (refine) {
 					if (onlyPusher < 0) { fprintf(stderr, "--refine needs --pair PUSHER,CROSSED\n"); return 2; }
@@ -299,6 +424,11 @@ int main(int argc, char** argv) {
 			return 1;
 		}
 		fprintf(stderr, "  wrote %s\n", path.c_str());
+		if (!csvPaths.empty()) {
+			// (on stdout too, after the table)
+			printf("\nA grid of the positions that clip, per yaw:\n");
+			for (const string& c : csvPaths) { printf("  %s\n", c.c_str()); fprintf(stderr, "  wrote %s\n", c.c_str()); }
+		}
 	}
 	return failures ? 1 : 0;
 }

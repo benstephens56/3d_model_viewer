@@ -390,14 +390,17 @@ class CollisionModel {
     }
 
     // Where Link comes to rest standing at `pos`: the wall pushes applied until
-    // they stop moving him (at most 4 frames), or null if they don't settle.
+    // they stop moving him (at most 8 frames), or null if they don't settle.
     // (Standing still, posNext is GROUND_DROP below his feet every frame, so
     // that's the height the pushes run at: it matters for leaning walls.)
+    // Still means not moved at all: the game does push him the last
+    // thousandths (out to exactly the radius from a wall's stored plane), so
+    // pushes under 0.01 don't count as still (tools/clipfinder does the same).
     restingSpot(pos) {
         let cur = pos;
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 8; i++) {
             const next = this.sphereStep({ x: cur.x, y: F(pos.y - GROUND_DROP), z: cur.z }, LOOSE, null);
-            if (Math.abs(next.x - cur.x) <= 0.01 && Math.abs(next.z - cur.z) <= 0.01) return cur;
+            if (next.x === cur.x && next.z === cur.z) return cur;
             cur = { x: next.x, y: pos.y, z: next.z };
         }
         return null;

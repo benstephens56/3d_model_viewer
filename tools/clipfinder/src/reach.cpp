@@ -80,10 +80,16 @@ static std::optional<ClipResult> walkFrameClips(const Model& m, Scratch& s, cons
 
 // Clips at this speed and at every 0.0025 up to 0.01 more: not a single-f32
 // coincidence (e.g. posNext landing exactly on a wall's plane, which the
-// one-face line test then counts from behind)
-static bool robustClip(const Model& m, Scratch& s, const V3& S, int yaw, double sp, int pusher, int crossed) {
-	for (int k = 0; k <= 4; k++)
-		if (!walkFrameClips(m, s, S, yaw, F(sp + k * 0.0025), pusher, crossed)) return false;
+// one-face line test then counts from behind). Speeds over `top` (the most
+// allowed) aren't checked: a clip that works from a speed up to the top but
+// stops a little past it (MM Treasure Chest Shop Deku 50 -> 90 at 0xFED0,
+// x -239.5883 z 824.1: 9.938 to 9.950, top 9.94054) still counts.
+static bool robustClip(const Model& m, Scratch& s, const V3& S, int yaw, double sp, int pusher, int crossed, double top) {
+	for (int k = 0; k <= 4; k++) {
+		const double v = F(sp + k * 0.0025);
+		if (k > 0 && v > top) break;
+		if (!walkFrameClips(m, s, S, yaw, v, pusher, crossed)) return false;
+	}
 	return true;
 }
 
@@ -92,9 +98,14 @@ static bool robustClip(const Model& m, Scratch& s, const V3& S, int yaw, double 
 static double minSpeedAtYaw(const Model& m, Scratch& s, const V3& S, int yaw, int pusher, int crossed,
 	double lower, double limit) {
 	double prevFail = std::max(0.0, lower - 0.02);
-	for (double sp = std::max(0.02, lower); sp < limit; sp += 0.02) {
+	// (the last try is the top speed itself, the f32 just under limit: a
+	// start whose lowest speed is between the last 0.02 step and limit used
+	// to count as not clipping at all)
+	const double top = std::nextafter((float)limit, 0.0f);
+	for (double sp = std::max(0.02, lower); prevFail < top; sp += 0.02) {
+		if (sp >= limit) sp = top;
 		// (the plain check first: most speeds don't clip at all)
-		if (!walkFrameClips(m, s, S, yaw, F(sp), pusher, crossed) || !robustClip(m, s, S, yaw, F(sp), pusher, crossed)) {
+		if (!walkFrameClips(m, s, S, yaw, F(sp), pusher, crossed) || !robustClip(m, s, S, yaw, F(sp), pusher, crossed, top)) {
 			prevFail = sp;
 			continue;
 		}
@@ -102,7 +113,7 @@ static double minSpeedAtYaw(const Model& m, Scratch& s, const V3& S, int yaw, in
 		for (int k = 0; k < 40; k++) {
 			double mid = F((a + b) / 2);
 			if (mid <= a || mid >= b) break;
-			if (robustClip(m, s, S, yaw, mid, pusher, crossed)) b = mid; else a = mid;
+			if (robustClip(m, s, S, yaw, mid, pusher, crossed, top)) b = mid; else a = mid;
 		}
 		return b;
 	}
@@ -343,4 +354,364 @@ std::optional<Clip> refinedClip(const Model& m, const Refined& r, int pusher, in
 		return c;
 	}
 	return std::nullopt;
+}
+
+// --yaw / --max-speed: the lowest speed up to maxSpeed that does this wall
+// pair's clip moving at exactly `yaw`, from any standable in-bounds start.
+// Starts: behind each walking clip point of the pair along the yaw (up to
+// maxSpeed * 1.5 back, 3 either side), every sideStep across the yaw and 0.5
+// along it, each where Link comes to rest there. A start is tried from the speed
+// that takes it to within 3 of the nearest clip point ahead (none: skipped).
+Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int crossed, int yaw, double maxSpeed, double sideStep, bool exact, double gridSpeed, int threads) {
+	Refined best;
+	yaw &= 0xFFFF;
+	const V3 unit = moveStep({ 0, 0, 0 }, yaw, 1 / SPEED_RATE);  // (sine table direction)
+	const double len = std::hypot(unit.x, unit.z);
+	const double dx = unit.x / len, dz = unit.z / len;
+	struct Target { V3 p; double floorY; };
+	vector<Target> targets;
+	for (const Clip& c : clips) if (c.drop == 0) targets.push_back({ c.from, c.hasFloorY ? c.floorY : c.from.y });
+	if (targets.empty()) return best;
+	const double back = maxSpeed * SPEED_RATE + 1;
+	// the points (x, z, floor) behind the clip points: every sideStep across
+	// the yaw (--side-step, default 0.002), every ALONG_STEP along it (the
+	// speed search covers along). Across has to be fine: a clip can need a
+	// start pressed against a wall within a few thousandths (MM Treasure Chest
+	// Shop Deku TRI 50 -> 90 at 0xFFC0 works from x -239.9325 but not -239.935
+	// or -239.9).
+	const double ALONG_STEP = 0.5, SIDE = 3;
+	const int sideN = (int)std::floor(SIDE / sideStep + 1e-9);
+	// (the same point from two clip points: once, on a grid of half the step)
+	const double keyScale = 2 / sideStep;
+	vector<std::array<double, 3>> raw;
+	{
+		std::unordered_set<uint64_t> seen;
+		for (const Target& t : targets)
+			for (double d = 0; d <= back; d += ALONG_STEP)
+				for (int li = -sideN; li <= sideN; li++) {
+					const double l = li * sideStep;
+					double x = F(t.p.x - d * dx + l * dz), z = F(t.p.z - d * dz - l * dx);
+					uint64_t key = ((uint64_t)(uint32_t)(int32_t)std::llround(x * keyScale) << 32) ^ (uint32_t)(int32_t)std::llround(z * keyScale)
+						^ ((uint64_t)(uint32_t)(int32_t)std::llround(t.floorY) * 0x9E3779B97F4A7C15ull);
+					if (seen.insert(key).second) raw.push_back({ x, z, t.floorY });
+				}
+	}
+	// The lowest speed a start could clip at: the one that takes it to within 3
+	// of the nearest clip point ahead, within the push's reach to the side.
+	// None (no clip point ahead, or it's over maxSpeed): the start can't do it.
+	auto lowerOf = [&](const V3& st) -> std::optional<double> {
+		double ahead = 1e9;
+		for (const Target& t : targets) {
+			double vx = t.p.x - st.x, vz = t.p.z - st.z;
+			double along = vx * dx + vz * dz, side = std::fabs(vx * dz - vz * dx);
+			if (along > -2 && side <= SIDE + 1) ahead = std::min(ahead, along);
+		}
+		if (ahead == 1e9) return std::nullopt;
+		double lower = std::max(0.0, (ahead - 3) / SPEED_RATE);
+		if (lower > maxSpeed) return std::nullopt;
+		return lower;
+	};
+	// where Link rests from each, in bounds, with its lowest possible speed
+	vector<std::pair<double, V3>> starts;
+	{
+		std::mutex mu;
+		std::set<std::tuple<float, float, float>> seen;
+		std::atomic<size_t> next{ 0 };
+		auto work = [&]() {
+			Scratch s;
+			s.stamp.assign(m.polys.size(), 0);
+			for (size_t i; (i = next++) < raw.size();) {
+				auto st = standSpot(m, raw[i][0], raw[i][1], raw[i][2]);
+				if (!st) continue;
+				auto lower = lowerOf(*st);
+				if (!lower) continue;
+				{
+					std::lock_guard<std::mutex> g(mu);
+					if (!seen.insert({ (float)st->x, (float)st->y, (float)st->z }).second) continue;
+				}
+				if (!m.isInBounds(s, *st)) continue;
+				std::lock_guard<std::mutex> g(mu);
+				starts.push_back({ *lower, *st });
+			}
+		};
+		vector<std::thread> ts;
+		for (int t = 0; t < threads; t++) ts.emplace_back(work);
+		for (auto& t : ts) t.join();
+	}
+	std::sort(starts.begin(), starts.end(), [](const auto& a, const auto& b) {
+		return a.first != b.first ? a.first < b.first : std::tie(a.second.x, a.second.z) < std::tie(b.second.x, b.second.z);
+	});
+	best.starts = (int)starts.size();
+	best.yaw = yaw;
+	best.speed = maxSpeed;
+	// every start's lowest speed up to maxSpeed (0: none), for the regions
+	vector<double> speeds(starts.size(), 0);
+	const double limit = F(maxSpeed) + 1e-6;
+	{
+		std::atomic<size_t> next{ 0 }, done{ 0 };
+		auto work = [&]() {
+			Scratch s;
+			s.stamp.assign(m.polys.size(), 0);
+			for (size_t i; (i = next++) < starts.size();) {
+				size_t d = ++done;
+				if (d % 256 == 0 || d == starts.size()) fprintf(stderr, "\r  yaw 0x%04X: start %zu / %zu   ", yaw, d, starts.size());
+				double sp = minSpeedAtYaw(m, s, starts[i].second, yaw, pusher, crossed, starts[i].first, limit);
+				if (sp > 0 && sp <= F(maxSpeed)) speeds[i] = sp;
+			}
+		};
+		vector<std::thread> ts;
+		for (int t = 0; t < threads; t++) ts.emplace_back(work);
+		for (auto& t : ts) t.join();
+		fprintf(stderr, "\n");
+	}
+	vector<std::pair<V3, double>> working;
+	for (size_t i = 0; i < starts.size(); i++) if (speeds[i] > 0) working.push_back({ starts[i].second, speeds[i] });
+	// The starts that clip, grouped: linked if within REGION_LINK in x / z
+	// (a little over the 0.5 sampled along the yaw) and 1 in y. Slowest first,
+	// each one's starts in order along its longer side.
+	auto groupRegions = [](const vector<std::pair<V3, double>>& pts) {
+		const double REGION_LINK = 0.75;
+		vector<size_t> parent(pts.size());
+		for (size_t i = 0; i < pts.size(); i++) parent[i] = i;
+		// (a loop, with path halving: --exact makes tens of thousands of points,
+		// too deep a chain to recurse down)
+		auto root = [&](size_t i) {
+			while (parent[i] != i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+			return i;
+		};
+		// Cells half REGION_LINK wide and 1 high: any two points in one cell are
+		// linked (at most 0.53 apart), so a cell is joined without comparing.
+		// Cells up to 2 apart (x, z) and 1 (y) can hold linked points: compared
+		// until one pair links, skipped if already joined. (--exact packs tens
+		// of thousands of points into one small patch: comparing every pair in
+		// a cell took minutes.)
+		const double H = REGION_LINK / 2;
+		using Cell = std::tuple<int64_t, int64_t, int64_t>;
+		std::map<Cell, vector<size_t>> cells;
+		for (size_t i = 0; i < pts.size(); i++) {
+			const V3& p = pts[i].first;
+			cells[{ (int64_t)std::floor(p.x / H), (int64_t)std::floor(p.z / H), (int64_t)std::floor(p.y) }].push_back(i);
+		}
+		for (auto& [c, list] : cells)
+			for (size_t k = 1; k < list.size(); k++) parent[root(list[k])] = root(list[0]);
+		for (auto& [c, list] : cells) {
+			auto [cx, cz, cy] = c;
+			for (int64_t ax = cx - 2; ax <= cx + 2; ax++)
+				for (int64_t az = cz - 2; az <= cz + 2; az++)
+					for (int64_t ay = cy - 1; ay <= cy + 1; ay++) {
+						const Cell o{ ax, az, ay };
+						if (!(c < o)) continue;  // (each pair of cells once)
+						auto it = cells.find(o);
+						if (it == cells.end() || root(list[0]) == root(it->second[0])) continue;
+						bool linked = false;
+						for (size_t i : list) {
+							const V3& p = pts[i].first;
+							for (size_t j : it->second) {
+								const V3& q = pts[j].first;
+								if (std::hypot(p.x - q.x, p.z - q.z) <= REGION_LINK && std::fabs(p.y - q.y) <= 1) { linked = true; break; }
+							}
+							if (linked) break;
+						}
+						if (linked) parent[root(list[0])] = root(it->second[0]);
+					}
+		}
+		std::map<size_t, StartRegion> groups;
+		for (size_t i = 0; i < pts.size(); i++) {
+			const V3& p = pts[i].first;
+			const double sp = pts[i].second;
+			auto [it, fresh] = groups.try_emplace(root(i), StartRegion{ p.x, p.x, p.z, p.z, 0, sp, p, {} });
+			StartRegion& g = it->second;
+			g.pts.push_back({ p, sp });
+			g.x0 = std::min(g.x0, p.x); g.x1 = std::max(g.x1, p.x);
+			g.z0 = std::min(g.z0, p.z); g.z1 = std::max(g.z1, p.z);
+			g.n++;
+			if (sp < g.speed || (sp == g.speed && std::tie(p.x, p.z) < std::tie(g.start.x, g.start.z))) { g.speed = sp; g.start = p; }
+		}
+		vector<StartRegion> out;
+		for (auto& [k, g] : groups) {
+			const bool alongZ = g.z1 - g.z0 >= g.x1 - g.x0;
+			std::sort(g.pts.begin(), g.pts.end(), [&](const auto& a, const auto& b) {
+				return alongZ ? std::tie(a.first.z, a.first.x) < std::tie(b.first.z, b.first.x) : std::tie(a.first.x, a.first.z) < std::tie(b.first.x, b.first.z);
+			});
+			out.push_back(std::move(g));
+		}
+		std::sort(out.begin(), out.end(), [](const StartRegion& a, const StartRegion& b) {
+			return a.speed != b.speed ? a.speed < b.speed : std::tie(a.start.x, a.start.z) < std::tie(b.start.x, b.start.z);
+		});
+		return out;
+	};
+	best.regions = groupRegions(working);
+	// --exact: every f32 x and z around each region, where Link stands still
+	// (his resting spot is that very point) and in bounds, tried like the
+	// starts above. The box starts as the region's, one sideStep bigger each
+	// way, and grows until nothing that works is within a sideStep of its
+	// edge (each time only the new strip is tried). The regions are then made
+	// again from what works. A region over EXACT_MAX points is left as sampled.
+	if (exact && !best.regions.empty()) {
+		const double EXACT_MAX = 50e6;
+		auto t0 = std::chrono::steady_clock::now();
+		auto f32s = [](double a, double b) {
+			vector<double> v;
+			for (float x = (float)a; x <= (float)b; x = std::nextafter(x, INFINITY)) v.push_back(x);
+			return v;
+		};
+		std::mutex mu;
+		std::set<std::pair<float, float>> seen;
+		vector<std::pair<V3, double>> exactPts;
+		double tried = 0;
+		for (const StartRegion& g : best.regions) {
+			// tried box B (empty at first), box to try T, what works's box W
+			double bx0 = INFINITY, bx1 = -INFINITY, bz0 = INFINITY, bz1 = -INFINITY;
+			double wx0 = g.x0, wx1 = g.x1, wz0 = g.z0, wz1 = g.z1;
+			double regionTried = 0;
+			bool capped = false;
+			while (true) {
+				const double tx0 = std::min(bx0, wx0 - sideStep), tx1 = std::max(bx1, wx1 + sideStep);
+				const double tz0 = std::min(bz0, wz0 - sideStep), tz1 = std::max(bz1, wz1 + sideStep);
+				if (tx0 >= bx0 && tx1 <= bx1 && tz0 >= bz0 && tz1 <= bz1) break;
+				const vector<double> xs = f32s(tx0, tx1), zs = f32s(tz0, tz1);
+				if (regionTried + (double)xs.size() * zs.size() > EXACT_MAX) { capped = true; break; }
+				// one z row per work item; rows inside B only try the x outside it
+				std::atomic<size_t> next{ 0 };
+				std::atomic<size_t> count{ 0 };
+				auto work = [&]() {
+					Scratch s;
+					s.stamp.assign(m.polys.size(), 0);
+					for (size_t zi; (zi = next++) < zs.size();) {
+						const double z = zs[zi];
+						const bool rowInB = z >= bz0 && z <= bz1;
+						for (double x : xs) {
+							if (rowInB && x >= bx0 && x <= bx1) continue;
+							count++;
+							auto st = standSpot(m, x, z, g.start.y);
+							if (!st || st->x != x || st->z != z) continue;
+							auto lower = lowerOf(*st);
+							if (!lower || !m.isInBounds(s, *st)) continue;
+							double sp = minSpeedAtYaw(m, s, *st, yaw, pusher, crossed, *lower, limit);
+							if (!(sp > 0 && sp <= F(maxSpeed))) continue;
+							std::lock_guard<std::mutex> lk(mu);
+							wx0 = std::min(wx0, x); wx1 = std::max(wx1, x);
+							wz0 = std::min(wz0, z); wz1 = std::max(wz1, z);
+							if (seen.insert({ (float)x, (float)z }).second) exactPts.push_back({ *st, sp });
+						}
+					}
+				};
+				vector<std::thread> ts;
+				for (int t = 0; t < threads; t++) ts.emplace_back(work);
+				for (auto& t : ts) t.join();
+				regionTried += count;
+				fprintf(stderr, "\r  yaw 0x%04X --exact: %.0f f32 points tried   ", yaw, tried + regionTried);
+				bx0 = tx0; bx1 = tx1; bz0 = tz0; bz1 = tz1;
+			}
+			tried += regionTried;
+			if (capped) {
+				fprintf(stderr, "\n  yaw 0x%04X --exact: a region grew past %.0f f32 points; the rest of it is left as sampled\n", yaw, EXACT_MAX);
+				std::lock_guard<std::mutex> lk(mu);
+				for (const auto& p : g.pts) if (seen.insert({ (float)p.first.x, (float)p.first.z }).second) exactPts.push_back(p);
+			}
+		}
+		// (the same order whatever the threads did)
+		std::sort(exactPts.begin(), exactPts.end(), [](const auto& a, const auto& b) { return std::tie(a.first.x, a.first.z) < std::tie(b.first.x, b.first.z); });
+		fprintf(stderr, "\r  yaw 0x%04X --exact: %.0f f32 points tried, %zu work (%zu sampled) (%.1fs)\n", yaw, tried, exactPts.size(), working.size(),
+			std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+		best.regions = groupRegions(exactPts);
+	}
+	if (!best.regions.empty()) {
+		best.found = true;
+		best.speed = best.regions[0].speed;
+		best.start = best.regions[0].start;
+	}
+	if (best.found) {
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		if (auto c = walkFrameClips(m, s, best.start, yaw, best.speed, pusher, crossed)) best.end = c->end;
+	}
+	// The grid for the CSV: about GRID_COLS x GRID_ROWS round steps (1, 2 or 5
+	// x a power of ten, no finer than the f32 spacing there) over the starts
+	// that clip, with a step more each side. Each point is tried as it is:
+	// Link standing exactly there (it has to be his resting spot, in bounds)
+	// clips at some speed up to maxSpeed. While an edge row or column has a
+	// Yes (the starts found don't cover it all: likely without --exact), that
+	// side grows by half the span and the grid is made again (points already
+	// tried aren't tried again), up to GRID_GROWS times.
+	if (best.found) {
+		const int GRID_COLS = 20, GRID_ROWS = 40, GRID_GROWS = 16;
+		double x0 = INFINITY, x1 = -INFINITY, z0 = INFINITY, z1 = -INFINITY;
+		const double y = best.start.y;
+		for (const StartRegion& g : best.regions) {
+			x0 = std::min(x0, g.x0); x1 = std::max(x1, g.x1);
+			z0 = std::min(z0, g.z0); z1 = std::max(z1, g.z1);
+		}
+		std::mutex mu;
+		std::map<std::pair<float, float>, double> tried;  // (f32 x, z) -> lowest speed that clips, 0 none
+		auto axis = [](double a, double b, int target, vector<double>& vals, int& decimals) {
+			const float big = (float)std::max(std::fabs(a), std::fabs(b));
+			const double ulp = (double)std::nextafter(big, INFINITY) - big;
+			const double raw = std::max((b - a) / target, ulp);
+			double p = std::pow(10.0, std::floor(std::log10(raw)));
+			double step = 0;
+			for (double mul : { 1.0, 2.0, 5.0, 10.0 }) if (mul * p >= raw * 0.999) { step = mul * p; break; }
+			decimals = std::max(0, (int)-std::floor(std::log10(step) + 1e-9));
+			const int64_t i0 = (int64_t)std::floor(a / step) - 1, i1 = (int64_t)std::ceil(b / step) + 1;
+			for (int64_t i = i0; i <= i1; i++) vals.push_back(i * step);
+		};
+		YawGrid& G = best.grid;
+		for (int grow = 0;; grow++) {
+			G = YawGrid();
+			axis(x0, x1, GRID_COLS, G.xs, G.xDecimals);
+			axis(z0, z1, GRID_ROWS, G.zs, G.zDecimals);
+			G.ok.assign(G.xs.size() * G.zs.size(), 0);
+			G.speed.assign(G.ok.size(), 0);
+			std::atomic<size_t> next{ 0 };
+			auto work = [&]() {
+				Scratch s;
+				s.stamp.assign(m.polys.size(), 0);
+				for (size_t i; (i = next++) < G.ok.size();) {
+					// (the value as typed in: the nearest f32 to the round number)
+					const double x = F(G.xs[i % G.xs.size()]), z = F(G.zs[i / G.xs.size()]);
+					{
+						std::lock_guard<std::mutex> lk(mu);
+						auto it = tried.find({ (float)x, (float)z });
+						if (it != tried.end()) { G.speed[i] = it->second; G.ok[i] = it->second > 0; continue; }
+					}
+					double ok = 0;
+					auto st = standSpot(m, x, z, y);
+					if (st && st->x == x && st->z == z && gridSpeed > 0) {
+						// --speed: that speed exactly, as the game would run it
+						if (m.isInBounds(s, *st) && walkFrameClips(m, s, *st, yaw, F(gridSpeed), pusher, crossed)) ok = F(gridSpeed);
+					} else if (st && st->x == x && st->z == z) {
+						auto lower = lowerOf(*st);
+						if (lower && m.isInBounds(s, *st)) {
+							double sp = minSpeedAtYaw(m, s, *st, yaw, pusher, crossed, *lower, limit);
+							if (sp > 0 && sp <= F(maxSpeed)) ok = sp;
+						}
+					}
+					G.speed[i] = ok;
+					G.ok[i] = ok > 0;
+					std::lock_guard<std::mutex> lk(mu);
+					tried[{ (float)x, (float)z }] = ok;
+				}
+			};
+			vector<std::thread> ts;
+			for (int t = 0; t < threads; t++) ts.emplace_back(work);
+			for (auto& t : ts) t.join();
+			// a Yes on an edge: grow that side
+			const size_t nx = G.xs.size(), nz = G.zs.size();
+			bool left = false, right = false, bottom = false, top = false;
+			for (size_t zi = 0; zi < nz; zi++) { left |= G.ok[zi * nx] != 0; right |= G.ok[zi * nx + nx - 1] != 0; }
+			for (size_t xi = 0; xi < nx; xi++) { bottom |= G.ok[xi] != 0; top |= G.ok[(nz - 1) * nx + xi] != 0; }
+			if (!(left || right || bottom || top)) break;
+			if (grow == GRID_GROWS) {
+				fprintf(stderr, "  yaw 0x%04X: the CSV's grid still has a Yes on its edge after growing %d times\n", yaw, GRID_GROWS);
+				break;
+			}
+			const double gx = std::max((G.xs.back() - G.xs.front()) / 2, G.xs[1] - G.xs[0]);
+			const double gz = std::max((G.zs.back() - G.zs.front()) / 2, G.zs[1] - G.zs[0]);
+			if (left) x0 = G.xs.front() - gx;
+			if (right) x1 = G.xs.back() + gx;
+			if (bottom) z0 = G.zs.front() - gz;
+			if (top) z1 = G.zs.back() + gz;
+		}
+	}
+	return best;
 }
