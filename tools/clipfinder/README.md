@@ -93,6 +93,8 @@ the radius, so scan each form you care about.
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
 | `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them). Needed for `--refine` / `--angles`. |
 | `--dyna FILE` | Add the dynapoly actors, from the viewer's **Export all dynapolys** (every map's, every setup; see **Dynapolys** below). A single map's `dynapoly-1` export (the old **Export dynapolys**) still works. Each map is scanned once per set of setups with the same dynapolys, and once without dynapolys if the file has none for it. Output files named by `--out-dir` get `_setup<N>[-<N>...]_dyna` added; with `-o` and several sets, `_setup...` goes before `.json`. |
+| `--no-slope` | Leave out the slope clips (see **Slope clips** below). |
+| `--slope-only` | Only the slope clips: the wall push scan is skipped. |
 | `--dyna-only` | With `--dyna`: only scan the wall pairs that have a dynapoly wall in them (pusher or clipped wall), and skip maps without dynapolys. Much faster; the static-only pairs are what a scan without `--dyna` finds, give or take the dynapolys' effect on them. |
 | `--setup N` | With `--dyna`: only the dynapolys of setup N. |
 
@@ -113,7 +115,7 @@ the radius, so scan each form you care about.
 
 | Option | Meaning |
 |---|---|
-| `--sim X,Y,Z,YAW,SPEED[,DROP]` | Run one frame and print each step. Link stands at (X, Y, Z) (feet) and moves at YAW (`0x1234` or decimal) with speedXZ SPEED. posNext is 7.5 below his feet (walking), or DROP below if given (falling). Prints: whether the start is in bounds and a resting spot, the line test and what it hits, every wall push, where he ends up, and whether that's a clip and out of bounds. Use it when a clip works in game but the scan disagrees, or the other way round. Nothing is written. |
+| `--sim X,Y,Z,YAW,SPEED[,DROP]` | Run one frame and print each step (a slope clip is reported too). SPEED as `15/7`: one frame of walking per speed at the same yaw, each ending with the floor check, then two frames standing still, printing where each one leaves Link and which wall he's behind; for slope clips. Link stands at (X, Y, Z) (feet) and moves at YAW (`0x1234` or decimal) with speedXZ SPEED. posNext is 7.5 below his feet (walking), or DROP below if given (falling). Prints: whether the start is in bounds and a resting spot, the line test and what it hits, every wall push, where he ends up, and whether that's a clip and out of bounds. Use it when a clip works in game but the scan disagrees, or the other way round. Nothing is written. |
 
 ### Output and running
 
@@ -135,7 +137,7 @@ the radius, so scan each form you care about.
   ],
   "clips": [
     {"form": "Human",
-     "kind": "acute" | "extended",         // the wall pair's category (below), the same for all its points
+     "kind": "acute" | "extended" | "slope", // the wall pair's category (below), the same for all its points
                                            // (files from before 2026-09-26: per point, and "low" for falling ones)
      "cross": true,                        // crossing (moving through the pusher's plane) vs standing point
      "drop": 0,                            // falling: how far below the floor posNext is (0 = walking)
@@ -147,6 +149,7 @@ the radius, so scan each form you care about.
      "end": [x, y, z],                     // after 2 more frames (out of bounds)
      "floorY": 0,
      "yaw": 65473, "speed": 9.8252573,     // the move from prev to next (s16 yaw, f32 speedXZ)
+     "speed2": 4,                          // slope clips: the next frame's speed (same yaw), if it needs one
      "yaws": [...],                        // crossings: the yaws that worked, of the 32 start directions tried for this point
      "reach": {"speed": ..., "yaw": ..., "start": [...]}  // --min-speed
     }
@@ -277,6 +280,40 @@ Not modelled: a running start. Every frame starts where Link stands still. A
 clip whose frame has to start where only a previous frame's move could have
 put him (e.g. still sliding along a wall that would push him away if he
 stopped) isn't found. The Ice Cavern red ice clip is one of these.
+
+## Slope clips
+
+`"kind": "slope"`. Walking, posNext is 7.5 below the floor Link starts on,
+wherever the move takes him, so the frame's wall check and line test run at
+checkHeight - 7.5 above his *start*. Walking up a steep slope into a wall
+whose bottom edge is higher than that, nothing stops him: he moves past the
+wall's plane, and the floor check (from prevPos.y + 50) puts him on the
+higher floor there: the slope's own 1 unit tolerance past its edge, or a
+floor behind the wall. Now he's behind the wall at his check height.
+
+The next frame the wall pushes him back out if he's at most 4 behind it
+(`wallPush`). So standing still after that frame doesn't always work, and a
+second frame's move at the same yaw (`speed2`, the slowest of 1, 2, 3, ...
+that works) takes him further behind first. OoT Inside Jabu-Jabu's Belly,
+adult: stand at (-722, -338.6496, -4797.859), yaw 0xA617, speed 15, then
+speed 7 (4 is the slowest). The slope TRI 2632 runs up to TRI 2630, whose
+bottom is at y -320: the wall check runs at -320.15. Where there's a floor
+behind the wall more than 4 back, one frame does it on its own (OoT Hyrule
+Field: TRI 762 behind TRI 758).
+
+A clip's `pusher` is the floor that lifts Link and `crossed` the wall. The
+frame's own pushes and line test mustn't put him behind any wall (then it's
+an ordinary wall push clip). The scan goes along every wall's bottom edge,
+every unit. At each point it needs a floor just behind the wall that would
+put Link's check height on the wall, and a lower floor in front. It aims
+moves from standing starts in front to land 0.05 to 24 past the plane.
+`reach` is the move itself (the faster of the two speeds); `--min-speed`
+leaves it as it is.
+
+Not modelled: Link's own slope handling (sliding down a slope too steep to
+stand on, or slowing on one). `wall_clip_tester.lua` runs slope clips in
+"move" mode, writing `speed2` just after the first frame, and judges him
+after the second.
 
 ## Acute or extended
 

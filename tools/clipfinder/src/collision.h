@@ -191,8 +191,9 @@ struct Model {
 	// wall_push_clips.js floorCheck (BgCheck_RaycastFloorImpl, flags 0x1C):
 	// the highest static floor, or wall whose normal doesn't point down, under
 	// (x, z) and below y, stepping down a subdivision at a time.
-	std::optional<double> floorCheck(double x, double z, double y) const;
-	std::optional<double> staticFloorCheck(double x, double z, double y) const;
+	// poly: the floor found (its id), if not null.
+	std::optional<double> floorCheck(double x, double z, double y, int* poly = nullptr) const;
+	std::optional<double> staticFloorCheck(double x, double z, double y, int* poly = nullptr) const;
 	bool lineVsSphere(const BgActor& bg, const V3& a, const V3& b) const;
 
 	std::optional<V3> lineVsPoly(const Poly& p, const V3& a, const V3& b, double chkDist, bool oneFace) const;
@@ -223,6 +224,7 @@ struct Model {
 	bool behindPoly(const Poly& p, const V3& pos) const;
 
 	bool dynaPairsOnly = false; // --dyna-only: wall pairs with a dynapoly wall in them
+	bool slope = true, slopeOnly = false; // slope clips (--no-slope), and only them (--slope-only)
 
 	// "TRI 12", or "TRI 1300 (Obj_Tokei_Tobira dynapoly 3)" for a dynapoly
 	string polyName(int id) const {

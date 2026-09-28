@@ -403,7 +403,7 @@ local function testsFromJson(path)
 			T.tests[#T.tests + 1] = {
 				group = groupOf[gk], form = form, kind = kind, type = c.cross and "cross" or "stand",
 				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt,
-				yaw = c.speed and c.yaw or nil, speed = c.speed, expect = vec(c["end"]),
+				yaw = c.speed and c.yaw or nil, speed = c.speed, speed2 = c.speed2, expect = vec(c["end"]),
 			}
 			T.walls[c.pusher] = true
 			T.walls[c.crossed] = true
@@ -684,6 +684,11 @@ end
 local function runTest(t, mode)
 	memorysavestate.loadcorestate(base)
 	local r = { test = t }
+	-- Slope clips (kind "slope", clipfinder slope.h) are always "move": the
+	-- clip is the game's own floor check lifting Link after the move, and can
+	-- take a second frame's move (speed2). (A hook set for the other tests
+	-- does nothing: no test is pending.)
+	if t.kind == "slope" then mode = "move" end
 	if mode == "move" then
 		-- The way a manual setup that works in-game does it:
 		-- Link standing still at the start facing the test's yaw, then speedXZ
@@ -780,6 +785,25 @@ local function runTest(t, mode)
 		end
 		-- (the game frame ran in that emulated frame: `after` is right after it)
 		r.after = readVec(K.player + K.pos)
+		-- Slope clips with a second frame: its speed (the same yaw), written
+		-- now, before the next game frame, the same way as the first; `after`
+		-- is then after that frame (after the first, the wall is still
+		-- about to push him back out).
+		if t.speed2 then
+			if yaw then
+				mainmemory.write_s16_be(K.player + K.yaw, yaw)
+				mainmemory.write_s16_be(K.player + K.shapeRotY, yaw)
+			end
+			writefloat(K.player + K.speedXZ, t.speed2)
+			logLine("write speed2")
+			local frames1 = read_u32(K.play + K.gameplayFrames)
+			for i = 1, 9 do
+				emu.frameadvance()
+				logLine("2nd +" .. i)
+				if read_u32(K.play + K.gameplayFrames) ~= frames1 then break end
+			end
+			r.after = readVec(K.player + K.pos)
+		end
 		for _ = 1, 3 do emu.frameadvance() end
 		local later = readVec(K.player + K.pos)
 		logLine("+1 game frame")
@@ -839,13 +863,18 @@ end
 -- that start, yaw and speed, which is what the grid is about)
 local mode = T.csvGrids and "move" or MODE
 local first
+-- (the mode is tried on the first test that isn't a slope clip: those always
+-- run in "move" mode, so they'd pass any hook; all slope clips: "move")
+local probe = 1
+while queue[probe] and queue[probe].kind == "slope" do probe = probe + 1 end
+if not queue[probe] then probe = 1; mode = "move" end
 if mode == "auto" then
 	for _, m in ipairs({ "exec", "read", "move" }) do
 		if (m == "exec" and not a1Reg) or (m == "read" and not pcReg) then
 			print("  " .. m .. ": skipped (register not found)")
 		else
 			hook(m)
-			first = runTest(queue[1], m)
+			first = runTest(queue[probe], m)
 			if first.status ~= "hook" then
 				mode = m
 				break
@@ -858,7 +887,7 @@ if mode == "auto" then
 	if mode ~= "move" then hook(mode) end
 else
 	hook(mode)
-	first = runTest(queue[1], mode)
+	first = runTest(queue[probe], mode)
 	if first.status == "hook" then
 		cleanUp()
 		error(string.format("the %s hook never caught Link's bg check (callback ran %d times)", mode, calls))
@@ -875,7 +904,7 @@ for i, t in ipairs(queue) do
 	if RECORD and RECORD_ONE_PER_PAIR and pairDone[pairKey] and not t.csv then
 		skipped = skipped + 1
 	else
-		local r = i == 1 and first or runTest(t, mode)
+		local r = i == probe and first or runTest(t, mode)
 		results[#results + 1] = r
 		if t.csv then
 			-- (Link pushed off the start before the move frame: that start isn't
@@ -935,8 +964,9 @@ local function setupStr(r)
 			speed = speed or math.sqrt(dx * dx + dz * dz) / 1.5
 		end
 	end
-	return string.format("start %s  angle %s  speedXZ %s", fmt(r.start or t.prev),
-		yaw and string.format("0x%04X", yaw % 0x10000) or "-", speed and string.format("%.9g", speed) or "-")
+	return string.format("start %s  angle %s  speedXZ %s%s", fmt(r.start or t.prev),
+		yaw and string.format("0x%04X", yaw % 0x10000) or "-", speed and string.format("%.9g", speed) or "-",
+		t.speed2 and string.format(" then %.9g", t.speed2) or "")
 end
 
 -- CSV_TESTS: per grid, how many cells came out as the CSV says, each

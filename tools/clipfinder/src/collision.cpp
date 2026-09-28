@@ -253,8 +253,8 @@ std::optional<V3> Model::restingSpot(const V3& pos) const {
 	return std::nullopt;
 }
 
-std::optional<double> Model::floorCheck(double x, double z, double y) const {
-	auto best = staticFloorCheck(x, z, y);
+std::optional<double> Model::floorCheck(double x, double z, double y, int* poly) const {
+	auto best = staticFloorCheck(x, z, y, poly);
 	if (bgActors.empty()) return best;
 	// BgCheck_RaycastFloorDyna: each bg actor whose minY is under y and whose
 	// bounding sphere takes (x, z) top down: its floors (detMax 300), then -
@@ -270,7 +270,7 @@ std::optional<double> Model::floorCheck(double x, double z, double y) const {
 				if (walls && p.sy < 0) continue;
 				if (isZero(p.ny) || !triChkY(p, z, x, 300, 1)) continue;
 				double yi = F(F(F(F(-p.nx * x) - F(p.nz * z)) - p.dist) / p.ny);
-				if (yi < y && (!best || *best < yi)) best = yi;
+				if (yi < y && (!best || *best < yi)) { best = yi; if (poly) *poly = id; }
 			}
 		};
 		scan(bg.floors, false);
@@ -279,7 +279,7 @@ std::optional<double> Model::floorCheck(double x, double z, double y) const {
 	return best;
 }
 
-std::optional<double> Model::staticFloorCheck(double x, double z, double y) const {
+std::optional<double> Model::staticFloorCheck(double x, double z, double y, int* poly) const {
 	const double* mn = colCtx.minB;
 	const double* mx = colCtx.maxB;
 	if (x < mn[0] || x > mx[0] || z < mn[2] || z > mx[2]) return std::nullopt;
@@ -294,7 +294,7 @@ std::optional<double> Model::staticFloorCheck(double x, double z, double y) cons
 				if (walls && p.sy < 0) continue;
 				if (isZero(p.ny) || !triChkY(p, z, x, 0, 1)) continue;
 				double yi = F(F(F(F(-p.nx * x) - F(p.nz * z)) - p.dist) / p.ny);
-				if (yi < y && (!best || yi > *best)) best = yi;
+				if (yi < y && (!best || yi > *best)) { best = yi; if (poly) *poly = id; }
 			}
 		};
 		scan(cellFloorsL[idx], false);

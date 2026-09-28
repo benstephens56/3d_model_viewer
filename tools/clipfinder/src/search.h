@@ -6,7 +6,8 @@
 struct Clip {
 	// The wall pair's category, the same for all its points (walking and
 	// falling): 0 acute if any of the pair's points is an acutePoint, else 1
-	// extended. Set at the end of the scan.
+	// extended. Set at the end of the scan. 2: a slope clip (slope.h), whose
+	// pusher is the floor that lifts Link behind the wall.
 	int kind = 1;
 	// This point on its own clips without the extended planes, pushed from in
 	// front of the pusher's face (pushOnFace)
@@ -22,6 +23,7 @@ struct Clip {
 	int yaw = 0;          // crossings and standing points: the exact move (s16 yaw, f32 speed)
 	bool hasMove = false;
 	double speed = 0;
+	double speed2 = 0;    // slope clips: a second frame's speed (same yaw) before standing still, 0 none
 	// --min-speed: the slowest move from a standable start that does it
 	// (reachability below); reachDone and no reach = none found
 	bool reachDone = false, hasReach = false;

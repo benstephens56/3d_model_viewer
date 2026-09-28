@@ -15,6 +15,7 @@
 //   dyna.h/.cpp      --dyna: the viewer's dynapoly export, added to the Model
 //   frame.h/.cpp     one frame: does it clip; where Link can stand; --max-move
 //   search.h/.cpp    the scan over a whole map
+//   slope.h/.cpp     slope clips: the floor check lifting Link behind a wall
 //   reach.h/.cpp     --min-speed, --refine, --angles, --yaw
 //   output.h/.cpp    the results JSON
 //   sim.h/.cpp       --sim
@@ -85,7 +86,7 @@ static string safeName(const string& s) {
 
 int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root, after, dynaPath;
-	bool dynaOnly = false;
+	bool dynaOnly = false, noSlope = false, slopeOnly = false;
 	int onlySetup = -1;  // --setup N: just the dynapolys of that setup
 	double radius = 0;
 	bool falling = false, all = false, extendedOnly = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
@@ -145,6 +146,8 @@ int main(int argc, char** argv) {
 		else if (a == "--sim") simArg = val();
 		else if (a == "--dyna") dynaPath = val();
 		else if (a == "--dyna-only") dynaOnly = true;
+		else if (a == "--no-slope") noSlope = true;
+		else if (a == "--slope-only") slopeOnly = true;
 		else if (a == "--setup") onlySetup = std::stoi(val());
 		else if (a == "--pair") {
 			string v = val();
@@ -163,6 +166,7 @@ int main(int argc, char** argv) {
 		else if (a == "--threads") threads = std::max(1, std::stoi(val()));
 		else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
 	}
+	if (noSlope && slopeOnly) { fprintf(stderr, "--no-slope and --slope-only can't go together\n"); return 2; }
 	if (exact && atYaw < 0) { fprintf(stderr, "--exact needs --yaw\n"); return 2; }
 	if (gridSpeed > 0 && atYaw < 0) { fprintf(stderr, "--speed needs --yaw\n"); return 2; }
 	// (--speed without --max-speed: the search for starts goes up to that speed)
@@ -181,9 +185,10 @@ int main(int argc, char** argv) {
 			"                  [--side-step D (with --yaw: starts every D across the yaw, default 0.002)]\n"
 			"                  [--exact (with --yaw: then every f32 x, z around each region found)]\n"
 			"                  [--speed S (with --yaw: the CSV grids at exactly speed S; stands in for --max-speed)]\n"
-			"                  [--sim X,Y,Z,YAW,SPEED[,DROP]]  (one frame from a standing start, printed step by step)\n"
+			"                  [--sim X,Y,Z,YAW,SPEED[,DROP]]  (one frame from a standing start, printed step by step; SPEED as 15/7: a frame per speed)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
 			"                  [--dyna FILE [--dyna-only] [--setup N]]  (the viewer's dynapoly export, one map's or every map's: the actors' collision too)\n"
+			"                  [--no-slope | --slope-only]  (slope clips: the floor check lifting Link behind a wall)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -363,6 +368,8 @@ int main(int argc, char** argv) {
 				m.build(tris, ch.numPolygons);
 				addDynaActors(m, dyna);
 				m.dynaPairsOnly = dynaOnly;
+				m.slope = !noSlope;
+				m.slopeOnly = slopeOnly;
 				if (!simArg.empty()) return runSim(m, simArg);
 				vector<Clip> found = scan(m, threads, firstPerPair);
 				// --pair: just the clips of that wall pair

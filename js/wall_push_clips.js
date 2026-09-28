@@ -63,6 +63,7 @@ const EXTENDED_COLOR = 0xff40ff;
 const LOW_ACUTE_COLOR = 0x3070ff;
 const LOW_EXTENDED_COLOR = 0x30e0ff;
 const LOW_COLOR = 0x30c8ff; // falling clips from older files, not split by category
+const SLOPE_COLOR = 0x40ff60; // slope clips (clipfinder slope.h)
 const PUSHER_COLOR = 0xffd000;
 
 const SNORMAL_FLOOR = Math.trunc(0.5 * 32767);   // COLPOLY_SNORMAL(0.5f)
@@ -908,6 +909,10 @@ function f32Str(v) {
 const fmt = p => `x ${f32Str(p.x)}, y ${f32Str(p.y)}, z ${f32Str(p.z)}`;
 const hex4 = n => "0x" + (n & 0xFFFF).toString(16).toUpperCase().padStart(4, "0");
 
+// A slope clip's reach is its own move from a standing start (clipfinder
+// slopeFrame): the faster of its two frames. reachability() doesn't model them.
+const slopeReach = c => ({ speed: Math.max(c.speed, c.speed2 ?? 0), yaw: c.yaw, start: c.prev });
+
 function describeReach(c) {
     if (c.reach === undefined) return `  reachability: tick "Reachable only" to work it out`;
     if (!c.reach) return `  not reachable from a standable start (at up to speed ${REACH_DIST / SPEED_RATE})`;
@@ -924,11 +929,12 @@ function describeClip(g, c, checkHeight) {
 const CAT_TITLES = {
     acute: "acute angle", extended: "extended plane only",
     "low-acute": "falling, acute angle", "low-extended": "falling, extended plane only", low: "falling",
+    slope: "slope",
 };
 
 // What the wall pair's category means (none for older files' falling clips).
 function pairLine(g) {
-    if (g.cat === "low") return [];
+    if (g.cat === "low" || g.cat === "slope") return [];
     return [g.cat.endsWith("acute")
         ? `  wall pair: acute angle (at least one of its points clips with the extended planes removed)`
         : `  wall pair: extended plane only (every point needs ${polyLabel(g.pusher)}'s extended plane: its 1 unit tolerance, or Link beside it, past its edge)`];
@@ -946,6 +952,20 @@ function describeClipLines(g, c, checkHeight) {
 function describeClipLinesBase(g, c, checkHeight) {
     const behind = -planeDist(g.crossed, c.end.x, F(c.from.y + checkHeight), c.end.z);
     const title = CAT_TITLES[g.cat];
+    if (g.cat === "slope") {
+        // (clipfinder slope.h: the wall check runs checkHeight - 7.5 above the
+        // floor Link starts on, under the wall; the floor check lifts him behind it)
+        const speed = v => f32Str(v).split(" ")[0];
+        return [
+            `SLOPE CLIP: walking up to ${polyLabel(g.crossed)}, the floor check lifts Link onto ${polyLabel(g.pusher)} behind it`,
+            `  stand still at ${fmt(c.prev)} (feet), move at yaw ${hex4(c.yaw)} with speed ${speed(c.speed)}`,
+            `  posNext ${fmt(c.next)}: the wall check (y ${f32Str(F(c.next.y + checkHeight)).split(" ")[0]}) is under ${polyLabel(g.crossed)}'s bottom there`,
+            `  the floor check puts him at ${fmt(c.res)}, behind ${polyLabel(g.crossed)}`,
+            ...(c.speed2 !== undefined ? [`  standing still, ${polyLabel(g.crossed)} pushes him back out: move again the next frame (same yaw), ` +
+                `e.g. at speed ${speed(c.speed2)}, the slowest that does (it pushes him out while he's at most 4 behind it)`] : []),
+            c.end.noFloor ? `  then no floor under him: falls out of bounds` : `  ends at: ${fmt(c.end)} (out of bounds)`,
+        ].join("\n");
+    }
     if (c.cross) {
         return [
             `WALL CROSSING CLIP (${title}): crossing ${polyLabel(g.pusher)} puts Link through ${polyLabel(g.crossed)}`,
@@ -1063,11 +1083,11 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
 const MODEL_NAMES = {
     acute: "Acute Angle Clips", extended: "Extended Plane Clips",
     "low-acute": "Low Wall Clips (falling, acute)", "low-extended": "Low Wall Clips (falling, extended)",
-    low: "Low Wall Clips (falling)",
+    low: "Low Wall Clips (falling)", slope: "Slope Clips",
 };
 const CAT_COLORS = {
     acute: ACUTE_COLOR, extended: EXTENDED_COLOR,
-    "low-acute": LOW_ACUTE_COLOR, "low-extended": LOW_EXTENDED_COLOR, low: LOW_COLOR,
+    "low-acute": LOW_ACUTE_COLOR, "low-extended": LOW_EXTENDED_COLOR, low: LOW_COLOR, slope: SLOPE_COLOR,
 };
 
 // The marker rows added (one per kind, or per kind and form for imported
@@ -1115,6 +1135,7 @@ function exportJson(groups, info) {
             if (c.floorY !== undefined) f.push(`"floorY":${num(c.floorY)}`);
             if (c.yaws) f.push(`"yaws":[${c.yaws.join(",")}]`);
             if (c.speed !== undefined) f.push(`"yaw":${c.yaw & 0xFFFF}`, `"speed":${num(c.speed)}`);
+            if (c.speed2 !== undefined) f.push(`"speed2":${num(c.speed2)}`);
             if (c.reach === null) f.push(`"reach":null`);
             else if (c.reach) f.push(`"reach":{"speed":${num(c.reach.speed)},"yaw":${c.reach.yaw & 0xFFFF},"start":${vec(c.reach.start)}}`);
             clips.push(`    {${f.join(",")}}`);
@@ -1270,7 +1291,7 @@ export function setupWallPushClipUI(scene) {
         const clips = last.groups.flatMap(g => g.clips);
         let lastYield = performance.now();
         for (let i = 0; i < clips.length; i++) {
-            if (clips[i].reach === undefined) clips[i].reach = reachability(clips[i].model, clips[i]);
+            if (clips[i].reach === undefined) clips[i].reach = clips[i].kind === "slope" ? slopeReach(clips[i]) : reachability(clips[i].model, clips[i]);
             if (performance.now() - lastYield > 30) {
                 status.textContent = `Checking reachability ${Math.floor((i + 1) / clips.length * 100)}%`;
                 await nextTask();
@@ -1317,7 +1338,8 @@ export function setupWallPushClipUI(scene) {
         const points = kind => byKind[kind].reduce((n, g) => n + g.clips.length, 0);
         const low = points("low-acute") + points("low-extended") + points("low");
         status.textContent = `${points("acute")} acute, ${points("extended")} extended-plane, ${low} low (falling` +
-            (points("low") ? "" : `: ${points("low-acute")} acute, ${points("low-extended")} extended`) + `) ` +
+            (points("low") ? "" : `: ${points("low-acute")} acute, ${points("low-extended")} extended`) + `)` +
+            (points("slope") ? `, ${points("slope")} slope` : "") + ` ` +
             `clip points${reachableChk.checked ? ` reachable at speed ${maxSpeed}` : ""} (${last.note})`;
         window.wallPushClips = shown;
     };
@@ -1441,6 +1463,7 @@ export function setupWallPushClipUI(scene) {
                 if (c.floorY !== undefined) clip.floorY = c.floorY;
                 if (c.yaws) clip.yaws = c.yaws;
                 if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
+                if (c.speed2 !== undefined) clip.speed2 = c.speed2;
                 // clipfinder --min-speed: the reachability already worked out
                 if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
                 clips.push(clip);
@@ -1452,6 +1475,8 @@ export function setupWallPushClipUI(scene) {
         // falling points of other pairs stay "low" (category not known)
         const acutePairs = new Set(clips.filter(c => c.kind === "acute").map(c => `${c.form}:${c.pusher.id}:${c.crossed.id}`));
         for (const c of clips) {
+            // (slope clips have their own row: clipfinder slope.h)
+            if (c.kind === "slope") { c.cat = "slope"; continue; }
             const acute = acutePairs.has(`${c.form}:${c.pusher.id}:${c.crossed.id}`);
             if (c.kind === "low") { if (acute) c.kind = "acute"; }
             else c.kind = acute ? "acute" : "extended";

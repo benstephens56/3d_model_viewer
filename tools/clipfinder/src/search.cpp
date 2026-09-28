@@ -1,4 +1,5 @@
 #include "search.h"
+#include "slope.h"
 
 ////////////////////////////////////////
 // Search
@@ -735,18 +736,58 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		}
 		fprintf(stderr, "  (dynapoly: %zu pairs with one dynapoly wall, %zu dynapoly with dynapoly)\n", one, both);
 	}
-	{
-		vector<std::thread> ts;
-		for (int i = 0; i < threads; i++) ts.emplace_back(worker1);
-		for (auto& t : ts) t.join();
+	// (--slope-only: just the slope clips below)
+	if (!m.slopeOnly) {
+		{
+			vector<std::thread> ts;
+			for (int i = 0; i < threads; i++) ts.emplace_back(worker1);
+			for (auto& t : ts) t.join();
+		}
+		fprintf(stderr, "\n  standing points: %.1fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+		{
+			vector<std::thread> ts;
+			for (int i = 0; i < threads; i++) ts.emplace_back(worker2);
+			for (auto& t : ts) t.join();
+		}
+		fprintf(stderr, "\n");
 	}
-	fprintf(stderr, "\n  standing points: %.1fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-	{
-		vector<std::thread> ts;
-		for (int i = 0; i < threads; i++) ts.emplace_back(worker2);
-		for (auto& t : ts) t.join();
+	// Slope clips (slope.h): every wall, along its bottom edge
+	vector<int> slopeWalls;
+	for (const Poly& p : m.polys) {
+		if (!p.exists || !p.isWall || !(p.nXZ > 0)) continue;
+		// --dyna-only: a static wall only near a dynapoly actor (its floor can be the lift)
+		if (m.dynaPairsOnly && p.bg < 0 && std::none_of(m.bgActors.begin(), m.bgActors.end(), [&](const BgActor& b) {
+			return b.cx + b.r >= p.minX - 50 && b.cx - b.r <= p.maxX + 50 && b.cz + b.r >= p.minZ - 50 && b.cz - b.r <= p.maxZ + 50;
+		})) continue;
+		if (m.slope) slopeWalls.push_back(p.id);
 	}
-	fprintf(stderr, "\n");
+	std::atomic<size_t> nextSlope{ 0 }, slopesDone{ 0 };
+	size_t slopeFound = 0;
+	auto worker3 = [&]() {
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		vector<Clip> local;
+		for (;;) {
+			size_t wi = nextSlope++;
+			if (wi >= slopeWalls.size()) break;
+			s.clearCache();
+			s.standSpots.clear();
+			slopeClipsForWall(m, s, m.polys[slopeWalls[wi]], pairFound, [&](const Clip& c) {
+				if (claimPair(c.pusher, c.crossed)) local.push_back(c);
+			});
+			progress("slope walls", ++slopesDone, slopeWalls.size());
+		}
+		std::lock_guard<std::mutex> g(outMu);
+		slopeFound += local.size();
+		clips.insert(clips.end(), local.begin(), local.end());
+	};
+	if (!slopeWalls.empty()) {
+		auto ts0 = std::chrono::steady_clock::now();
+		vector<std::thread> ts;
+		for (int i = 0; i < threads; i++) ts.emplace_back(worker3);
+		for (auto& t : ts) t.join();
+		fprintf(stderr, "\n  slope clips: %zu points (%.1fs)\n", slopeFound, std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count());
+	}
 	// Deterministic order: standing points first, then crossings, by position.
 	std::sort(clips.begin(), clips.end(), [](const Clip& a, const Clip& b) {
 		if (a.cross != b.cross) return !a.cross;
@@ -774,8 +815,8 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	}
 	// One category per wall pair: acute if any of its points is
 	std::set<std::pair<int, int>> acute;
-	for (const Clip& c : out) if (c.acutePoint) acute.insert({ c.pusher, c.crossed });
-	for (Clip& c : out) c.kind = acute.count({ c.pusher, c.crossed }) ? 0 : 1;
+	for (const Clip& c : out) if (c.acutePoint && c.kind != 2) acute.insert({ c.pusher, c.crossed });
+	for (Clip& c : out) if (c.kind != 2) c.kind = acute.count({ c.pusher, c.crossed }) ? 0 : 1;
 	double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 	fprintf(stderr, "  %zu clip points in %.1fs\n", out.size(), secs);
 	if (m.extendedOnly && !acutePairs.empty())

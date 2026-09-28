@@ -9,6 +9,8 @@
 // wall and end out of bounds - so the speed is one that works exactly.
 void reachability(const Model& m, Scratch& s, Clip& c) {
 	const double REACH_STEP = 1;
+	// a slope clip's move is its reach already (slopeFrame)
+	if (c.kind == 2) return;
 	c.reachDone = true;
 	const double floorRef = c.hasFloorY ? c.floorY : c.from.y;
 	const V3 P = c.from;
@@ -310,7 +312,7 @@ void findMinSpeeds(const Model& m, vector<Clip>& found, int threads) {
 		auto k = std::make_tuple(c.pusher, c.crossed, c.cross, c.drop > 0);
 		if (!best.count(k) || c.reachSpeed < best[k]->reachSpeed) best[k] = &c;
 	}
-	static const char* kinds[] = { "acute", "extended" };
+	static const char* kinds[] = { "acute", "extended", "slope" };
 	for (auto& [k, c] : best) {
 		fprintf(stderr, "  %s %s TRI %d -> %d: min speed %.4f  start %.3f, %.3f, %.3f  yaw 0x%04X  (clip point %.3f, %.3f, %.3f%s)\n",
 			kinds[c->kind], c->cross ? "cross" : "stand", c->pusher, c->crossed, c->reachSpeed,
