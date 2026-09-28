@@ -26,7 +26,14 @@ static void initPoly(Poly& p, int id, const int v[3][3], const int n[3], int d) 
 void Model::build(const vector<Tri>& tris, int numPolygons) {
 	polys.assign(numPolygons, Poly{});
 	numStatic = numPolygons;
-	for (const Tri& t : tris) initPoly(polys[t.id], t.id, t.v, t.n, t.d);
+	for (const Tri& t : tris) {
+		initPoly(polys[t.id], t.id, t.v, t.n, t.d);
+		// SurfaceType_GetExitIndex (>> 8 & 0x1F), SurfaceType_GetFloorProperty (>> 26 & 0xF)
+		const uint32_t exitIndex = t.surf0 >> 8 & 0x1F, floorProp = t.surf0 >> 26 & 0xF;
+		polys[t.id].loadOrVoid = exitIndex != 0 || floorProp == 5 || floorProp == 12 || floorProp == 13;
+		polys[t.id].exitIndex = (int)exitIndex;
+		polys[t.id].floorProp = (int)floorProp;
+	}
 	pairWalls = colCtx.subWalls;
 	auto sorted = [&](const vector<int>& ids, bool walls) {
 		vector<int> out;

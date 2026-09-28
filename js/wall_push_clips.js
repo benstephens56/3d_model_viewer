@@ -64,6 +64,7 @@ const LOW_ACUTE_COLOR = 0x3070ff;
 const LOW_EXTENDED_COLOR = 0x30e0ff;
 const LOW_COLOR = 0x30c8ff; // falling clips from older files, not split by category
 const SLOPE_COLOR = 0x40ff60; // slope clips (clipfinder slope.h)
+const GROUND_COLOR = 0xff9020; // ground clips (clipfinder ground.h)
 const PUSHER_COLOR = 0xffd000;
 
 const SNORMAL_FLOOR = Math.trunc(0.5 * 32767);   // COLPOLY_SNORMAL(0.5f)
@@ -920,8 +921,9 @@ function f32Str(v) {
 const fmt = p => `x ${f32Str(p.x)}, y ${f32Str(p.y)}, z ${f32Str(p.z)}`;
 const hex4 = n => "0x" + (n & 0xFFFF).toString(16).toUpperCase().padStart(4, "0");
 
-// A slope clip's reach is its own move from a standing start (clipfinder
-// slopeFrame): the faster of its two frames. reachability() doesn't model them.
+// A slope or ground clip's reach is its own move from a standing start
+// (clipfinder slopeFrame / groundFrame): the faster of its (slope: two)
+// frames. reachability() doesn't model them.
 const slopeReach = c => ({ speed: Math.max(c.speed, c.speed2 ?? 0), yaw: c.yaw, start: c.prev });
 
 function describeReach(c) {
@@ -940,12 +942,12 @@ function describeClip(g, c, checkHeight) {
 const CAT_TITLES = {
     acute: "acute angle", extended: "extended plane only",
     "low-acute": "falling, acute angle", "low-extended": "falling, extended plane only", low: "falling",
-    slope: "slope",
+    slope: "slope", ground: "ground",
 };
 
 // What the wall pair's category means (none for older files' falling clips).
 function pairLine(g) {
-    if (g.cat === "low" || g.cat === "slope") return [];
+    if (g.cat === "low" || g.cat === "slope" || g.cat === "ground") return [];
     return [g.cat.endsWith("acute")
         ? `  wall pair: acute angle (at least one of its points clips with the extended planes removed)`
         : `  wall pair: extended plane only (every point needs ${polyLabel(g.pusher)}'s extended plane: its 1 unit tolerance, or Link beside it, past its edge)`];
@@ -969,12 +971,26 @@ function describeClipLinesBase(g, c, checkHeight) {
         const speed = v => f32Str(v).split(" ")[0];
         return [
             `SLOPE CLIP: walking up to ${polyLabel(g.crossed)}, the floor check lifts Link onto ${polyLabel(g.pusher)} behind it`,
+            `  clipfinder: --pair ${g.pusher.id},${g.crossed.id} (the floor, then the wall)`,
             `  stand still at ${fmt(c.prev)} (feet), move at yaw ${hex4(c.yaw)} with speed ${speed(c.speed)}`,
             `  posNext ${fmt(c.next)}: the wall check (y ${f32Str(F(c.next.y + checkHeight)).split(" ")[0]}) is under ${polyLabel(g.crossed)}'s bottom there`,
             `  the floor check puts him at ${fmt(c.res)}, behind ${polyLabel(g.crossed)}`,
             ...(c.speed2 !== undefined ? [`  standing still, ${polyLabel(g.crossed)} pushes him back out: move again the next frame (same yaw), ` +
                 `e.g. at speed ${speed(c.speed2)}, the slowest that does (it pushes him out while he's at most 4 behind it)`] : []),
             c.end.noFloor ? `  then no floor under him: falls out of bounds` : `  ends at: ${fmt(c.end)} (out of bounds)`,
+        ].join("\n");
+    }
+    if (g.cat === "ground") {
+        // (clipfinder ground.h: falling fast, the wall check's line test runs
+        // at the feet and misses the floor Link starts on: under the wall)
+        const num = v => f32Str(v).split(" ")[0];
+        return [
+            `GROUND CLIP: falling from ${polyLabel(g.pusher)}, the line test at Link's feet misses it: through the ground, under ${polyLabel(g.crossed)}`,
+            `  clipfinder: --pair ${g.pusher.id},${g.crossed.id} (the floor, then the wall)`,
+            `  on the floor at ${fmt(c.prev)} (feet) with y velocity ${num(c.vy ?? -20)}, move at yaw ${hex4(c.yaw)} with speed ${num(c.speed)}`,
+            `  posNext ${fmt(c.next)}: the wall check (y ${num(F(c.next.y + checkHeight))}) is under ${polyLabel(g.crossed)}'s bottom there`,
+            `  after the frame: ${fmt(c.res)}`,
+            c.end.noFloor ? `  no floor under him: falls out of bounds` : `  ends at: ${fmt(c.end)} (out of bounds)`,
         ].join("\n");
     }
     if (c.cross) {
@@ -1016,6 +1032,17 @@ function describeClipLinesBase(g, c, checkHeight) {
     ].join("\n");
 }
 
+// "Points on top": the clip points and their lines drawn in front of
+// everything (no depth test), or hidden behind the scene like the rest.
+let markersOnTop = true;
+function applyMarkersOnTop(group) {
+    group.traverse(o => {
+        if (!o.userData.onTop) return;
+        o.material.depthTest = !markersOnTop;
+        o.material.needsUpdate = true;
+    });
+}
+
 function buildMarkerGroup(model, groups, color, checkHeight) {
     const group = new THREE.Group();
     if (groups.length === 0) return group;
@@ -1054,7 +1081,8 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
             // Walking, the frame's position is below the floor (GROUND_DROP):
             // drawn on the floor under it instead, the end moved up with it.
             let up = lift;
-            if (!(c.drop > 0) && c.floorY !== undefined) {
+            // (ground clips: posNext itself, under the ground)
+            if (!(c.drop > 0) && c.floorY !== undefined && g.cat !== "ground") {
                 const top = F(c.from.y + GROUND_DROP);
                 // (only a floor near his height: past the edge of a ledge the
                 // next one down can be far below)
@@ -1071,12 +1099,14 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
     startGeom.setAttribute("position", new THREE.Float32BufferAttribute(startLines, 3));
     const startObj = new THREE.LineSegments(startGeom, new THREE.LineBasicMaterial({ color: 0x60ff60, depthTest: false, transparent: true, opacity: 0.5 }));
     startObj.renderOrder = 998;
+    startObj.userData.onTop = true;
     startObj.userData.unselectable = true;
     group.add(startObj);
     const ptGeom = new THREE.BufferGeometry();
     ptGeom.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
     const points = new THREE.Points(ptGeom, new THREE.PointsMaterial({ color, size: 12, sizeAttenuation: false, depthTest: false }));
     points.renderOrder = 999;
+    points.userData.onTop = true;
     points.userData.unselectable = true;
     points.userData.clipSpots = spots;
     group.add(points);
@@ -1086,19 +1116,21 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
     const lineObj = new THREE.LineSegments(lineGeom, new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.8 }));
     lineObj.renderOrder = 999;
     lineObj.userData.unselectable = true;
+    lineObj.userData.onTop = true;
     group.add(lineObj);
 
+    applyMarkersOnTop(group);
     return group;
 }
 
 const MODEL_NAMES = {
     acute: "Acute Angle Clips", extended: "Extended Plane Clips",
     "low-acute": "Low Wall Clips (falling, acute)", "low-extended": "Low Wall Clips (falling, extended)",
-    low: "Low Wall Clips (falling)", slope: "Slope Clips",
+    low: "Low Wall Clips (falling)", slope: "Slope Clips", ground: "Ground Clips",
 };
 const CAT_COLORS = {
     acute: ACUTE_COLOR, extended: EXTENDED_COLOR,
-    "low-acute": LOW_ACUTE_COLOR, "low-extended": LOW_EXTENDED_COLOR, low: LOW_COLOR, slope: SLOPE_COLOR,
+    "low-acute": LOW_ACUTE_COLOR, "low-extended": LOW_EXTENDED_COLOR, low: LOW_COLOR, slope: SLOPE_COLOR, ground: GROUND_COLOR,
 };
 
 // The marker rows added (one per kind, or per kind and form for imported
@@ -1147,6 +1179,7 @@ function exportJson(groups, info) {
             if (c.yaws) f.push(`"yaws":[${c.yaws.join(",")}]`);
             if (c.speed !== undefined) f.push(`"yaw":${c.yaw & 0xFFFF}`, `"speed":${num(c.speed)}`);
             if (c.speed2 !== undefined) f.push(`"speed2":${num(c.speed2)}`);
+            if (c.vy !== undefined) f.push(`"vy":${num(c.vy)}`);
             if (c.reach === null) f.push(`"reach":null`);
             else if (c.reach) f.push(`"reach":{"speed":${num(c.reach.speed)},"yaw":${c.reach.yaw & 0xFFFF},"start":${vec(c.reach.start)}}`);
             clips.push(`    {${f.join(",")}}`);
@@ -1302,7 +1335,7 @@ export function setupWallPushClipUI(scene) {
         const clips = last.groups.flatMap(g => g.clips);
         let lastYield = performance.now();
         for (let i = 0; i < clips.length; i++) {
-            if (clips[i].reach === undefined) clips[i].reach = clips[i].kind === "slope" ? slopeReach(clips[i]) : reachability(clips[i].model, clips[i]);
+            if (clips[i].reach === undefined) clips[i].reach = clips[i].kind === "slope" || clips[i].kind === "ground" ? slopeReach(clips[i]) : reachability(clips[i].model, clips[i]);
             if (performance.now() - lastYield > 30) {
                 status.textContent = `Checking reachability ${Math.floor((i + 1) / clips.length * 100)}%`;
                 await nextTask();
@@ -1350,12 +1383,21 @@ export function setupWallPushClipUI(scene) {
         const low = points("low-acute") + points("low-extended") + points("low");
         status.textContent = `${points("acute")} acute, ${points("extended")} extended-plane, ${low} low (falling` +
             (points("low") ? "" : `: ${points("low-acute")} acute, ${points("low-extended")} extended`) + `)` +
-            (points("slope") ? `, ${points("slope")} slope` : "") + ` ` +
+            (points("slope") ? `, ${points("slope")} slope` : "") + (points("ground") ? `, ${points("ground")} ground` : "") + ` ` +
             `clip points${reachableChk.checked ? ` reachable at speed ${maxSpeed}` : ""} (${last.note})`;
         window.wallPushClips = shown;
     };
     reachableChk.addEventListener("change", render);
     maxSpeedInput.addEventListener("change", render);
+    // (remembered in this browser)
+    const onTopChk = document.getElementById("wallClipOnTop");
+    try { const v = localStorage.getItem("wallClipOnTop"); if (v !== null) onTopChk.checked = v === "1"; } catch (e) { }
+    markersOnTop = onTopChk.checked;
+    onTopChk.addEventListener("change", () => {
+        markersOnTop = onTopChk.checked;
+        try { localStorage.setItem("wallClipOnTop", markersOnTop ? "1" : "0"); } catch (e) { }
+        for (const m of loadedModels) if (markerNames.includes(m.name)) applyMarkersOnTop(m.mesh);
+    });
 
     document.getElementById("wallClipExport").addEventListener("click", () => {
         if (!last || !window.wallPushClips) {
@@ -1475,6 +1517,7 @@ export function setupWallPushClipUI(scene) {
                 if (c.yaws) clip.yaws = c.yaws;
                 if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
                 if (c.speed2 !== undefined) clip.speed2 = c.speed2;
+                if (c.vy !== undefined) clip.vy = c.vy;
                 // clipfinder --min-speed: the reachability already worked out
                 if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
                 clips.push(clip);
@@ -1487,7 +1530,8 @@ export function setupWallPushClipUI(scene) {
         const acutePairs = new Set(clips.filter(c => c.kind === "acute").map(c => `${c.form}:${c.pusher.id}:${c.crossed.id}`));
         for (const c of clips) {
             // (slope clips have their own row: clipfinder slope.h)
-            if (c.kind === "slope") { c.cat = "slope"; continue; }
+            // (and ground clips: clipfinder ground.h)
+            if (c.kind === "slope" || c.kind === "ground") { c.cat = c.kind; continue; }
             const acute = acutePairs.has(`${c.form}:${c.pusher.id}:${c.crossed.id}`);
             if (c.kind === "low") { if (acute) c.kind = "acute"; }
             else c.kind = acute ? "acute" : "extended";
@@ -1607,12 +1651,37 @@ export function setupWallPushClipUI(scene) {
             files.push({ name, data });
         }
         if (otherSetups.length) console.log(`Auto-import: other setups' dynapoly scans left out: ${otherSetups.join(", ")}`);
+        // OoT: only the forms that play in this setup (clipfinder's formSetups):
+        // child (and crawling) setups 0 / 1, adult 2 / 3, a setup the scene
+        // doesn't have as the game resolves it (Scene_CommandAlternateHeaderList:
+        // adult night falls back to adult day, anything else to 0). Cutscene
+        // setups (4+): every form.
+        let formNote = "";
+        if (game === "OOT" && setup < 4) {
+            const present = new Set([...document.getElementById("setupDropdown").options].map(o => Number(o.value)));
+            const resolve = l => l === 0 || present.has(l) ? l : l === 3 && present.has(2) ? 2 : 0;
+            const plays = { child: [0, 1], crawlspace: [0, 1], crawl: [0, 1], adult: [2, 3] };
+            const playsHere = label => String(label).split("/").some(f => {
+                const ls = plays[f.toLowerCase()];
+                return !ls || ls.map(resolve).includes(setup);
+            });
+            const left = new Set();
+            for (let i = files.length - 1; i >= 0; i--) {
+                const d = files[i].data;
+                if (!d.forms) continue; // (format 1: one form, unnamed)
+                const forms = d.forms.filter(f => playsHere(f.form));
+                d.forms.filter(f => !playsHere(f.form)).forEach(f => left.add(f.form));
+                if (!forms.length) { files.splice(i, 1); continue; }
+                files[i] = { ...files[i], data: { ...d, forms, clips: d.clips.filter(c => c.form === undefined || playsHere(c.form)) } };
+            }
+            if (left.size) formNote = `; ${[...left].join(", ")} not in it`;
+        }
         if (!files.length) {
-            status.textContent = `Auto-import: no results for ${map}${otherSetups.length ? ` setup ${setup}` : ""} in ${dir}`;
+            status.textContent = `Auto-import: no results for ${map}${otherSetups.length || formNote ? ` setup ${setup}` : ""} in ${dir}${formNote ? ` (${formNote.slice(2)})` : ""}`;
             return;
         }
         console.log(`Auto-import (${map}, setup ${setup}): ${files.map(f => f.name).join(", ")}`);
-        importResults(files, `auto-imported (setup ${setup})`);
+        importResults(files, `auto-imported (setup ${setup}${formNote})`);
     };
     document.addEventListener("zeldamaploaded", e => {
         loaded = e.detail;

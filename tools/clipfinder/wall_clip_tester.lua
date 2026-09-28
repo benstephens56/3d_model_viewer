@@ -41,10 +41,16 @@
 -- wall_clip_tests.json next to this script. Its clips are turned into tests,
 -- with the walls read from RAM (load that map first). (A .lua test file from
 -- an older viewer still works too.)
-local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\OOT_Spot_16_-_Death_Mountain_Trail_Adult_falling_setup2_dyna.json]]
+local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\OOT_Spot_01_-_Kakariko_Village_Adult_Child_falling_setup2_dyna.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
-local MAX_PER_GROUP = 0          -- points tried per wall pair (spread evenly); 0 = all
+local MAX_PER_GROUP = 5          -- points tried per wall pair (spread evenly); 0 = all
 local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --falling scans)
+-- "needed": a wall pair's falling clips ("low-acute" / "low-extended") only if
+-- the pair has no walking clips of that kind, or the falling ones need a lower
+-- speed (the slowest move in the file: --min-speed's reach, or the clip's own).
+-- Falling points with no speed known are left out when it clips walking.
+-- "all": every falling clip.
+local FALLING_TESTS = "needed"
 local SETTLE_FRAMES = 30          -- emulated frames to let run after the test frame (3 per game frame)
 local HOOK_TIMEOUT = 60           -- emulated frames to wait for the player's bg check
 local HOLD_FRAMES = 9             -- "move": emulated frames Link is held at the start first
@@ -55,7 +61,7 @@ local FAST = true                 -- skip drawing while testing (client.invisibl
 -- facing the way he'll go, and Z is tapped - Z-targeting nothing swings the
 -- camera behind him), and pauses RECORD_BUFFER emulated frames (60 a second)
 -- before and after each one. Off by default.
-local RECORD = false
+local RECORD = true
 local RECORD_BUFFER = 90
 local RECORD_ONE_PER_PAIR = true  -- recording: once a wall pair's test works, skip the rest of that pair's
 if RECORD then FAST = false end
@@ -155,6 +161,12 @@ end
 K.home = 0x08                           -- Actor.home.pos (both games)
 K.rotY = 0x32                           -- Actor.world.rot.y (both games)
 K.pos = 0x24                            -- Actor.world.pos (both games)
+-- Actor bg check results (the log names the wall / floor polys Link touched)
+if GAME == "OOT" then
+	K.wallPoly, K.floorPoly, K.wallBgId, K.bgCheckFlags = 0x74, 0x78, 0x7C, 0x88
+else
+	K.wallPoly, K.floorPoly, K.wallBgId, K.bgCheckFlags = 0x7C, 0x80, 0x84, 0x90
+end
 
 local function readVec(addr)
 	return { readfloat(addr), readfloat(addr + 4), readfloat(addr + 8) }
@@ -278,7 +290,7 @@ local function testsFromJson(path)
 	end
 	local forms = data.forms or { { form = data.form, radius = data.radius, checkHeight = data.checkHeight } }
 	local T = {
-		game = data.game, map = data.map, numPolygons = data.numPolygons, fromJson = true,
+		game = data.game, map = data.map, numPolygons = data.numPolygons, fromJson = true, dyna = data.dyna,
 		radius = forms[1].radius, checkHeight = forms[1].checkHeight, tests = {}, walls = {},
 	}
 	if data.forms then
@@ -403,7 +415,8 @@ local function testsFromJson(path)
 			T.tests[#T.tests + 1] = {
 				group = groupOf[gk], form = form, kind = kind, type = c.cross and "cross" or "stand",
 				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt,
-				yaw = c.speed and c.yaw or nil, speed = c.speed, speed2 = c.speed2, expect = vec(c["end"]),
+				yaw = c.speed and c.yaw or nil, speed = c.speed, speed2 = c.speed2, vy = c.vy, expect = vec(c["end"]),
+				reachSpeed = type(c.reach) == "table" and c.reach.speed or nil,
 			}
 			T.walls[c.pusher] = true
 			T.walls[c.crossed] = true
@@ -426,19 +439,52 @@ if T.game ~= GAME then
 end
 
 local numPolygons, polyVerts, polyPlane = staticCollision()
+
+-- A CollisionPoly pointer as "TRI n" (the scene's), "dyna" (a bg actor's:
+-- bgId, not the scan's dynapoly ids) or "-" (none).
+local function polyName(ptr, bgId)
+	if ptr == 0 then return "-" end
+	if bgId ~= 50 then return string.format("dyna(bg %d)", bgId) end  -- BGCHECK_SCENE
+	local polyList = read_u32(read_u32(K.colCtx) - 0x80000000 + 0x18)
+	local id = (ptr - polyList) / 0x10
+	if id >= 0 and id < numPolygons and id == math.floor(id) then return "TRI " .. id end
+	return string.format("%08X", ptr)
+end
 if numPolygons ~= T.numPolygons then
 	error(string.format("tests are for %s (%d static polys); the loaded scene has %d - load that map first",
 		T.map, T.numPolygons, numPolygons))
 end
+-- clipfinder --dyna results carry the dynapoly export ("dyna"): its polys
+-- get the ids after the scene's own, in file order (clipfinder's numbering),
+-- each already in world space with its s16 normal and plane distance.
+local dynaPolys = {}
+if T.dyna and T.dyna.actors then
+	local id = numPolygons
+	for _, a in ipairs(T.dyna.actors) do
+		for _, q in ipairs(a.polys or {}) do
+			dynaPolys[id] = { v = q.v, n = q.n, d = q.d, actor = a.actor }
+			id = id + 1
+		end
+	end
+end
 if T.fromJson then
-	-- (the JSON has only polygon ids: the walls come from the loaded map)
+	-- (the JSON has only polygon ids: the scene's walls come from the loaded
+	-- map, the dynapolys from the export - RAM past the scene's polys is
+	-- something else)
 	for id in pairs(T.walls) do
-		local n, d = polyPlane(id)
-		T.walls[id] = { v = polyVerts(id), n = n, d = d }
+		if id >= numPolygons then
+			if not dynaPolys[id] then
+				error(string.format("TRI %d is past the scene's %d polys and the file has no dynapoly for it (run clipfinder with --dyna)", id, numPolygons))
+			end
+			T.walls[id] = dynaPolys[id]
+		else
+			local n, d = polyPlane(id)
+			T.walls[id] = { v = polyVerts(id), n = n, d = d }
+		end
 	end
 end
 for id, w in pairs(T.walls) do
-	local v = polyVerts(id)
+	local v = id < numPolygons and polyVerts(id) or w.v
 	for i = 1, 3 do
 		for j = 1, 3 do
 			if v[i][j] ~= w.v[i][j] then
@@ -531,6 +577,7 @@ end
 -- Signed distance to a wall's plane (collision header normal / dist), at
 -- Link's wall check height (the test's form's, with several forms).
 local checkHeight = T.checkHeight
+local radius = T.radius or 18  -- (old .lua test files: no radius)
 local function planeDist(w, p)
 	local y = p[2] + checkHeight
 	return (w.n[1] * p[1] + w.n[2] * y + w.n[3] * p[3]) / 32767 + w.d
@@ -540,16 +587,51 @@ local function dist3(a, b)
 	return math.sqrt((a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2 + (a[3] - b[3]) ^ 2)
 end
 
+-- How far Link's check point (feet + checkHeight), projected onto the wall
+-- along its normal, is outside its triangle (0: over it).
+local function offTriangle(w, p)
+	local n = { w.n[1] / 32767, w.n[2] / 32767, w.n[3] / 32767 }
+	local len = math.sqrt(n[1] * n[1] + n[2] * n[2] + n[3] * n[3])
+	for i = 1, 3 do n[i] = n[i] / len end
+	local d = planeDist(w, p) / len
+	local q = { p[1] - d * n[1], p[2] + checkHeight - d * n[2], p[3] - d * n[3] }
+	local a, b, c = w.v[1], w.v[2], w.v[3]
+	local function sub(u, v) return { u[1] - v[1], u[2] - v[2], u[3] - v[3] } end
+	local function dot(u, v) return u[1] * v[1] + u[2] * v[2] + u[3] * v[3] end
+	local v0, v1, v2 = sub(b, a), sub(c, a), sub(q, a)
+	local d00, d01, d11, d20, d21 = dot(v0, v0), dot(v0, v1), dot(v1, v1), dot(v2, v0), dot(v2, v1)
+	local den = d00 * d11 - d01 * d01
+	if den == 0 then return math.huge end
+	local bv = (d11 * d20 - d01 * d21) / den
+	local bw = (d00 * d21 - d01 * d20) / den
+	if bv >= 0 and bw >= 0 and bv + bw <= 1 then return 0 end
+	local function segDist(u, v)
+		local e = sub(v, u)
+		local t = math.max(0, math.min(1, dot(sub(q, u), e) / dot(e, e)))
+		local r = { u[1] + e[1] * t - q[1], u[2] + e[2] * t - q[2], u[3] + e[3] * t - q[3] }
+		return math.sqrt(dot(r, r))
+	end
+	return math.min(segDist(a, b), segDist(b, c), segDist(c, a))
+end
+
 -- "clipped": behind the clipped wall at the end; "fell": dropped a long way
 -- (out of bounds with no floor); "voided": moved far away (void out /
--- respawn); "no": still in front of it.
+-- respawn); "no": back in front of the wall, over it (within his radius of
+-- its triangle), or where he started; "away": neither behind it nor back in
+-- front of it - he went off past its edge (a wall that leans, Link landed on
+-- its top side and slid or jumped off: OoT Death Mountain Trail TRI 90 -> 25).
+-- The plane alone can't tell: far past a leaning wall's edge its plane says
+-- nothing about the wall.
 local function judge(test, after, final)
 	local w = T.walls[test.crossed]
 	if dist3(final, test.next) > 300 then return "voided" end
 	if final[2] < test.next[2] - 150 then return "fell" end
 	if planeDist(w, final) < -BEHIND_MIN and planeDist(w, after) < -BEHIND_MIN then return "clipped" end
-	return "no"
+	if planeDist(w, final) >= -BEHIND_MIN and offTriangle(w, final) <= radius then return "no" end
+	if dist3(final, test.prev) <= radius then return "no" end
+	return "away"
 end
+local function worked(status) return status == "clipped" or status == "fell" or status == "voided" or status == "away" end
 
 ---------------------------------------------------------------------------
 -- Run
@@ -571,6 +653,9 @@ end
 -- Tests with several forms: keep the ones for this form. A test's form can
 -- name several ("Human/Deku": the same radius and check height, one scan).
 local tests, runForm = T.tests, T.form
+if #T.tests == 0 then
+	error(testsPath .. " has no clips (clipfinder found none: with --pair, check the order - PUSHER,CROSSED, and for a slope clip the floor, then the wall)")
+end
 if T.forms then
 	runForm = FORM or currentForm()
 	local function formMatches(label)
@@ -586,7 +671,7 @@ if T.forms then
 	local names = {}
 	for label, f in pairs(T.forms) do
 		names[#names + 1] = label
-		if formMatches(label) then checkHeight = f.checkHeight end
+		if formMatches(label) then checkHeight, radius = f.checkHeight, f.radius end
 	end
 	table.sort(names)
 	if #tests == 0 then
@@ -609,6 +694,46 @@ do
 	end
 	tests = kept
 	if #tests == 0 then error("no tests left: they were all falling crossings that can't clip") end
+end
+
+-- FALLING_TESTS "needed": a wall pair's falling tests only where they're
+-- what gets the pair (none walking of that kind), or slower than walking.
+if FALLING_TESTS == "needed" and not SKIP_FALLING then
+	local function speedOf(t) return t.reachSpeed or t.speed end
+	local walkMin, fallMin, hasWalk = {}, {}, {}
+	local function keyOf(t, kind) return table.concat({ t.form or "", t.pusher, t.crossed, kind }, ":") end
+	for _, t in ipairs(tests) do
+		local base = t.kind:match("^low%-(.+)$")
+		if base then
+			local k = keyOf(t, base)
+			local sp = speedOf(t)
+			if sp and sp < (fallMin[k] or math.huge) then fallMin[k] = sp end
+		elseif t.kind == "acute" or t.kind == "extended" then
+			local k = keyOf(t, t.kind)
+			hasWalk[k] = true
+			local sp = speedOf(t)
+			-- (a walking point with no speed: a standing one, reached some way)
+			walkMin[k] = math.min(walkMin[k] or math.huge, sp or 0)
+		end
+	end
+	local kept, dropped, pairs0 = {}, 0, {}
+	for _, t in ipairs(tests) do
+		local base = t.kind:match("^low%-(.+)$")
+		local k = base and keyOf(t, base)
+		if k and hasWalk[k] and not ((fallMin[k] or math.huge) < walkMin[k]) then
+			dropped = dropped + 1
+			pairs0[k] = true
+		else
+			kept[#kept + 1] = t
+		end
+	end
+	if dropped > 0 then
+		local n = 0
+		for _ in pairs(pairs0) do n = n + 1 end
+		print(string.format("FALLING_TESTS needed: left out %d falling tests of %d wall pairs that also clip walking, at the same or a lower speed", dropped, n))
+	end
+	tests = kept
+	if #tests == 0 then error("no tests left after FALLING_TESTS") end
 end
 
 if SKIP_FALLING then
@@ -687,8 +812,10 @@ local function runTest(t, mode)
 	-- Slope clips (kind "slope", clipfinder slope.h) are always "move": the
 	-- clip is the game's own floor check lifting Link after the move, and can
 	-- take a second frame's move (speed2). (A hook set for the other tests
-	-- does nothing: no test is pending.)
-	if t.kind == "slope" then mode = "move" end
+	-- does nothing: no test is pending.) Ground clips (kind "ground",
+	-- clipfinder ground.h) too: the game's own fall from the start, at
+	-- velocity.y `vy`, is the clip.
+	if t.kind == "slope" or t.kind == "ground" then mode = "move" end
 	if mode == "move" then
 		-- The way a manual setup that works in-game does it:
 		-- Link standing still at the start facing the test's yaw, then speedXZ
@@ -755,7 +882,11 @@ local function runTest(t, mode)
 		-- frame's gravity (-1) and Actor_UpdatePos (x1.5): velocity.y ends up
 		-- -drop / 1.5 (at most -20, the terminal velocity, for the 30 drop).
 		local drop = t.prev[2] - t.next[2]
-		if t.kind:find("^low") or drop > 7.5 + 0.01 then
+		if t.vy then
+			-- ground clips: the scan's velocity.y for the frame, before gravity
+			r.velY = t.vy + 1
+			writefloat(K.player + K.velocity + 4, r.velY)
+		elseif t.kind:find("^low") or drop > 7.5 + 0.01 then
 			r.velY = -drop / 1.5 + 1
 			writefloat(K.player + K.velocity + 4, r.velY)
 		end
@@ -766,13 +897,16 @@ local function runTest(t, mode)
 		-- he's riding something
 		local function logLine(tag)
 			r.log[#r.log + 1] = string.format(
-				"%s gf+%d pos %s speedXZ %.3f speed %.3f velY %.3f yaw %04X action %08X flags1 %08X animMove %02X ride %08X",
+				"%s gf+%d pos %s speedXZ %.3f speed %.3f velY %.3f yaw %04X action %08X flags1 %08X animMove %02X ride %08X wall %s floor %s bgFlags %04X",
 				tag, read_u32(K.play + K.gameplayFrames) - frames0, fmt(readVec(K.player + K.pos)),
 				readfloat(K.player + K.speedXZ), readfloat(K.player + K.actorSpeed), readfloat(K.player + K.velocity + 4),
 				mainmemory.read_u16_be(K.player + K.yaw),
 				read_u32(K.player + K.actionFunc), read_u32(K.player + K.stateFlags1),
-				mainmemory.read_u8(K.player + K.skelAnime + 0x35), read_u32(K.player + K.rideActor))
+				mainmemory.read_u8(K.player + K.skelAnime + 0x35), read_u32(K.player + K.rideActor),
+				polyName(read_u32(K.player + K.wallPoly), mainmemory.read_u8(K.player + K.wallBgId)),
+				polyName(read_u32(K.player + K.floorPoly), mainmemory.read_u8(K.player + K.wallBgId + 1)), read_u16(K.player + K.bgCheckFlags))
 		end
+		r.logLine = logLine
 		logLine("write")
 		for i = 1, 9 do
 			emu.frameadvance()
@@ -835,7 +969,17 @@ local function runTest(t, mode)
 		for _ = 1, 3 do emu.frameadvance() end
 		r.after = readVec(K.player + K.pos)
 	end
-	for _ = 1, SETTLE_FRAMES do emu.frameadvance() end
+	-- (move mode: the log goes on through the first game frames after, where
+	-- a clip that doesn't hold gets pushed back out)
+	local gf = read_u32(K.play + K.gameplayFrames)
+	for i = 1, SETTLE_FRAMES do
+		emu.frameadvance()
+		if r.logLine and i <= 18 and read_u32(K.play + K.gameplayFrames) ~= gf then
+			gf = read_u32(K.play + K.gameplayFrames)
+			r.logLine("settle")
+		end
+	end
+	r.logLine = nil
 	r.final = readVec(K.player + K.pos)
 	-- (recording: let the end show before the next test resets everything)
 	if RECORD then for _ = 1, RECORD_BUFFER do emu.frameadvance() end end
@@ -863,10 +1007,10 @@ end
 -- that start, yaw and speed, which is what the grid is about)
 local mode = T.csvGrids and "move" or MODE
 local first
--- (the mode is tried on the first test that isn't a slope clip: those always
--- run in "move" mode, so they'd pass any hook; all slope clips: "move")
+-- (the mode is tried on the first test that isn't a slope or ground clip:
+-- those always run in "move" mode, so they'd pass any hook; all of them: "move")
 local probe = 1
-while queue[probe] and queue[probe].kind == "slope" do probe = probe + 1 end
+while queue[probe] and (queue[probe].kind == "slope" or queue[probe].kind == "ground") do probe = probe + 1 end
 if not queue[probe] then probe = 1; mode = "move" end
 if mode == "auto" then
 	for _, m in ipairs({ "exec", "read", "move" }) do
@@ -916,7 +1060,7 @@ for i, t in ipairs(queue) do
 		else
 			print(string.format("  %d / %d: %s %s TRI %d -> %d: %s", i, #queue, t.kind, t.type, t.pusher, t.crossed, r.status))
 		end
-		if r.status == "clipped" or r.status == "fell" or r.status == "voided" then pairDone[pairKey] = true end
+		if worked(r.status) then pairDone[pairKey] = true end
 	end
 end
 if skipped > 0 then
@@ -933,8 +1077,9 @@ local out = {}
 local function line(s) out[#out + 1] = s end
 
 line(string.format("Wall push clip test results: %s, %s, %s (mode: %s)", GAME, T.map, runForm, mode))
-line(string.format("%d tests; worked = Link ended up behind the clipped wall (clipped), fell out of the map (fell)", #results))
-line("or was moved far away (voided), " .. SETTLE_FRAMES .. " frames after the test frame.")
+line(string.format("%d tests; worked = Link ended up behind the clipped wall (clipped), fell out of the map (fell),", #results))
+line("was moved far away (voided), or went off past the wall's edge without coming back in front of it (away:")
+line("check those by eye), " .. SETTLE_FRAMES .. " frames after the test frame.")
 line("")
 
 local byGroup = {}
@@ -944,7 +1089,7 @@ for _, r in ipairs(results) do
 	local b = byGroup[g]
 	b.tried = b.tried + 1
 	b.statuses[r.status] = (b.statuses[r.status] or 0) + 1
-	if r.status == "clipped" or r.status == "fell" or r.status == "voided" then
+	if worked(r.status) then
 		b.worked = b.worked + 1
 		b.hits[#b.hits + 1] = r
 	end
@@ -983,7 +1128,7 @@ local function csvDrift(r)
 end
 local function csvResult(r)
 	if csvDrift(r) > CSV_DRIFT then return false, "moved" end
-	if r.status == "clipped" or r.status == "fell" or r.status == "voided" then return true end
+	if worked(r.status) then return true end
 	if r.status == "no" or r.status == "setup" then return false end
 	return nil
 end
@@ -1058,7 +1203,7 @@ else
 			end
 			-- and the ones in the group that didn't
 			for _, r in ipairs(results) do
-				if r.test.group == gi and r.after and r.status ~= "clipped" and r.status ~= "fell" and r.status ~= "voided" then
+				if r.test.group == gi and r.after and not worked(r.status) then
 					line(string.format("    [%s] prev %s -> next %s  => after %s, final %s (expected %s)",
 						r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final), fmt(r.test.expect)))
 					for _, l in ipairs(r.log or {}) do line("        " .. l) end

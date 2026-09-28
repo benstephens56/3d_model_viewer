@@ -20,6 +20,10 @@ struct Poly {
 	double minX, maxX, minY, maxY, minZ, maxZ, sortY, tz, tx;
 	bool isFloor, isCeiling, isWall;
 	int bg = -1; // dynapoly: its BgActor (Model::bgActors), -1 for static
+	// a loading zone (SurfaceType exit index) or a void plane (floor property 5
+	// respawn, 12 void out, MM 13 too); dynapolys: never (the export has no surface types)
+	bool loadOrVoid = false;
+	int exitIndex = 0, floorProp = 0; // (the static polys' SurfaceType fields)
 };
 
 // One dynapoly actor's collision as DynaPoly_ExpandSRT leaves it (dyna.cpp
@@ -231,12 +235,21 @@ struct Model {
 
 	bool dynaPairsOnly = false; // --dyna-only: wall pairs with a dynapoly wall in them
 	bool slope = true, slopeOnly = false; // slope clips (--no-slope), and only them (--slope-only)
+	bool ground = true, groundOnly = false; // ground clips (--no-ground), and only them (--ground-only)
 	// --pair: only scan the candidates (wall pairs, slope walls) near these
 	// two polys; -1 none. Every poly still collides as usual.
 	int focusA = -1, focusB = -1;
 	// --slope-starts: crossing points whose surroundings are only in bounds
 	// not counting the rays into a slope are searched too (slower)
 	bool slopeStarts = false;
+	// --keep-load-void: keep clips that start on a loading zone or void plane
+	bool keepLoadVoid = false;
+	// Whether the floor Link stands on at `start` is a loading zone or void plane.
+	bool startOnLoadVoid(const V3& start) const {
+		int poly = -1;
+		auto fy = floorCheck(start.x, start.z, F(start.y + 1), &poly);
+		return fy && poly >= 0 && polys[poly].loadOrVoid;
+	}
 	// Whether poly p's box comes within `margin` of the --pair polys' (true without --pair).
 	bool nearFocus(const Poly& p, double margin) const {
 		if (focusA < 0) return true;

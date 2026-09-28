@@ -44,6 +44,41 @@ static int runSimFrames(const Model& m, const V3& start, int yaw, const vector<d
 	return 0;
 }
 
+// Falling fast from the floor (checkHeight + dy < 5): the line test at the
+// feet, and a ground clip (ground.h)
+static int runSimGround(const Model& m, Scratch& s, const V3& start, int yaw, double speed, double vy) {
+	const V3 next = { F(start.x + F(F(speed * sinS(yaw)) * SPEED_RATE)), F(start.y + F(vy * SPEED_RATE)),
+		F(start.z + F(F(speed * cosS(yaw)) * SPEED_RATE)) };
+	printf("start %s  yaw 0x%04X  speed %.9g  velocity.y %.9g -> posNext %s\n", P(start), yaw, speed, vy, P(next));
+	printf("start in bounds: %s\n", m.isInBounds(s, start, true) ? "yes" : "NO");
+	int fp = -1;
+	auto fy = m.floorCheck(start.x, start.z, F(start.y + 1), &fp);
+	if (fy && fp >= 0) {
+		const Poly& q = m.polys[fp];
+		const double pa = F(F(F(F(F(q.sx * start.x) + F(q.sy * start.y)) + F(q.sz * start.z)) * NORMAL_FRAC) + q.dist);
+		printf("start's floor: %s at y %.9g (start %s it); the line test's plane distance at the start: %.9g (%s)\n", m.polyName(fp).c_str(), *fy,
+			*fy == start.y ? "exactly on" : *fy < start.y ? "above" : "below", pa, pa < 0 ? "< 0: the line doesn't cross it" : ">= 0: the line stops on it");
+	} else printf("no floor under the start\n");
+	printf("checkHeight + dy = %.9g < 5: the line test runs at the feet, floors included\n", F(m.checkHeight + F(next.y - start.y)));
+	const GroundLine gl = groundLine(m, s, start, next);
+	if (gl.poly >= 0) printf("line test hits %s, puts him at %s\n", m.polyName(gl.poly).c_str(), P(gl.res));
+	else printf("line test: nothing hit\n");
+	PushList trace;
+	const V3 res = m.sphereStep(gl.res, LOOSE, &trace, &start, gl.poly >= 0 && m.polys[gl.poly].bg >= 0);
+	for (const Push& t : trace) printf("  %s pushes %s -> %s\n", m.polyName(t.poly).c_str(), P(t.from), P(t.to));
+	printf("after the pushes: %s (wall check at y %.9g)\n", P(res), F(res.y + m.checkHeight));
+	int lp = -1;
+	auto ly = m.floorCheck(res.x, res.z, F(start.y + 50), &lp);
+	if (!ly) printf("floor check from y %.9g: no floor at all\n", F(start.y + 50));
+	else printf("floor check from y %.9g: %s at y %.9g: %s\n", F(start.y + 50), m.polyName(lp).c_str(), *ly,
+		F(*ly - res.y) >= 0 ? "lands on it" : "below him, keeps falling");
+	auto c = groundFrame(m, s, start, yaw, speed, vy);
+	if (!c) printf("no ground clip\n");
+	else printf("GROUND CLIP: through %s under %s; %s %s, %s\n", m.polyName(c->pusher).c_str(), m.polyName(c->crossed).c_str(),
+		c->endNoFloor ? "no floor under" : "ends at", P(c->end), c->endNoFloor ? "falls out" : !m.isInBounds(s, c->end) ? "OUT OF BOUNDS" : "in bounds, past the dynapoly (counts)");
+	return 0;
+}
+
 int runSim(const Model& m, const string& simArg) {
 	{
 		// SPEED/SPEED/...: several frames
@@ -56,19 +91,34 @@ int runSim(const Model& m, const string& simArg) {
 		}
 	}
 	double sx, sy, sz, speed, drop = 0;
-	char yawStr[32] = {};
-	int n = sscanf(simArg.c_str(), "%lf,%lf,%lf,%31[^,],%lf,%lf", &sx, &sy, &sz, yawStr, &speed, &drop);
-	if (n < 5) { fprintf(stderr, "--sim wants X,Y,Z,YAW,SPEED[,DROP] (YAW as 0x1234 or decimal)\n"); return 2; }
+	char yawStr[32] = {}, dropStr[32] = {};
+	int n = sscanf(simArg.c_str(), "%lf,%lf,%lf,%31[^,],%lf,%31s", &sx, &sy, &sz, yawStr, &speed, dropStr);
+	if (n < 5) { fprintf(stderr, "--sim wants X,Y,Z,YAW,SPEED[,DROP | ,vVY] (YAW as 0x1234 or decimal)\n"); return 2; }
 	int yaw = (int)strtol(yawStr, nullptr, 0) & 0xFFFF;
 	Scratch s;
 	s.stamp.assign(m.polys.size(), 0);
 	V3 start = { F(sx), F(sy), F(sz) };
 	V3 next = moveStep(start, yaw, F(speed));
+	// DROP, or vVY: velocity.y (v-20: posNext.y = y + -20 x 1.5)
+	double vy = NAN;
+	if (dropStr[0] == 'v' || dropStr[0] == 'V') {
+		vy = F(atof(dropStr + 1));
+		drop = F(start.y - F(start.y + F(vy * SPEED_RATE)));
+	} else if (dropStr[0]) drop = atof(dropStr);
 	if (drop > 0) next.y = F(start.y - drop);
+	// falling fast from the floor: the line test at the feet (ground clips)
+	if (drop > 0 && F(m.checkHeight + F(next.y - start.y)) < 5)
+		return runSimGround(m, s, start, yaw, F(speed), std::isnan(vy) ? F(-drop / SPEED_RATE) : vy);
 	printf("start %s  yaw 0x%04X  speed %.9g -> posNext %s\n", P(start), yaw, F(speed), P(next));
 	printf("start in bounds: %s\n", m.isInBounds(s, start, true) ? "yes" : "NO");
 	auto rest = m.restingSpot(start);
 	printf("start is a resting spot: %s\n", rest && rest->x == start.x && rest->z == start.z ? "yes" : rest ? (string("no, rests at ") + P(*rest)).c_str() : "no (pushes don't settle)");
+	{
+		int fp = -1;
+		auto fy = m.floorCheck(start.x, start.z, F(start.y + 1), &fp);
+		if (fy && fp >= 0) printf("start's floor: %s at y %.9g, exit %d, floor property %d%s\n", m.polyName(fp).c_str(), *fy,
+			m.polys[fp].exitIndex, m.polys[fp].floorProp, m.polys[fp].loadOrVoid ? " (a loading zone / void plane: the scan leaves out clips starting here)" : "");
+	}
 	if (F(m.checkHeight + F(next.y - start.y)) < 5) printf("checkHeight + dy < 5: the game's line test runs at the feet, floors included (not modelled)\n");
 	V3 res;
 	PushList trace;
@@ -125,6 +175,21 @@ int runSim(const Model& m, const string& simArg) {
 			printf("falling: %s\n", !land ? "lands in bounds" : noFloor ? "no floor under him: falls out"
 				: (string(m.isInBounds(s, *land) ? "lands in bounds past the dynapoly (counts) at " : "lands out of bounds at ") + P(*land)).c_str());
 		}
+	}
+	return 0;
+}
+
+int printTris(const Model& m, const string& ids) {
+	for (size_t a = 0; a < ids.size();) {
+		size_t b = ids.find(',', a);
+		if (b == string::npos) b = ids.size();
+		const int id = atoi(ids.substr(a, b - a).c_str());
+		a = b + 1;
+		if (id < 0 || id >= (int)m.polys.size() || !m.polys[id].exists) { printf("%s: no such poly\n", m.polyName(id).c_str()); continue; }
+		const Poly& q = m.polys[id];
+		printf("%s: %s  (%g, %g, %g) (%g, %g, %g) (%g, %g, %g)  normal (%.4f, %.4f, %.4f)  dist %g  exit %d  floor property %d%s\n", m.polyName(id).c_str(),
+			q.isWall ? "wall" : q.isFloor ? "floor" : "ceiling", q.ax, q.ay, q.az, q.bx, q.by, q.bz, q.cx, q.cy, q.cz,
+			q.nx / q.nMag, q.ny / q.nMag, q.nz / q.nMag, q.dist, q.exitIndex, q.floorProp, q.loadOrVoid ? "  (loading zone / void)" : "");
 	}
 	return 0;
 }

@@ -1,4 +1,5 @@
 #include "search.h"
+#include "ground.h"
 #include "slope.h"
 
 ////////////////////////////////////////
@@ -758,8 +759,8 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		}
 		fprintf(stderr, "  (dynapoly: %zu pairs with one dynapoly wall, %zu dynapoly with dynapoly)\n", one, both);
 	}
-	// (--slope-only: just the slope clips below)
-	if (!m.slopeOnly) {
+	// (--slope-only / --ground-only: just the slope / ground clips below)
+	if (!m.slopeOnly && !m.groundOnly) {
 		{
 			vector<std::thread> ts;
 			for (int i = 0; i < threads; i++) ts.emplace_back(worker1);
@@ -781,7 +782,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		if (m.dynaPairsOnly && p.bg < 0 && std::none_of(m.bgActors.begin(), m.bgActors.end(), [&](const BgActor& b) {
 			return b.cx + b.r >= p.minX - 50 && b.cx - b.r <= p.maxX + 50 && b.cz + b.r >= p.minZ - 50 && b.cz - b.r <= p.maxZ + 50;
 		})) continue;
-		if (m.slope && m.nearFocus(p, focusMargin)) slopeWalls.push_back(p.id);
+		if (m.slope && !m.groundOnly && m.nearFocus(p, focusMargin)) slopeWalls.push_back(p.id);
 	}
 	std::atomic<size_t> nextSlope{ 0 }, slopesDone{ 0 };
 	size_t slopeFound = 0;
@@ -810,6 +811,42 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		for (auto& t : ts) t.join();
 		fprintf(stderr, "\n  slope clips: %zu points (%.1fs)\n", slopeFound, std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count());
 	}
+	// Ground clips (ground.h): every wall rising out of a floor, along its bottom edge
+	vector<int> groundWalls;
+	if (m.ground && !m.slopeOnly) {
+		for (const Poly& p : m.polys) {
+			if (!p.exists || !p.isWall || !(p.nXZ > 0)) continue;
+			if (m.dynaPairsOnly && p.bg < 0) continue;
+			if (m.nearFocus(p, focusMargin)) groundWalls.push_back(p.id);
+		}
+	}
+	std::atomic<size_t> nextGround{ 0 }, groundsDone{ 0 };
+	size_t groundFound = 0;
+	auto worker4 = [&]() {
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		vector<Clip> local;
+		for (;;) {
+			size_t wi = nextGround++;
+			if (wi >= groundWalls.size()) break;
+			s.clearCache();
+			s.standSpots.clear();
+			groundClipsForWall(m, s, m.polys[groundWalls[wi]], pairFound, [&](const Clip& c) {
+				if (claimPair(c.pusher, c.crossed)) local.push_back(c);
+			});
+			progress("ground walls", ++groundsDone, groundWalls.size());
+		}
+		std::lock_guard<std::mutex> g(outMu);
+		groundFound += local.size();
+		clips.insert(clips.end(), local.begin(), local.end());
+	};
+	if (!groundWalls.empty()) {
+		auto tg0 = std::chrono::steady_clock::now();
+		vector<std::thread> ts;
+		for (int i = 0; i < threads; i++) ts.emplace_back(worker4);
+		for (auto& t : ts) t.join();
+		fprintf(stderr, "\n  ground clips: %zu points (%.1fs)\n", groundFound, std::chrono::duration<double>(std::chrono::steady_clock::now() - tg0).count());
+	}
 	// Deterministic order: standing points first, then crossings, by position.
 	std::sort(clips.begin(), clips.end(), [](const Clip& a, const Clip& b) {
 		if (a.cross != b.cross) return !a.cross;
@@ -828,19 +865,24 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	// one per position.
 	vector<Clip> out;
 	std::unordered_set<string> keep;
-	size_t acuteDropped = 0;
+	size_t acuteDropped = 0, loadVoidDropped = 0;
 	for (const Clip& c : clips) {
 		if (m.extendedOnly && acutePairs.count({ c.pusher, c.crossed })) { acuteDropped++; continue; }
+		// starting on a loading zone or void plane: the game takes Link
+		// there before any clip matters (--keep-load-void keeps them)
+		if (!m.keepLoadVoid && m.startOnLoadVoid(c.prev)) { loadVoidDropped++; continue; }
 		string k = (c.cross ? "c" : "s") + std::to_string(c.pusher) + ":" + keyOf(c.from.x, c.from.z, c.hasFloorY ? c.floorY : c.from.y);
 		if (!c.cross && !keep.insert(k).second) continue;
 		out.push_back(c);
 	}
 	// One category per wall pair: acute if any of its points is
 	std::set<std::pair<int, int>> acute;
-	for (const Clip& c : out) if (c.acutePoint && c.kind != 2) acute.insert({ c.pusher, c.crossed });
-	for (Clip& c : out) if (c.kind != 2) c.kind = acute.count({ c.pusher, c.crossed }) ? 0 : 1;
+	for (const Clip& c : out) if (c.acutePoint && c.kind < 2) acute.insert({ c.pusher, c.crossed });
+	for (Clip& c : out) if (c.kind < 2) c.kind = acute.count({ c.pusher, c.crossed }) ? 0 : 1;
 	double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 	fprintf(stderr, "  %zu clip points in %.1fs\n", out.size(), secs);
+	if (loadVoidDropped)
+		fprintf(stderr, "  (left out %zu clip points starting on a loading zone or void plane; --keep-load-void keeps them)\n", loadVoidDropped);
 	if (m.extendedOnly && !acutePairs.empty())
 		fprintf(stderr, "  (extended only: left out %zu acute wall pairs, and their %zu points that aren't acute on their own)\n",
 			acutePairs.size(), acuteDropped);

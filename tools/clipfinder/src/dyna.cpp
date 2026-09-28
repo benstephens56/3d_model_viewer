@@ -206,3 +206,31 @@ bool readDynaFile(const string& path, vector<DynaFile>& out, string& err) {
 void addDynaActors(Model& m, const DynaFile& d) {
 	for (const DynaActorIn& a : d.actors) m.addBgActor(a.name, a.polys, a.center, a.radius, a.minY, a.maxY);
 }
+
+////////////////////////////////////////
+// Scene setups (models/<GAME>/actors/<GAME>_actors_by_scene.json)
+////////////////////////////////////////
+
+// { "<scene file>": [ setup 0, setup 1, ... ] }, null for a setup the scene
+// doesn't have (tools/actors/generate_actors_by_scene.py, the viewer's setup list).
+bool readSceneSetups(const string& path, std::map<string, vector<bool>>& out, string& err) {
+	std::ifstream f(path, std::ios::binary);
+	if (!f) { err = "can't read " + path; return false; }
+	std::stringstream ss;
+	ss << f.rdbuf();
+	const string text = ss.str();
+	try {
+		JParser p(text);
+		JVal root = p.val();
+		for (const auto& kv : root.o) {
+			vector<bool> present;
+			if (kv.second.kind == JVal::Arr)
+				for (const JVal& s : kv.second.a) present.push_back(s.kind != JVal::Null);
+			out[kv.first] = present;
+		}
+	} catch (const std::exception& ex) {
+		err = path + ": " + ex.what();
+		return false;
+	}
+	return true;
+}

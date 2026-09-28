@@ -30,6 +30,9 @@ bool parseScene(const vector<uint8_t>& buf, const string& game, ColHeader& ch, v
 	size_t vtxList = (size_t)((int64_t)be32(buf, h + 0x10) + off);
 	ch.numPolygons = be16(buf, h + 0x14);
 	size_t polyList = (size_t)((int64_t)be32(buf, h + 0x18) + off);
+	// (0: none - the game's SurfaceType_GetData then reads 0)
+	const uint32_t surfRaw = be32(buf, h + 0x1C);
+	const int64_t surfList = surfRaw ? (int64_t)surfRaw + off : -1;
 	vector<std::array<int, 3>> verts(numVtx);
 	for (int i = 0; i < numVtx; i++)
 		for (int k = 0; k < 3; k++) verts[i][k] = bes16(buf, vtxList + i * 6 + k * 2);
@@ -46,6 +49,8 @@ bool parseScene(const vector<uint8_t>& buf, const string& game, ColHeader& ch, v
 			for (int j = 0; j < 3; j++) t.v[k][j] = verts.at(vi[k])[j];
 		for (int k = 0; k < 3; k++) t.n[k] = bes16(buf, p + 8 + k * 2);
 		t.d = bes16(buf, p + 14);
+		const uint16_t type = be16(buf, p);
+		if (surfList >= 0 && (size_t)surfList + (size_t)type * 8 + 4 <= buf.size()) t.surf0 = be32(buf, (size_t)surfList + (size_t)type * 8);
 		tris.push_back(t);
 	}
 	return true;

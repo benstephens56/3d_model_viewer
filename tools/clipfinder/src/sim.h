@@ -1,6 +1,7 @@
 // clipfinder --sim: one frame from a standing start, printed step by step.
 #pragma once
 
+#include "ground.h"
 #include "slope.h"
 
 // --sim: Link standing at (x, y, z) (feet), moving at yaw / speed for
@@ -9,3 +10,6 @@
 // speed (same yaw), each with its floor check, then two standing still.
 // Returns the exit code (2 for a bad --sim value).
 int runSim(const Model& m, const string& simArg);
+
+// --tri: each poly's vertices, normal, plane distance and type (dynapolys by their scan ids).
+int printTris(const Model& m, const string& ids);

@@ -8,6 +8,7 @@ struct Tri {
 	int v[3][3];
 	int n[3];
 	int d;
+	uint32_t surf0 = 0; // its SurfaceType's data[0] (exit index, floor property, ...)
 };
 struct ColHeader {
 	int minB[3], maxB[3];

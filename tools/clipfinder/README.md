@@ -42,7 +42,7 @@ tools/clipfinder/clipfinder.exe --game MM --all --form All --after "Laundry Pool
 
 # The lowest speed for one clip, exactly, and the angles that work
 tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --pair 50,90 --refine -o tools/clipfinder/results/tcs_50_90.json
-tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --pair 50,90 --angles --out-dir tools/clipfinder/results
+tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --pair 50,90 --angles --max-speed 11 --out-dir tools/clipfinder/results
 
 # That clip at one yaw, at speed 15 or less
 tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --pair 50,90 --yaw 0xF000 --max-speed 15 -o tools/clipfinder/results/tcs_50_90_f000.json
@@ -91,13 +91,16 @@ the radius, so scan each form you care about.
 | `--falling` | Also look for clips while falling ("low" clips, `drop` > 0). Link's post-move position (posNext) is 2–30 below the floor, so the wall check runs lower than when walking. Slower. Falling crossings are only generated for drops where `checkHeight + dy >= 5`. Beyond that, the game's line test runs from Link's feet with floors included and stops him on his own floor (MM Human: drop over 21.8, OoT: over 21, Crawlspace: over 10). |
 | `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) See **Acute or extended** below for how a wall pair is categorised; this leaves out every acute pair, all its points included. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
-| `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them; for a slope clip P is the floor, C the wall). Needed for `--refine` / `--angles`. The scan only looks near the two triangles: the wall pairs and slope walls within a frame's move (`--max-move`) plus two radii and 10 of them. Every triangle still collides as usual, and the pair's clips come out the same as a whole-map scan's (OoT Death Mountain Trail setup 2, falling, TRI 90 → 25: 168 s → 14 s). |
+| `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them; for a slope or ground clip P is the floor, C the wall). Needed for `--refine` / `--angles`. The scan only looks near the two triangles: the wall pairs and slope walls within a frame's move (`--max-move`) plus two radii and 10 of them. Every triangle still collides as usual, and the pair's clips come out the same as a whole-map scan's (OoT Death Mountain Trail setup 2, falling, TRI 90 → 25: 168 s → 14 s). |
 | `--dyna FILE` | Add the dynapoly actors, from the viewer's **Export all dynapolys** (every map's, every setup; see **Dynapolys** below). A single map's `dynapoly-1` export (the old **Export dynapolys**) still works. Each map is scanned once per set of setups with the same dynapolys, and once without dynapolys if the file has none for it. Output files named by `--out-dir` get `_setup<N>[-<N>...]_dyna` added; with `-o` and several sets, `_setup...` goes before `.json`. |
 | `--no-slope` | Leave out the slope clips (see **Slope clips** below). |
-| `--slope-only` | Only the slope clips: the wall push scan is skipped. |
+| `--slope-only` | Only the slope clips: the wall push and ground clip scans are skipped. `--out-dir` names the file `..._slope.json`. |
+| `--no-ground` | Leave out the ground clips (see **Ground clips** below). |
+| `--ground-only` | Only the ground clips: the wall push and slope clip scans are skipped. `--out-dir` names the file `..._ground.json`, so it doesn't overwrite the full scan's. |
+| `--keep-load-void` | Keep the clips whose start is on a loading zone (a floor with an exit, `SurfaceType_GetExitIndex`) or a void plane (floor property 5 / 12, MM 13 too). Left out by default: standing there takes Link out of the scene before any clip matters. Only the floor under the start counts; dynapolys never do (the export has no surface types). E.g. OoT Death Mountain Trail, adult: 374 of 1818 points, nearly all of TRI 348 → 346 / 345, start on the summit's exit to the crater (TRI 453, exit 5). `--sim` prints the start's floor, and `--tri` a poly's exit and floor property. |
 | `--slope-starts` | Also search the crossing points whose surroundings are only in bounds when the rays that go into a slope first are ignored (see **In bounds** below). Finds some more crossing clips starting on slopes, but about 3x slower on a mountain: OoT Death Mountain Trail setup 2, adult, falling: 21333 points (4 more wall pairs) in 110 s instead of 21039 in 38 s. |
 | `--dyna-only` | With `--dyna`: only scan the wall pairs that have a dynapoly wall in them (pusher or clipped wall), and skip maps without dynapolys. Much faster; the static-only pairs are what a scan without `--dyna` finds, give or take the dynapolys' effect on them. |
-| `--setup N` | With `--dyna`: only the dynapolys of setup N. |
+| `--setup N` | With `--dyna`: only the dynapolys of setup N, for every form. Without it, OoT pairs each form with the setups it plays in (see **OoT forms and setups** below). |
 
 ### Speed and angle analysis
 
@@ -105,25 +108,25 @@ the radius, so scan each form you care about.
 |---|---|
 | `--min-speed` | For every clip, the lowest speed that does it: starts in 32 directions every 1 unit up to 45 away (`--max-move`), each where Link comes to rest there, with the real frame run. Written to each clip as `"reach": {speed, yaw, start}` (`null` if none). The terminal lists the lowest per wall pair. The viewer's "Reachable only" filter uses these values directly. |
 | `--refine` | With `--pair`: the exact lowest **walking** speed for that clip. It searches every standable in-bounds start within 24 of the best coarse one (0.25 grid), every yaw toward the clip points (then single steps), and speeds every 0.02, bisected down to the exact f32 boundary. A speed only counts if the clip also works at +0.0025 … +0.01, which rules out single-value flukes (like posNext landing exactly on a wall's plane). The JSON's `clips` then holds **only the refined clip** (its `prev` is the start, its `yaw` and `speed` the move), so the tester runs exactly that move. If the refine finds nothing, the ordinary clips are written. Implies `--min-speed`. |
-| `--angles` | With `--pair`: after refining, try all 4096 directions from the refined start. The game's sine table ignores the yaw's low 4 bits, so e.g. `0xFFC0`–`0xFFCF` move Link the same way. Prints the yaws that clip at the refined speed, the yaws that clip at any speed up to 30 (`--max-move` / 1.5), and each direction's lowest speed. Implies `--refine`. |
-| `--from X,Y,Z[,SPEED]` | With `--pair`: `--angles` from this start (feet position) instead of the refined one, and at SPEED if given. Warns if Link wouldn't stand still there or if it's out of bounds. |
-| `--yaw YAW --max-speed S` | With `--pair`: the lowest **walking** speed up to S that does that clip moving at exactly YAW (`0x1234` or decimal), from any standable in-bounds start. `--yaw FROM-TO` (e.g. `0xFF80-0x0040`, going up through `0xFFFF` → `0` when TO is below FROM) does every yaw from FROM to TO in steps of `0x10` (the low 4 bits don't change the move), prints each yaw's answer as it goes (with the slowest start's exact position), then a table on stdout, one row per yaw: its minimum speed and the x and z range of the starts that clip at some speed up to S (or `none`). Every start is tried, not just until a slower one turns up. Starts within 0.75 of each other are grouped into regions; a yaw with several separate regions gets a `region` row for each under its own. Each yaw that clips also gets a CSV next to the JSON, `<output>_<YAW>.csv` (e.g. `tcs.json` → `tcs_FFC0.csv`; with several forms the form is in the name too): a grid of round x values (columns) and z values (rows), about 20 × 40, stepped 1, 2 or 5 × a power of ten, and each cell `Yes` if Link standing exactly there (the nearest f32 to that number) clips at some speed up to S, else `No`. Each cell is tested at its own coordinates, so the grid shows the shape of where the clip works. It starts over the starts found and grows until its edge rows and columns are all `No`, so it covers the whole shape even without `--exact`. The ranges are the bounding box of the sampled starts that work, so they're only as fine as the sampling, and not every point inside a box works: the regions are usually thin strips, e.g. along the edge of a wall Link is pressed against. The JSON then holds one clip per yaw that works. Starts are every resting spot behind the scan's clip points of the pair along YAW (up to S × 1.5 back and 3 either side, every 0.002 across YAW (`--side-step D` to change it: smaller finds more positions but takes longer, e.g. 0.0005 about 4x) and 0.5 along it: a start pressed against a wall can have to be right to a few thousandths); speeds as for `--refine` (every 0.02, bisected, robust to +0.01). Prints the speed and start, or that none works. The JSON's `clips` holds only those clips, or nothing if none works at those yaws (unlike `--refine`, the scan's clips are never written instead). Slower at high S (Treasure Chest Shop at 30: 35–90 s; at 10: about 5 s). Can't be combined with `--min-speed` / `--refine` / `--angles`. |
+| `--angles --max-speed S` | With `--pair`: every yaw that does that clip at speed S or less, each from its own start, as `--yaw` finds them (and the same table: a start per yaw, without the CSVs). It starts from the refined yaw (`--refine`'s lowest speed, about 1.5 s) and the scan's clip moves already at speed S or less, and walks out from each that clips, `0x10` at a time both ways, until 16 yaws in a row don't clip (`--angle-gap N` for another number; bigger is slower, about 2N failing yaws for the two ends of each run): the yaws that work come in runs, sometimes with a gap (Treasure Chest Shop Human 50 → 90 at 11: `0xFF40`–`0xFFEF`, then `0x0010` on). Prints the runs on one line (`Yaws that clip at speed up to S: ...`). A run more than that many yaws away from the others isn't found; `--yaw FROM-TO` covers a range for sure. About 4 s a yaw at speed 10 (no CSV grid to make): Treasure Chest Shop Human 50 → 90 at 10, 106 yaws in 7 minutes, clipping at `0xFE30`–`0xFFEF`, `0x0010`–`0x007F`, `0x00A0`–`0x017F` and a few single yaws up to `0x03CF`. |
+| `--from X,Y,Z[,SPEED]` | With `--pair`: after refining, try all 4096 directions from this one start (feet position): the yaws that clip at SPEED (the refined speed if not given), the yaws that clip at any speed up to `--max-move` / 1.5, and each direction's lowest speed. The game's sine table ignores the yaw's low 4 bits, so e.g. `0xFFC0`–`0xFFCF` move Link the same way. Only that start: a clip that needs Link pressed against a wall to a few thousandths works at other yaws from other starts (`--angles` finds those). Warns if Link wouldn't stand still there or if it's out of bounds. Implies `--refine`. |
+| `--yaw YAW --max-speed S` | With `--pair`: the lowest **walking** speed up to S that does that clip moving at exactly YAW (`0x1234` or decimal), from any standable in-bounds start. `--yaw FROM-TO` (e.g. `0xFF80-0x0040`, going up through `0xFFFF` → `0` when TO is below FROM) does every yaw from FROM to TO in steps of `0x10` (the low 4 bits don't change the move), prints each yaw's answer as it goes (with the slowest start's exact position), then a table on stdout, one row per yaw: its minimum speed and a start that clips at it, as exact f32s to set Link at (or `none`). Every start is tried, not just until a slower one turns up. Starts within 0.75 of each other are grouped into regions; a yaw with several separate regions gets a `region` row for each under its own, with that region's lowest speed and its start. Each yaw that clips also gets a CSV next to the JSON, `<output>_<YAW>.csv` (e.g. `tcs.json` → `tcs_FFC0.csv`; with several forms the form is in the name too): a grid of round x values (columns) and z values (rows), about 20 × 40, stepped 1, 2 or 5 × a power of ten, and each cell `Yes` if Link standing exactly there (the nearest f32 to that number) clips at some speed up to S, else `No`. Each cell is tested at its own coordinates, so the grid shows the shape of where the clip works. It starts over the starts found and grows until its edge rows and columns are all `No`, so it covers the whole shape even without `--exact`. (The starts that work are usually thin strips, e.g. along the edge of a wall Link is pressed against: the CSV shows their shape.) The JSON then holds one clip per yaw that works. Starts are every resting spot behind the scan's clip points of the pair along YAW (up to S × 1.5 back and 3 either side, every 0.002 across YAW (`--side-step D` to change it: smaller finds more positions but takes longer, e.g. 0.0005 about 4x) and 0.5 along it: a start pressed against a wall can have to be right to a few thousandths); speeds as for `--refine` (every 0.02, bisected, robust to +0.01). Prints the speed and start, or that none works. The JSON's `clips` holds only those clips, or nothing if none works at those yaws (unlike `--refine`, the scan's clips are never written instead). Slower at high S (Treasure Chest Shop at 30: 35–90 s; at 10: about 5 s). Can't be combined with `--min-speed` / `--refine` / `--angles` / `--from`. |
 | `--exact` | With `--yaw`: after the sampled search, try **every f32 x and z** around each region it found: the region's box, one side-step bigger each way, growing until nothing that works is within a side-step of its edge (only the new strip is tried each time). A point counts if Link stands still there (his resting spot is that exact point), it's in bounds, and it clips at some speed up to S. The table and the minimum speeds then come from these (the CSVs test their own grid either way). It only fills in around what the sampling found: a separate spot narrower than `--side-step` that no sampled start landed in is still missed. Treasure Chest Shop Deku 50 → 90 at 0xFFD0, speed 9.9: 12 sampled positions became 28,238 (min speed 9.8214 → 9.8047), about 12 s. A region that would grow past 50 million points is left as sampled. |
-| `--speed S` | With `--yaw`: make the CSV grids at **exactly** speed S: a cell is `Yes` if Link standing exactly there clips moving at the yaw at speed S, and its `_speeds.csv` is S everywhere, so the tester tries every cell at S. Stands in for `--max-speed` if that's not given (the search for starts goes up to S). |
-| `--max-move N` | How far Link can move in one frame, in units. Default 45 (speed 30), which glitches can beat (55+). Crossing points are tried from starts up to 32 back by default, and every 4 past that out to N when N is over 45. `--min-speed`, `--refine` and `--angles` look for starts up to N away (speed N / 1.5). Written to the JSON as `"maxMove"` when it isn't 45; the viewer's max move box picks it up on import. Scans take longer the further out it goes. |
+| `--speed S` | With `--yaw` or `--angles`: also find, per yaw, a start that clips at **exactly** speed S (printed under the yaw's row, `at exactly S: start ...`; the JSON's clip for the yaw is that move, and a yaw without one gets no clip; with `--angles` the runs line lists the yaws that clip at exactly S). Each start the search found (lowest speed v <= S) is tried as it is, then moved (S - v) x 1.5 back along the yaw so posNext lands where v put it, and a few steps of 0.00005 either way; it has to be where Link rests, in bounds, and clip at exactly S. E.g. Treasure Chest Shop Human 50 → 90 at 9.94054: `0x0120` from (-240.411819, 0, 824.492676), `0x0130` from (-240.434586, 0, 824.502808). With `--yaw` it also makes the CSV grids at exactly speed S: a cell is `Yes` if Link standing exactly there clips moving at the yaw at speed S, and its `_speeds.csv` is S everywhere, so the tester tries every cell at S. Stands in for `--max-speed` if that's not given (the search for starts goes up to S). |
+| `--max-move N` | How far Link can move in one frame, in units. Default 45 (speed 30), which glitches can beat (55+). Crossing points are tried from starts up to 32 back by default, and every 4 past that out to N when N is over 45. `--min-speed`, `--refine` and `--from` look for starts up to N away (speed N / 1.5). Written to the JSON as `"maxMove"` when it isn't 45; the viewer's max move box picks it up on import. Scans take longer the further out it goes. |
 
 ### Debugging one frame
 
 | Option | Meaning |
 |---|---|
-| `--sim X,Y,Z,YAW,SPEED[,DROP]` | Run one frame and print each step (a slope clip is reported too). SPEED as `15/7`: one frame of walking per speed at the same yaw, each ending with the floor check, then two frames standing still, printing where each one leaves Link and which wall he's behind; for slope clips. Link stands at (X, Y, Z) (feet) and moves at YAW (`0x1234` or decimal) with speedXZ SPEED. posNext is 7.5 below his feet (walking), or DROP below if given (falling). Prints: whether the start is in bounds and a resting spot, the line test and what it hits, every wall push, where he ends up, and whether that's a clip and out of bounds. Use it when a clip works in game but the scan disagrees, or the other way round. Nothing is written. |
+| `--sim X,Y,Z,YAW,SPEED[,DROP]` | Run one frame and print each step (a slope clip is reported too). DROP can be given as a y velocity instead, `vVY`: `v-20` is a drop of 30. A drop of more than checkHeight - 5 runs the ground clip frame (see **Ground clips**): the start floor's line test plane distance, the line test at the feet, the pushes, the floor check and the verdict. SPEED as `15/7`: one frame of walking per speed at the same yaw, each ending with the floor check, then two frames standing still, printing where each one leaves Link and which wall he's behind; for slope clips. Link stands at (X, Y, Z) (feet) and moves at YAW (`0x1234` or decimal) with speedXZ SPEED. posNext is 7.5 below his feet (walking), or DROP below if given (falling). Prints: whether the start is in bounds and a resting spot, the line test and what it hits, every wall push, where he ends up, and whether that's a clip and out of bounds. Use it when a clip works in game but the scan disagrees, or the other way round. Nothing is written. |
 
 ### Output and running
 
 | Option | Meaning |
 |---|---|
 | `-o FILE`, `--out FILE` | Write the JSON here (single map). |
-| `--out-dir DIR` | Write each map's JSON into DIR as `<GAME>_<map>_<form>[_falling][_extended][_setup<N>_dyna][_pair<P>-<C>].json` (`--pair` gets its own file, so it doesn't overwrite the whole map's scan). Used with `--all`, or with `--map` instead of `-o`. The directory must exist. A path clipfinder can't write stops the run straight away. Note that clipfinder is a Windows program: from WSL, `/tools/...` means `C:\tools\...`, so use relative paths like `tools/clipfinder/results`. |
+| `--out-dir DIR` | Write each map's JSON into DIR as `<GAME>_<map>_<form>[_falling][_extended][_first][_setup<N>_dyna][_pair<P>-<C>].json` (`_first`: `--first-per-pair`; `--pair` and `--first-per-pair` get their own files, so they don't overwrite the whole map's full scan). Used with `--all`, or with `--map` instead of `-o`. The directory must exist. A path clipfinder can't write stops the run straight away. Note that clipfinder is a Windows program: from WSL, `/tools/...` means `C:\tools\...`, so use relative paths like `tools/clipfinder/results`. |
 | `--root DIR` | The viewer's folder (with `models/` and `js/model_list.js`). Default: the current folder if it has `js/model_list.js`, else two levels up from the exe. |
 | `--threads N` | Worker threads. Default: all cores. |
 
@@ -138,7 +141,7 @@ the radius, so scan each form you care about.
   ],
   "clips": [
     {"form": "Human",
-     "kind": "acute" | "extended" | "slope", // the wall pair's category (below), the same for all its points
+     "kind": "acute" | "extended" | "slope" | "ground", // the wall pair's category (below), the same for all its points
                                            // (files from before 2026-09-26: per point, and "low" for falling ones)
      "cross": true,                        // crossing (moving through the pusher's plane) vs standing point
      "drop": 0,                            // falling: how far below the floor posNext is (0 = walking)
@@ -151,6 +154,7 @@ the radius, so scan each form you care about.
      "floorY": 0,
      "yaw": 65473, "speed": 9.8252573,     // the move from prev to next (s16 yaw, f32 speedXZ)
      "speed2": 4,                          // slope clips: the next frame's speed (same yaw), if it needs one
+     "vy": -20,                            // ground clips: velocity.y for the frame (next.y = prev.y + vy x 1.5)
      "yaws": [...],                        // crossings: the yaws that worked, of the 32 start directions tried for this point
      "reach": {"speed": ..., "yaw": ..., "start": [...]}  // --min-speed
     }
@@ -251,6 +255,26 @@ spawn), ones that only appear later, and which dynapoly actors are loaded
 together in-game. The export has each actor its spawn list has for the chosen
 setup.
 
+## OoT forms and setups
+
+An OoT scene's setups (layers) 0 and 1 are child day and night, 2 and 3 adult
+day and night, 4 on cutscenes. A scene without one of them loads another
+(`Scene_CommandAlternateHeaderList`): adult night falls back to adult day,
+anything else to setup 0. Most scenes only have setup 0, which both ages use.
+
+With `--dyna` (and no `--setup`), each form is scanned only with the
+dynapolys of the setups it plays in: Child and Crawlspace setups 0 / 1, Adult
+2 / 3, each resolved that way from the setups the scene has (the viewer's
+setup list, `models/OOT/actors/OOT_actors_by_scene.json`). The terminal prints
+the pairing, e.g. Death Mountain Trail (setups 0, 2, 4-8): `Adult setup 2,
+Child setup 0, Crawlspace setup 0`. A form whose setups have no dynapolys is
+scanned without them (skipped with `--dyna-only`); cutscene setups are only
+scanned with `--setup`, which takes every form.
+
+The viewer does the same on auto-import: loading setup 0-3 of an OoT map
+shows only the forms that play in it (the status says which were left out);
+a cutscene setup shows every form.
+
 ## Holding the stick, and floor snaps
 
 Two kinds of clip beyond one push from a standing start:
@@ -335,6 +359,45 @@ Not modelled: Link's own slope handling (sliding down a slope too steep to
 stand on, or slowing on one). `wall_clip_tester.lua` runs slope clips in
 "move" mode, writing `speed2` just after the first frame, and judges him
 after the second.
+
+## Ground clips
+
+`"kind": "ground"`. Falling fast, the game's wall check changes its line
+test: when checkHeight + dy < 5 (dy is posNext.y - prevPos.y, so a y
+velocity below (5 - checkHeight) / 1.5, -14 for Link in OoT) it tests the
+line from prevPos to posNext themselves, Link's feet, with floors, instead
+of at his check height. If he starts the frame on the floor, that line
+starts on the floor's plane, and whether the floor counts as crossed comes
+down to the f32 rounding of its plane distance there (`planeDistA` in
+`CollisionPoly_LineVsPoly`): just under 0 and the line goes on into the
+ground. (The viewer's yellow "ground-clippable" bands on standable surfaces
+are where it does.) Then it passes under the bottom of a wall rising out of
+that floor, and the wall push, at posNext.y + checkHeight, is under the
+wall's bottom too. The floor check (from prevPos.y + 50) finds whatever is
+behind the wall, or nothing, and he falls out of bounds.
+
+OoT Kakariko Village, child: on the slope TRI 491 at (435.5778, 35.55124,
+626), pressed against TRI 507, y velocity -20, yaw 0x0000, speed 18. The
+line test's plane distance at the start is -0.0000153, and there's no
+floor behind TRI 507:
+
+```bash
+tools/clipfinder/clipfinder.exe --game OOT --map "Spot 01 - Kakariko Village" --form Child --sim "435.5778,35.55124,626,0,18,v-20"
+```
+
+The scan goes along every wall's bottom edge, every unit, where a floor
+meets it. It tries starts on that floor (resting spots) moving at the wall
+from pressed against it to 24 further back, aimed to end 1 to 24 past it,
+at y velocity -20 (the fastest, `minVelocityY`: it goes deepest, soonest).
+A clip's `pusher` is the floor Link starts on, `crossed` the wall he goes
+under, `vy` the y velocity; `reach` is the move itself. It must end out of
+bounds (or past a dynapoly wall), and a wall push or line snap putting him
+through the wall is an ordinary wall push clip, not this.
+
+The y velocity is the hard part: Link standing on the floor has -4. The
+tester writes `vy` (before gravity) as for falling clips, and runs ground
+clips in "move" mode. Not modelled: the ceiling check (from prevPos.y + 10,
+up to ceilingCheckHeight + dy - 10, which is small at this dy).
 
 ## Acute or extended
 

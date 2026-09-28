@@ -55,4 +55,9 @@ std::optional<Clip> refinedClip(const Model& m, const Refined& r, int pusher, in
 // then every f32 x, z in each region's box (a sideStep bigger each way) is
 // tried too, and the regions are made from those. gridSpeed (--speed, 0
 // none): the CSV grid's cells are tried at exactly that speed instead.
-Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int crossed, int yaw, double maxSpeed, double sideStep, bool exact, double gridSpeed, int threads);
+// grid: make the CSV grid (r.grid) - --angles doesn't need it.
+Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int crossed, int yaw, double maxSpeed, double sideStep, bool exact, double gridSpeed, int threads, bool grid = true);
+
+// --speed S with --yaw / --angles: a start that clips moving at `yaw` at
+// exactly speed S, from r's starts (r: clipAtYaw up to S), or none.
+std::optional<V3> startAtSpeed(const Model& m, const Refined& r, int yaw, double speed, int pusher, int crossed);

@@ -27,3 +27,7 @@ bool readDynaFile(const string& path, vector<DynaFile>& out, string& err);
 
 // Adds every actor to the model, in the file's order (bgId order).
 void addDynaActors(Model& m, const DynaFile& d);
+
+// Which setups each scene has (the viewer's setup list): per scene file name,
+// present[i] for setup i. false (with `err` set) if the file can't be read.
+bool readSceneSetups(const string& path, std::map<string, vector<bool>>& out, string& err);

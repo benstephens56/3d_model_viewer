@@ -9,8 +9,8 @@
 // wall and end out of bounds - so the speed is one that works exactly.
 void reachability(const Model& m, Scratch& s, Clip& c) {
 	const double REACH_STEP = 1;
-	// a slope clip's move is its reach already (slopeFrame)
-	if (c.kind == 2) return;
+	// a slope / ground clip's move is its reach already (slopeFrame, groundFrame)
+	if (c.kind >= 2) return;
 	c.reachDone = true;
 	const double floorRef = c.hasFloorY ? c.floorY : c.from.y;
 	const V3 P = c.from;
@@ -312,7 +312,7 @@ void findMinSpeeds(const Model& m, vector<Clip>& found, int threads) {
 		auto k = std::make_tuple(c.pusher, c.crossed, c.cross, c.drop > 0);
 		if (!best.count(k) || c.reachSpeed < best[k]->reachSpeed) best[k] = &c;
 	}
-	static const char* kinds[] = { "acute", "extended", "slope" };
+	static const char* kinds[] = { "acute", "extended", "slope", "ground" };
 	for (auto& [k, c] : best) {
 		fprintf(stderr, "  %s %s TRI %d -> %d: min speed %.4f  start %.3f, %.3f, %.3f  yaw 0x%04X  (clip point %.3f, %.3f, %.3f%s)\n",
 			kinds[c->kind], c->cross ? "cross" : "stand", c->pusher, c->crossed, c->reachSpeed,
@@ -368,7 +368,7 @@ std::optional<Clip> refinedClip(const Model& m, const Refined& r, int pusher, in
 // maxSpeed * 1.5 back, 3 either side), every sideStep across the yaw and 0.5
 // along it, each where Link comes to rest there. A start is tried from the speed
 // that takes it to within 3 of the nearest clip point ahead (none: skipped).
-Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int crossed, int yaw, double maxSpeed, double sideStep, bool exact, double gridSpeed, int threads) {
+Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int crossed, int yaw, double maxSpeed, double sideStep, bool exact, double gridSpeed, int threads, bool grid) {
 	Refined best;
 	yaw &= 0xFFFF;
 	const V3 unit = moveStep({ 0, 0, 0 }, yaw, 1 / SPEED_RATE);  // (sine table direction)
@@ -640,7 +640,7 @@ Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int cro
 	// Yes (the starts found don't cover it all: likely without --exact), that
 	// side grows by half the span and the grid is made again (points already
 	// tried aren't tried again), up to GRID_GROWS times.
-	if (best.found) {
+	if (best.found && grid) {
 		const int GRID_COLS = 20, GRID_ROWS = 40, GRID_GROWS = 16;
 		double x0 = INFINITY, x1 = -INFINITY, z0 = INFINITY, z1 = -INFINITY;
 		const double y = best.start.y;
@@ -720,4 +720,39 @@ Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int cro
 		}
 	}
 	return best;
+}
+
+// --speed S (with --yaw / --angles): a start that clips at exactly speed S,
+// from the starts the search found (each with its own lowest speed v <= S):
+// moved (S - v) x 1.5 back along the yaw, so posNext lands where v put it,
+// then a few f32 steps either way (rounding moves posNext a hair). It has to
+// be where Link rests (standSpot gives back that exact point), in bounds, and
+// the frame at exactly S has to clip. Nearest v to S first.
+std::optional<V3> startAtSpeed(const Model& m, const Refined& r, int yaw, double speed, int pusher, int crossed) {
+	if (!r.found) return std::nullopt;
+	Scratch s;
+	s.stamp.assign(m.polys.size(), 0);
+	const V3 unit = moveStep({ 0, 0, 0 }, yaw, 1 / SPEED_RATE);
+	const double len = std::hypot(unit.x, unit.z);
+	const double dx = unit.x / len, dz = unit.z / len;
+	vector<std::pair<V3, double>> pts;
+	for (const StartRegion& g : r.regions) pts.insert(pts.end(), g.pts.begin(), g.pts.end());
+	std::stable_sort(pts.begin(), pts.end(), [&](const auto& a, const auto& b) { return std::fabs(a.second - speed) < std::fabs(b.second - speed); });
+	if (pts.size() > 4000) pts.resize(4000);
+	const double sp = F(speed);
+	for (const auto& [p, v] : pts) {
+		// (the start itself first: it may clip at S as it is)
+		const double back = (sp - v) * SPEED_RATE;
+		for (double base : { 0.0, back }) {
+			for (int j = 0; j <= 16; j++) {
+				const double o = (j % 2 ? -1 : 1) * ((j + 1) / 2) * 0.00005;  // 0, +, -, ++, --, ...
+				const double x = F(p.x - (base - o) * dx), z = F(p.z - (base - o) * dz);
+				auto st = standSpotCached(m, s, x, z, p.y);
+				if (!st || st->x != x || st->z != z) continue;
+				if (!m.isInBounds(s, *st, true)) continue;
+				if (walkFrameClips(m, s, *st, yaw, sp, pusher, crossed)) return *st;
+			}
+		}
+	}
+	return std::nullopt;
 }

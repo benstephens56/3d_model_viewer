@@ -22,7 +22,7 @@ static string jsonStr(const string& s) {
 // (one of `forms`), so the viewer can show them all at once.
 string toJson(const string& game, const string& map, int numPolygons, bool falling, bool extendedOnly,
 	const vector<FormResult>& forms, const string& dynaRaw, const vector<int>& setups) {
-	static const char* kinds[] = { "acute", "extended", "slope" };
+	static const char* kinds[] = { "acute", "extended", "slope", "ground" };
 	std::ostringstream o;
 	o << "{\n  \"format\": \"wall-push-clips-2\",\n";
 	o << "  \"game\": " << jsonStr(game) << ", \"map\": " << jsonStr(map)
@@ -63,6 +63,8 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 		if (c.hasMove) o << ",\"yaw\":" << c.yaw << ",\"speed\":" << num(c.speed);
 		// slope clips: the second frame's speed (the same yaw), if it needs one
 		if (c.speed2 > 0) o << ",\"speed2\":" << num(c.speed2);
+		// ground clips: velocity.y for the frame
+		if (c.kind == 3) o << ",\"vy\":" << num(c.vy);
 		// --min-speed: the slowest move that does it, or null for none
 		if (c.reachDone) {
 			if (c.hasReach) o << ",\"reach\":{\"speed\":" << num(c.reachSpeed) << ",\"yaw\":" << c.reachYaw << ",\"start\":" << vec(c.reachStart) << "}";
