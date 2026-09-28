@@ -14,7 +14,7 @@ static const char* P(const V3& v) {
 static int runSimFrames(const Model& m, const V3& start, int yaw, const vector<double>& speeds) {
 	Scratch s;
 	s.stamp.assign(m.polys.size(), 0);
-	printf("start %s  yaw 0x%04X, in bounds: %s\n", P(start), yaw, m.isInBounds(s, start) ? "yes" : "NO");
+	printf("start %s  yaw 0x%04X, in bounds: %s\n", P(start), yaw, m.isInBounds(s, start, true) ? "yes" : "NO");
 	V3 cur = start;
 	for (size_t i = 0; i < speeds.size(); i++) {
 		V3 next = moveStep(cur, yaw, F(speeds[i]));
@@ -66,7 +66,7 @@ int runSim(const Model& m, const string& simArg) {
 	V3 next = moveStep(start, yaw, F(speed));
 	if (drop > 0) next.y = F(start.y - drop);
 	printf("start %s  yaw 0x%04X  speed %.9g -> posNext %s\n", P(start), yaw, F(speed), P(next));
-	printf("start in bounds: %s\n", m.isInBounds(s, start) ? "yes" : "NO");
+	printf("start in bounds: %s\n", m.isInBounds(s, start, true) ? "yes" : "NO");
 	auto rest = m.restingSpot(start);
 	printf("start is a resting spot: %s\n", rest && rest->x == start.x && rest->z == start.z ? "yes" : rest ? (string("no, rests at ") + P(*rest)).c_str() : "no (pushes don't settle)");
 	if (F(m.checkHeight + F(next.y - start.y)) < 5) printf("checkHeight + dy < 5: the game's line test runs at the feet, floors included (not modelled)\n");

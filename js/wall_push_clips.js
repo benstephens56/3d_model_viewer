@@ -598,8 +598,11 @@ class CollisionModel {
     }
 
     // Not inside a wall (behindWall), and horizontal rays at sphere height
-    // don't see the back of a wall first in any direction.
-    isInBounds(pos) {
+    // don't see the back of a wall first in any direction. floorsBlock (where
+    // Link starts or stands): a ray into a floor first doesn't count - up a
+    // slope the rays go under the ground to the back of a wall far off
+    // (tools/clipfinder Model::isInBounds).
+    isInBounds(pos, floorsBlock = false) {
         if (this.behindWall(pos)) return false;
         const y = F(pos.y + this.checkHeight);
         const len = 400;
@@ -608,7 +611,15 @@ class CollisionModel {
             const a = { x: pos.x, y, z: pos.z };
             const b = { x: F(pos.x + Math.sin(ang) * len), y, z: F(pos.z + Math.cos(ang) * len) };
             const hit = this.lineHit(a, b, STRICT, false);
-            if (hit && planeDist(hit.poly, a.x, a.y, a.z) < 0) return false;
+            if (!hit || planeDist(hit.poly, a.x, a.y, a.z) >= 0) continue;
+            // (only a ray that says out of bounds is checked again with floors:
+            // otherwise they can't change its answer, and they're slow. A
+            // floor's underside first: under the ground, out of bounds)
+            if (floorsBlock) {
+                const fh = this.lineHit(a, b, STRICT, true);
+                if (fh && fh.poly.isFloor && planeDist(fh.poly, a.x, a.y, a.z) >= 0) continue;
+            }
+            return false;
         }
         return true;
     }
@@ -858,7 +869,7 @@ function reachability(model, c) {
                 const h = F(P.y + model.checkHeight);
                 if (model.lineHit({ x: start.x, y: h, z: start.z }, { x: P.x, y: h, z: P.z }, LOOSE, false, true)) continue;
             }
-            if (!model.isInBounds(start)) continue;
+            if (!model.isInBounds(start, true)) continue;
             best = { speed, start, yaw };
         }
     }

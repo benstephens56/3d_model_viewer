@@ -41,9 +41,9 @@
 -- wall_clip_tests.json next to this script. Its clips are turned into tests,
 -- with the walls read from RAM (load that map first). (A .lua test file from
 -- an older viewer still works too.)
-local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\tcs_50_90.json]]
+local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\OOT_Spot_16_-_Death_Mountain_Trail_Adult_falling_setup2_dyna.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
-local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
+local MAX_PER_GROUP = 0          -- points tried per wall pair (spread evenly); 0 = all
 local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --falling scans)
 local SETTLE_FRAMES = 30          -- emulated frames to let run after the test frame (3 per game frame)
 local HOOK_TIMEOUT = 60           -- emulated frames to wait for the player's bg check
@@ -80,7 +80,7 @@ local FORM = nil
 -- x, z at the yaw): a Yes at its lowest speed (should clip), a No at the max
 -- speed (shouldn't). Each grid's in-game result goes to <that CSV>_ingame.csv,
 -- mismatches marked, and the summary lists them.
-local CSV_TESTS = true
+local CSV_TESTS = false
 local CSV_CELLS = "all"           -- "all", or "border": only cells next to one with the other answer
 local CSV_DRIFT = 0.0001          -- Link pushed further than this off a cell's start before the move: No
 

@@ -86,7 +86,7 @@ static string safeName(const string& s) {
 
 int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root, after, dynaPath;
-	bool dynaOnly = false, noSlope = false, slopeOnly = false;
+	bool dynaOnly = false, noSlope = false, slopeOnly = false, slopeStarts = false;
 	int onlySetup = -1;  // --setup N: just the dynapolys of that setup
 	double radius = 0;
 	bool falling = false, all = false, extendedOnly = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
@@ -148,6 +148,7 @@ int main(int argc, char** argv) {
 		else if (a == "--dyna-only") dynaOnly = true;
 		else if (a == "--no-slope") noSlope = true;
 		else if (a == "--slope-only") slopeOnly = true;
+		else if (a == "--slope-starts") slopeStarts = true;
 		else if (a == "--setup") onlySetup = std::stoi(val());
 		else if (a == "--pair") {
 			string v = val();
@@ -188,7 +189,7 @@ int main(int argc, char** argv) {
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP]]  (one frame from a standing start, printed step by step; SPEED as 15/7: a frame per speed)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
 			"                  [--dyna FILE [--dyna-only] [--setup N]]  (the viewer's dynapoly export, one map's or every map's: the actors' collision too)\n"
-			"                  [--no-slope | --slope-only]  (slope clips: the floor check lifting Link behind a wall)\n"
+			"                  [--no-slope | --slope-only] [--slope-starts]  (slope clips: the floor check lifting Link behind a wall)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -326,7 +327,9 @@ int main(int argc, char** argv) {
 			string path = out;
 			if (path.empty() || all) {
 				string dir = outDir.empty() ? "." : outDir;
-				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + setupTag + (dyna.raw.empty() ? "" : "_dyna") + ".json";
+				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + setupTag + (dyna.raw.empty() ? "" : "_dyna") +
+					// (--pair: its own file, not over the whole map's scan)
+					(onlyPusher >= 0 ? "_pair" + std::to_string(onlyPusher) + "-" + std::to_string(onlyCrossed) : "") + ".json";
 			}
 			// -o with several exports of the map: one file each
 			else if (jobs.size() > 1) {
@@ -370,6 +373,16 @@ int main(int argc, char** argv) {
 				m.dynaPairsOnly = dynaOnly;
 				m.slope = !noSlope;
 				m.slopeOnly = slopeOnly;
+				m.slopeStarts = slopeStarts;
+				// --pair: the scan only looks near those two polys
+				if (onlyPusher >= 0) {
+					if (onlyPusher >= (int)m.polys.size() || onlyCrossed >= (int)m.polys.size() || !m.polys[onlyPusher].exists || !m.polys[onlyCrossed].exists) {
+						fprintf(stderr, "--pair %d,%d: no such polys in this map (%zu)\n", onlyPusher, onlyCrossed, m.polys.size());
+						return 2;
+					}
+					m.focusA = onlyPusher;
+					m.focusB = onlyCrossed;
+				}
 				if (!simArg.empty()) return runSim(m, simArg);
 				vector<Clip> found = scan(m, threads, firstPerPair);
 				// --pair: just the clips of that wall pair
@@ -486,7 +499,7 @@ int main(int argc, char** argv) {
 								if (!rest || rest->x != from.start.x || rest->z != from.start.z)
 									printf("(note: Link doesn't stand still at that start: the pushes move him%s)\n",
 										rest ? (string(" to ") + std::to_string(rest->x) + ", " + std::to_string(rest->z)).c_str() : "");
-								if (!m.isInBounds(s, from.start)) printf("(note: that start is out of bounds)\n");
+								if (!m.isInBounds(s, from.start, true)) printf("(note: that start is out of bounds)\n");
 							}
 							angleRanges(m, from, onlyPusher, onlyCrossed, threads);
 							fprintf(stderr, "  (angles: %.1fs)\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count());

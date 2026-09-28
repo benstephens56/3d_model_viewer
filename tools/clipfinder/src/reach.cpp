@@ -54,7 +54,7 @@ void reachability(const Model& m, Scratch& s, Clip& c) {
 				bool noFloor;
 				if (c.drop > 0 ? !landing(m, s, res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end)) continue;
 			}
-			if (!m.isInBounds(s, start)) continue;
+			if (!m.isInBounds(s, start, true)) continue;
 			have = true;
 			c.hasReach = true;
 			c.reachSpeed = speed;
@@ -224,7 +224,7 @@ Refined refineMinSpeed(const Model& m, const vector<Clip>& clips, int pusher, in
 				if (dx * dx + dz * dz > 24 * 24) continue;
 				auto st = standSpot(m, F(B.x + dx), F(B.z + dz), B.y);
 				if (!st || !seen.insert({ (float)st->x, (float)st->z }).second) continue;
-				if (!m.isInBounds(s, *st)) continue;
+				if (!m.isInBounds(s, *st, true)) continue;
 				starts.push_back({ nearest(*st), *st });
 			}
 		}
@@ -435,7 +435,7 @@ Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int cro
 					std::lock_guard<std::mutex> g(mu);
 					if (!seen.insert({ (float)st->x, (float)st->y, (float)st->z }).second) continue;
 				}
-				if (!m.isInBounds(s, *st)) continue;
+				if (!m.isInBounds(s, *st, true)) continue;
 				std::lock_guard<std::mutex> g(mu);
 				starts.push_back({ *lower, *st });
 			}
@@ -592,7 +592,7 @@ Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int cro
 							auto st = standSpot(m, x, z, g.start.y);
 							if (!st || st->x != x || st->z != z) continue;
 							auto lower = lowerOf(*st);
-							if (!lower || !m.isInBounds(s, *st)) continue;
+							if (!lower || !m.isInBounds(s, *st, true)) continue;
 							double sp = minSpeedAtYaw(m, s, *st, yaw, pusher, crossed, *lower, limit);
 							if (!(sp > 0 && sp <= F(maxSpeed))) continue;
 							std::lock_guard<std::mutex> lk(mu);
@@ -684,10 +684,10 @@ Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int cro
 					auto st = standSpot(m, x, z, y);
 					if (st && st->x == x && st->z == z && gridSpeed > 0) {
 						// --speed: that speed exactly, as the game would run it
-						if (m.isInBounds(s, *st) && walkFrameClips(m, s, *st, yaw, F(gridSpeed), pusher, crossed)) ok = F(gridSpeed);
+						if (m.isInBounds(s, *st, true) && walkFrameClips(m, s, *st, yaw, F(gridSpeed), pusher, crossed)) ok = F(gridSpeed);
 					} else if (st && st->x == x && st->z == z) {
 						auto lower = lowerOf(*st);
-						if (lower && m.isInBounds(s, *st)) {
+						if (lower && m.isInBounds(s, *st, true)) {
 							double sp = minSpeedAtYaw(m, s, *st, yaw, pusher, crossed, *lower, limit);
 							if (sp > 0 && sp <= F(maxSpeed)) ok = sp;
 						}

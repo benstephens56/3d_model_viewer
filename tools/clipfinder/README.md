@@ -91,10 +91,11 @@ the radius, so scan each form you care about.
 | `--falling` | Also look for clips while falling ("low" clips, `drop` > 0). Link's post-move position (posNext) is 2–30 below the floor, so the wall check runs lower than when walking. Slower. Falling crossings are only generated for drops where `checkHeight + dy >= 5`. Beyond that, the game's line test runs from Link's feet with floors included and stops him on his own floor (MM Human: drop over 21.8, OoT: over 21, Crawlspace: over 10). |
 | `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) See **Acute or extended** below for how a wall pair is categorised; this leaves out every acute pair, all its points included. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
-| `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them). Needed for `--refine` / `--angles`. |
+| `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them; for a slope clip P is the floor, C the wall). Needed for `--refine` / `--angles`. The scan only looks near the two triangles: the wall pairs and slope walls within a frame's move (`--max-move`) plus two radii and 10 of them. Every triangle still collides as usual, and the pair's clips come out the same as a whole-map scan's (OoT Death Mountain Trail setup 2, falling, TRI 90 → 25: 168 s → 14 s). |
 | `--dyna FILE` | Add the dynapoly actors, from the viewer's **Export all dynapolys** (every map's, every setup; see **Dynapolys** below). A single map's `dynapoly-1` export (the old **Export dynapolys**) still works. Each map is scanned once per set of setups with the same dynapolys, and once without dynapolys if the file has none for it. Output files named by `--out-dir` get `_setup<N>[-<N>...]_dyna` added; with `-o` and several sets, `_setup...` goes before `.json`. |
 | `--no-slope` | Leave out the slope clips (see **Slope clips** below). |
 | `--slope-only` | Only the slope clips: the wall push scan is skipped. |
+| `--slope-starts` | Also search the crossing points whose surroundings are only in bounds when the rays that go into a slope first are ignored (see **In bounds** below). Finds some more crossing clips starting on slopes, but about 3x slower on a mountain: OoT Death Mountain Trail setup 2, adult, falling: 21333 points (4 more wall pairs) in 110 s instead of 21039 in 38 s. |
 | `--dyna-only` | With `--dyna`: only scan the wall pairs that have a dynapoly wall in them (pusher or clipped wall), and skip maps without dynapolys. Much faster; the static-only pairs are what a scan without `--dyna` finds, give or take the dynapolys' effect on them. |
 | `--setup N` | With `--dyna`: only the dynapolys of setup N. |
 
@@ -122,7 +123,7 @@ the radius, so scan each form you care about.
 | Option | Meaning |
 |---|---|
 | `-o FILE`, `--out FILE` | Write the JSON here (single map). |
-| `--out-dir DIR` | Write each map's JSON into DIR as `<GAME>_<map>_<form>[_falling][_extended].json`. Used with `--all`, or with `--map` instead of `-o`. The directory must exist. A path clipfinder can't write stops the run straight away. Note that clipfinder is a Windows program: from WSL, `/tools/...` means `C:\tools\...`, so use relative paths like `tools/clipfinder/results`. |
+| `--out-dir DIR` | Write each map's JSON into DIR as `<GAME>_<map>_<form>[_falling][_extended][_setup<N>_dyna][_pair<P>-<C>].json` (`--pair` gets its own file, so it doesn't overwrite the whole map's scan). Used with `--all`, or with `--map` instead of `-o`. The directory must exist. A path clipfinder can't write stops the run straight away. Note that clipfinder is a Windows program: from WSL, `/tools/...` means `C:\tools\...`, so use relative paths like `tools/clipfinder/results`. |
 | `--root DIR` | The viewer's folder (with `models/` and `js/model_list.js`). Default: the current folder if it has `js/model_list.js`, else two levels up from the exe. |
 | `--threads N` | Worker threads. Default: all cores. |
 
@@ -291,6 +292,13 @@ wall's plane, and the floor check (from prevPos.y + 50) puts him on the
 higher floor there: the slope's own 1 unit tolerance past its edge, or a
 floor behind the wall. Now he's behind the wall at his check height.
 
+He doesn't even have to get past the wall's bottom edge when the wall leans
+out over the slope (an overhang, its normal pointing down): at his new check
+height its plane is further out than at its bottom, so the slope lifts him
+behind it while he's still on the slope. OoT Death Mountain Trail, adult:
+stand at (-112.4565, 1273.895, -1522.771), yaw 0x4100, speed 12, then 4. The
+51 degree slope TRI 675 runs up to the overhang TRI 642.
+
 The next frame the wall pushes him back out if he's at most 4 behind it
 (`wallPush`). So standing still after that frame doesn't always work, and a
 second frame's move at the same yaw (`speed2`, the slowest of 1, 2, 3, ...
@@ -304,9 +312,22 @@ Field: TRI 762 behind TRI 758).
 A clip's `pusher` is the floor that lifts Link and `crossed` the wall. The
 frame's own pushes and line test mustn't put him behind any wall (then it's
 an ordinary wall push clip). The scan goes along every wall's bottom edge,
-every unit. At each point it needs a floor just behind the wall that would
-put Link's check height on the wall, and a lower floor in front. It aims
-moves from standing starts in front to land 0.05 to 24 past the plane.
+every unit. At each point it needs a floor that would put Link's check
+height on the wall, behind its plane, and a lower floor in front. It aims
+moves from standing starts in front to land from 24 in front of the bottom
+edge to 24 past it.
+
+**In bounds.** Link is out of bounds if he's behind a wall, or if one of 8
+level rays at his check height meets the back of a wall first. For where he
+starts or stands (every clip kind, and the viewer's reachability), a ray that
+goes into a floor first doesn't count: up a slope the rays pass under the
+ground, and under the walls on it, to the back of some wall far off. (The
+Death Mountain Trail start above was out of bounds without this, by a wall
+240 away.) Whether a clip *ends* out of bounds still uses every ray. One
+check keeps every ray unless `--slope-starts`: the crossing search's quick
+"is anywhere around this point in bounds" test. Its sample spots are at a
+nearby floor's height, often in the air or the ground, and ignoring the rays
+into slopes there lets through far more points than it finds clips for.
 `reach` is the move itself (the faster of the two speeds); `--min-speed`
 leaves it as it is.
 

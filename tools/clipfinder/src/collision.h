@@ -209,7 +209,13 @@ struct Model {
 
 	bool behindWall(const V3& pos) const;
 
-	bool isInBounds(Scratch& s, const V3& pos) const;
+	// Not behind a wall, and none of 8 level rays at his check height meets a
+	// wall's back first. floorsBlock: a ray that goes into a floor first
+	// doesn't count - up a slope the rays go under the ground, and under the
+	// bottom of the walls on it, to the back of a wall far off (OoT Death
+	// Mountain Trail, the slope TRI 675 up to TRI 642). For where Link starts
+	// or stands; whether he ends up out of bounds (endCounts) keeps every ray.
+	bool isInBounds(Scratch& s, const V3& pos, bool floorsBlock = false) const;
 
 	// Whether a clip through `crossed` that leaves Link at `end` counts: out of
 	// bounds, or - through a dynapoly (a gate, a fence, a crate) - still behind
@@ -225,6 +231,22 @@ struct Model {
 
 	bool dynaPairsOnly = false; // --dyna-only: wall pairs with a dynapoly wall in them
 	bool slope = true, slopeOnly = false; // slope clips (--no-slope), and only them (--slope-only)
+	// --pair: only scan the candidates (wall pairs, slope walls) near these
+	// two polys; -1 none. Every poly still collides as usual.
+	int focusA = -1, focusB = -1;
+	// --slope-starts: crossing points whose surroundings are only in bounds
+	// not counting the rays into a slope are searched too (slower)
+	bool slopeStarts = false;
+	// Whether poly p's box comes within `margin` of the --pair polys' (true without --pair).
+	bool nearFocus(const Poly& p, double margin) const {
+		if (focusA < 0) return true;
+		for (int id : { focusA, focusB }) {
+			const Poly& q = polys[id];
+			if (p.maxX >= q.minX - margin && p.minX <= q.maxX + margin && p.maxY >= q.minY - margin && p.minY <= q.maxY + margin &&
+				p.maxZ >= q.minZ - margin && p.minZ <= q.maxZ + margin) return true;
+		}
+		return false;
+	}
 
 	// "TRI 12", or "TRI 1300 (Obj_Tokei_Tobira dynapoly 3)" for a dynapoly
 	string polyName(int id) const {

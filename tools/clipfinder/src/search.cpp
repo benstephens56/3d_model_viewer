@@ -401,7 +401,7 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 			if (!f || f->hit.poly != A.id) continue;
 			const Move mv{ yaw, speed };
 			auto clip = clipFromFrame(m, s, prev, f->res, f->trace, tol, cp.drop > 0 ? NAN : prev.y, &mv);
-			if (!clip || !m.isInBounds(s, prev)) continue;
+			if (!clip || !m.isInBounds(s, prev, true)) continue;
 			bool noFloor = false;
 			if (cp.drop > 0) {
 				auto end = landing(m, s, f->res, cp.floorY, noFloor, clip->crossed);
@@ -432,7 +432,7 @@ static std::optional<V3> reachFrom(const Model& m, Scratch& s, const V3& p, doub
 			double x = prev.x, z = prev.z;
 			if (std::hypot(p.x - x, p.z - z) > REACH_DIST) continue;
 			if (m.lineHit(s, { x, h, z }, { p.x, h, p.z }, LOOSE, false, true)) continue;
-			if (m.isInBounds(s, prev)) return prev;
+			if (m.isInBounds(s, prev, true)) return prev;
 		}
 	}
 	return std::nullopt;
@@ -444,7 +444,7 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 	V3 res = m.sphereStep(p, LOOSE, &trace);
 	if (trace.empty()) return std::nullopt;
 	auto clip = clipFromFrame(m, s, p, res, trace, LOOSE, floorPt.y);
-	if (!m.isInBounds(s, floorPt)) return std::nullopt;
+	if (!m.isInBounds(s, floorPt, true)) return std::nullopt;
 	if (clip) {
 		if (!m.endCounts(s, clip->crossed, clip->end)) return std::nullopt;
 	} else {
@@ -471,7 +471,7 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 			V3 wres = m.sphereStep(next, LOOSE, &tr, &prev);
 			const Move mv{ yaw, speed };
 			auto wclip = clipFromFrame(m, s, prev, wres, tr, LOOSE, prev.y, &mv);
-			if (!wclip || !m.endCounts(s, wclip->crossed, wclip->end) || !m.isInBounds(s, prev)) continue;
+			if (!wclip || !m.endCounts(s, wclip->crossed, wclip->end) || !m.isInBounds(s, prev, true)) continue;
 			PushList st;
 			V3 sres = m.sphereStep(next, STRICT, &st, &prev);
 			// acute: it clips without the extended planes, and the push starts
@@ -496,7 +496,7 @@ static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int 
 	if (trace.empty()) return std::nullopt;
 	auto clip = clipFromFrame(m, s, low, res, trace, LOOSE);
 	if (!clip) return std::nullopt;
-	if (!m.isInBounds(s, p)) return std::nullopt;
+	if (!m.isInBounds(s, p, true)) return std::nullopt;
 	bool noFloor = false;
 	auto end = landing(m, s, res, p.y, noFloor, clip->crossed);
 	if (!end) return std::nullopt;
@@ -555,6 +555,18 @@ static string keyOf(double a, double b, double c) {
 vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	auto t0 = std::chrono::steady_clock::now();
 	vector<Pair> pairs = wallPairCandidates(m);
+	// --pair: just the candidates near its two polys (within a frame's move and
+	// Link's width), not only the pair itself: which wall pushes him through
+	// which is up to the frame, so its clips can turn up from a neighbouring
+	// candidate's points, and those points take part in the dedupe
+	const double focusMargin = REACH_DIST + 2 * m.radius + 10;
+	if (m.focusA >= 0) {
+		size_t all = pairs.size();
+		pairs.erase(std::remove_if(pairs.begin(), pairs.end(), [&](const Pair& p) {
+			return !m.nearFocus(m.polys[p.A], focusMargin) || !m.nearFocus(m.polys[p.B], focusMargin);
+		}), pairs.end());
+		fprintf(stderr, "  --pair: %zu of %zu wall pairs are near TRI %d and %d\n", pairs.size(), all, m.focusA, m.focusB);
+	}
 	SharedSet seen;
 	std::mutex outMu;
 	vector<Clip> clips;
@@ -678,9 +690,19 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 				}
 				if (!behind) return;
 				double nx = A.nx * A.invNXZ, nz = A.nz * A.invNXZ;
+				// Somewhere around the point in bounds. --slope-starts: failing
+				// that, not counting the rays that go into a slope first
+				// (isInBounds's floorsBlock). That finds clips starting on slopes
+				// whose rays the old test sent under the ground, but lets through
+				// many more points that don't clip: Death Mountain Trail setup 2
+				// adult falling, 294 more points (1.4%, 4 more wall pairs) in
+				// 110 s instead of 38 s.
 				bool anyIn = false;
-				for (double sd : { 3.0, -3.0, 12.0, -12.0 })
-					if (m.isInBounds(s, { cp.p.x + sd * nx, cp.floorY, cp.p.z + sd * nz })) { anyIn = true; break; }
+				for (bool fb : { false, true }) {
+					if (anyIn || (fb && !m.slopeStarts)) break;
+					for (double sd : { 3.0, -3.0, 12.0, -12.0 })
+						if (m.isInBounds(s, { cp.p.x + sd * nx, cp.floorY, cp.p.z + sd * nz }, fb)) { anyIn = true; break; }
+				}
 				if (!anyIn) return;
 				// Falling, he has to land out of bounds: where the snap onto A
 				// and the pushes put him is about where the real frame does (the
@@ -759,7 +781,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		if (m.dynaPairsOnly && p.bg < 0 && std::none_of(m.bgActors.begin(), m.bgActors.end(), [&](const BgActor& b) {
 			return b.cx + b.r >= p.minX - 50 && b.cx - b.r <= p.maxX + 50 && b.cz + b.r >= p.minZ - 50 && b.cz - b.r <= p.maxZ + 50;
 		})) continue;
-		if (m.slope) slopeWalls.push_back(p.id);
+		if (m.slope && m.nearFocus(p, focusMargin)) slopeWalls.push_back(p.id);
 	}
 	std::atomic<size_t> nextSlope{ 0 }, slopesDone{ 0 };
 	size_t slopeFound = 0;

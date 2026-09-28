@@ -475,7 +475,7 @@ bool Model::behindPoly(const Poly& p, const V3& pos) const {
 	return pointInTri3D(p, pos.x - k * p.nx, y - k * p.ny, pos.z - k * p.nz, 0.25);
 }
 
-bool Model::isInBounds(Scratch& s, const V3& pos) const {
+bool Model::isInBounds(Scratch& s, const V3& pos, bool floorsBlock) const {
 	if (behindWall(pos)) return false;
 	double y = F(pos.y + checkHeight);
 	const double len = 400;
@@ -484,7 +484,17 @@ bool Model::isInBounds(Scratch& s, const V3& pos) const {
 		V3 a = { pos.x, y, pos.z };
 		V3 b = { F(pos.x + std::sin(ang) * len), y, F(pos.z + std::cos(ang) * len) };
 		auto hit = lineHit(s, a, b, STRICT, false);
-		if (hit && planeDist(polys[hit->poly], a.x, a.y, a.z) < 0) return false;
+		if (!hit || planeDist(polys[hit->poly], a.x, a.y, a.z) >= 0) continue;
+		// floorsBlock: a ray into the ground from above first says nothing (it
+		// has gone under the slope Link is on). Into a floor's underside it's
+		// under the ground to begin with: out of bounds. Only this ray is
+		// checked again with floors: otherwise floors can't change its answer,
+		// and they make the test several times slower
+		if (floorsBlock) {
+			auto fh = lineHit(s, a, b, STRICT, true);
+			if (fh && polys[fh->poly].isFloor && planeDist(polys[fh->poly], a.x, a.y, a.z) >= 0) continue;
+		}
+		return false;
 	}
 	return true;
 }

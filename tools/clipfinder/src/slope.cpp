@@ -2,10 +2,14 @@
 
 // How far apart the points along a wall's bottom edge are
 static const double SLOPE_STEP = 1;
-// How far behind the wall's plane the frame's move ends (posNext): a slope
-// only lifts Link past its edge by its 1 unit tolerance, a floor behind the
-// wall can be anywhere
-static const double BEHIND[] = { 0.05, 0.25, 0.5, 0.9, 1.5, 2.5, 4, 6, 9, 13, 18, 24 };
+// How far behind the wall's bottom edge the frame's move ends (posNext): a
+// slope only lifts Link past its edge by its 1 unit tolerance, a floor
+// behind the wall can be anywhere. In front of it too (negative): a wall
+// that leans out over the slope (an overhang, its normal pointing down) is
+// further out at his check height than at its bottom, so he can be behind
+// it still on the slope (OoT Death Mountain Trail: TRI 642 over TRI 675).
+static const double BEHIND[] = { -24, -18, -13, -9, -6, -4, -2.5, -1.5, -0.9, -0.5, -0.25,
+	0.05, 0.25, 0.5, 0.9, 1.5, 2.5, 4, 6, 9, 13, 18, 24 };
 // Directions the start is tried in, from straight into the wall (degrees)
 static const double FAN[] = { 0, -15, 15, -30, 30, -45, 45, -60, 60, -75, 75 };
 
@@ -110,14 +114,17 @@ void slopeClipsForWall(const Model& m, Scratch& s, const Poly& W,
 		}
 		if (!(bottom <= top)) continue;
 		const auto base = onPlane(u, bottom);
-		// Floors behind it that put his check height on the wall
+		// Floors that put his check height on the wall, behind its plane
 		vector<std::pair<double, vector<double>>> behind;
 		double hiY = -INFINITY;
 		for (double e : BEHIND) {
 			vector<double> ys;
-			for (double y : m.floorsAt(base.first - e * nx, base.second - e * nz)) {
+			const double qx = base.first - e * nx, qz = base.second - e * nz;
+			for (double y : m.floorsAt(qx, qz)) {
 				double h = y + ch - GROUND_DROP;
-				if (h >= bottom - 1 && h <= top + 1) { ys.push_back(y); hiY = std::max(hiY, y); }
+				if (h < bottom - 1 || h > top + 1 || planeDist(W, qx, h, qz) >= 0) continue;
+				ys.push_back(y);
+				hiY = std::max(hiY, y);
 			}
 			if (!ys.empty()) behind.push_back({ e, ys });
 		}
@@ -150,7 +157,7 @@ void slopeClipsForWall(const Model& m, Scratch& s, const Poly& W,
 						double vx = qx - start.x, vz = qz - start.z, len = std::hypot(vx, vz);
 						if (len < 0.5 || len > REACH_DIST) continue;
 						if (!tried.insert({ start.x, start.z, F(qx), F(qz) }).second) continue;
-						if (!m.isInBounds(s, start)) continue;
+						if (!m.isInBounds(s, start, true)) continue;
 						auto c = slopeFrame(m, s, start, yawOf(vx, vz), F(len / SPEED_RATE), W.id);
 						if (!c || pairDone(c->pusher, c->crossed)) continue;
 						yield(*c);
