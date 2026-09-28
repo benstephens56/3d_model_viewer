@@ -1878,6 +1878,58 @@ function addActorRow(scene, groupBody, rowName, instances, built, dyna) {
  * Draw every actor of the selected setup of an OoT or MM scene.
  * sceneBuffer: the scene file; sceneName: its file name (keys the actor JSON).
  */
+// Every spawn of a setup: each room's entries (decodeActorSpawnEntry), the
+// actors an Init spawns or moves (an override's `spawns`, e.g. Obj_Tokei_Tobira's
+// second door, or a child actor: Demo_Kankyo's Door_Toki, which gets its own
+// table entry and overrides), then the scene's doors and other transition
+// actors. onSpawn(spawn, base, name, override, roomIndex), in spawn order.
+function forEachSetupSpawn(game, sceneDv, setup, setupID, onSpawn) {
+    const actorModels = GAMES[game]?.models() ?? {};
+    const overrides = GAMES[game]?.overrides() ?? {};
+    const addInstance = (entry, first, roomIndex) => {
+        const base = actorModels[first.actorId] ?? null;
+        const name = base?.name ?? `Actor ${hex(first.actorId, 3)}`;
+        const override = overrides[name] ?? null;
+        const spawns = override?.spawns ? override.spawns({ ...first, position: entry.position }) : [{ ...first, position: entry.position }];
+        for (const spawn of spawns) {
+            if (spawn.actorId === first.actorId) {
+                onSpawn(spawn, base, name, override, roomIndex);
+                continue;
+            }
+            const childBase = actorModels[spawn.actorId] ?? null;
+            const childName = childBase?.name ?? `Actor ${hex(spawn.actorId, 3)}`;
+            onSpawn(spawn, childBase, childName, overrides[childName] ?? null, roomIndex);
+        }
+    };
+    setup.rooms.forEach((room, roomIndex) => {
+        for (const entry of room.actors) addInstance(entry, decodeActorSpawnEntry(entry, game), roomIndex);
+    });
+    for (const t of transitionActors(sceneDv, setupID, game)) {
+        addInstance({ position: t.position }, {
+            actorId: t.id & 0x1FFF, params: t.params, rot: [0, t.rotY, 0], rotRaw: [0, t.rotY & 0xFFFF, 0],
+        }, t.frontRoom);
+    }
+}
+
+// The scene's static collision poly count (the collision header's), which
+// the dynapoly ids follow on from.
+export function sceneNumPolygons(sceneBuffer) {
+    const dv = new DataView(sceneBuffer);
+    const cmd = sceneCommand(dv, 0, CMD_COL_HEADER);
+    return cmd && cmd.addr + 0x16 <= dv.byteLength ? dv.getUint16(cmd.addr + 0x14, false) : null;
+}
+
+// The dynapoly exports (render_actors.js dynaExport) of one setup, without
+// drawing anything: wall_push_clips.js's "Export all dynapolys". In spawn
+// order, like the rows; the caller sorts them into bgId order.
+export async function setupDynaExports(game, sceneBuffer, sceneName, setup, setupID) {
+    const sceneDv = new DataView(sceneBuffer);
+    const spawns = [];
+    forEachSetupSpawn(game, sceneDv, setup, setupID, (spawn, base, name, override, roomIndex) =>
+        spawns.push({ spawn, position: spawn.position, room: roomIndex }));
+    return buildDynaPolyActors(null, game, sceneName, spawns, { exportOnly: true });
+}
+
 export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT') {
     const actorModels = GAMES[game]?.models();
     const overrides = GAMES[game]?.overrides() ?? {};
@@ -1908,23 +1960,6 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
     // The same spawns, before any `place` (a draw-only adjustment), for the
     // dynapoly collision.
     const dynaSpawns = [];
-    const addInstance = (entry, first, roomIndex) => {
-        const base = actorModels[first.actorId] ?? null;
-        const name = base?.name ?? `Actor ${hex(first.actorId, 3)}`;
-        const override = overrides[name] ?? null;
-        const spawns = override?.spawns ? override.spawns({ ...first, position: entry.position }) : [{ ...first, position: entry.position }];
-        for (const spawn of spawns) {
-            // A spawn can be another actor (a child its Init spawns: Demo_Kankyo's
-            // Door_Toki), drawn with that actor's own table entry and overrides.
-            if (spawn.actorId === first.actorId) {
-                addSpawn(spawn, base, name, override, roomIndex);
-                continue;
-            }
-            const childBase = actorModels[spawn.actorId] ?? null;
-            const childName = childBase?.name ?? `Actor ${hex(spawn.actorId, 3)}`;
-            addSpawn(spawn, childBase, childName, overrides[childName] ?? null, roomIndex);
-        }
-    };
     const addSpawn = (spawn, base, name, override, roomIndex) => {
         dynaSpawns.push({ spawn, position: spawn.position, room: roomIndex });
         // The shape.rot the actor's Init leaves (MM: MM_ACTOR_INIT_SHAPE_ROT in
@@ -1945,15 +1980,7 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
         if (override?.place) Object.assign(inst, override.place(inst, collision));
         instances.push(inst);
     };
-    setup.rooms.forEach((room, roomIndex) => {
-        for (const entry of room.actors) addInstance(entry, decodeActorSpawnEntry(entry, game), roomIndex);
-    });
-    // Doors and other transition actors: the scene's own list.
-    for (const t of transitionActors(sceneDv, setupID, game)) {
-        addInstance({ position: t.position }, {
-            actorId: t.id & 0x1FFF, params: t.params, rot: [0, t.rotY, 0], rotRaw: [0, t.rotY & 0xFFFF, 0],
-        }, t.frontRoom);
-    }
+    forEachSetupSpawn(game, sceneDv, setup, setupID, addSpawn);
 
     // ---- build every distinct model up front, so rows come out in name order
     const built = new Map();

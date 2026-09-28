@@ -16,4 +16,4 @@ struct FormResult {
 // dynaRaw: the --dyna export, passed through as "dyna" (the viewer rebuilds the
 // same dynapolys from it, with the same poly ids: numPolygons on, in order).
 string toJson(const string& game, const string& map, int numPolygons, bool falling, bool extendedOnly,
-	const vector<FormResult>& forms, const string& dynaRaw = "");
+	const vector<FormResult>& forms, const string& dynaRaw = "", const vector<int>& setups = {});

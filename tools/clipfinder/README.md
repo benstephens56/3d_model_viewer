@@ -53,8 +53,11 @@ tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Dek
 # One frame, step by step
 tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --sim "-239.859,0,824.246,0xFF9D,11" --out-dir tools/clipfinder/results
 
-# With the map's dynapoly actors (exported from the viewer), only the wall pairs with a dynapoly wall in them
-tools/clipfinder/clipfinder.exe --game OOT --map "Spot 01 - Kakariko Village" --form All --falling --dyna OOT_Spot_01_-_Kakariko_Village_dyna.json --dyna-only -o tools/clipfinder/results/kak_dyna.json
+# One map's dynapoly actors in setup 2 (from the viewer's export), only the wall pairs with a dynapoly wall in them
+tools/clipfinder/clipfinder.exe --game OOT --map "Spot 01 - Kakariko Village" --form All --falling --dyna OOT_dyna_all.json --setup 2 --dyna-only -o tools/clipfinder/results/kak_dyna.json
+
+# Every map's dynapolys, every setup ("Export all dynapolys"), one file per map and set of setups
+tools/clipfinder/clipfinder.exe --game OOT --all --form All --falling --dyna OOT_dyna_all.json --dyna-only --out-dir tools/clipfinder/results
 ```
 
 Progress and summaries print to the terminal (stderr). The JSON goes to the
@@ -89,8 +92,9 @@ the radius, so scan each form you care about.
 | `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) See **Acute or extended** below for how a wall pair is categorised; this leaves out every acute pair, all its points included. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
 | `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them). Needed for `--refine` / `--angles`. |
-| `--dyna FILE` | Add the map's dynapoly actors, from the viewer's **Export dynapolys** (see **Dynapolys** below). One map's export: use `--map`, not `--all`. Output files named by `--out-dir` get `_dyna` added. |
-| `--dyna-only` | With `--dyna`: only scan the wall pairs that have a dynapoly wall in them (pusher or clipped wall). Much faster; the static-only pairs are what a scan without `--dyna` finds, give or take the dynapolys' effect on them. |
+| `--dyna FILE` | Add the dynapoly actors, from the viewer's **Export all dynapolys** (every map's, every setup; see **Dynapolys** below). A single map's `dynapoly-1` export (the old **Export dynapolys**) still works. Each map is scanned once per set of setups with the same dynapolys, and once without dynapolys if the file has none for it. Output files named by `--out-dir` get `_setup<N>[-<N>...]_dyna` added; with `-o` and several sets, `_setup...` goes before `.json`. |
+| `--dyna-only` | With `--dyna`: only scan the wall pairs that have a dynapoly wall in them (pusher or clipped wall), and skip maps without dynapolys. Much faster; the static-only pairs are what a scan without `--dyna` finds, give or take the dynapolys' effect on them. |
+| `--setup N` | With `--dyna`: only the dynapolys of setup N. |
 
 ### Speed and angle analysis
 
@@ -125,7 +129,7 @@ the radius, so scan each form you care about.
 ```jsonc
 {
   "format": "wall-push-clips-2",
-  "game": "MM", "map": "Treasure Chest Shop", "falling": false, "extendedOnly": false, "numPolygons": 97,  // , "maxMove": N with --max-move
+  "game": "MM", "map": "Treasure Chest Shop", "falling": false, "extendedOnly": false, "numPolygons": 97,  // , "maxMove": N with --max-move, "setups": [...] with --dyna
   "forms": [
     {"form": "Human", "radius": 14, "checkHeight": 26.8000011}
   ],
@@ -156,9 +160,18 @@ and the tester.
 
 ## Using the results
 
-- **Viewer:** load the map, then **Import results** in the wall clip panel.
-  With several forms there's a marker row per form and kind. Clicking a
-  point describes it.
+- **Viewer:** load the map. With **Auto-import** on (the default), the
+  viewer imports every results file for it from `tools/clipfinder/results`
+  (or the folder in the box): the files `--out-dir` named for the map
+  (`<GAME>_<map>_...json`) whose `map` and poly count match, that are static
+  scans or scanned with the loaded setup's dynapolys (`setups`). They're
+  merged: a marker row per form and kind, each point once. So the usual
+  setup is one `--all` scan and one `--all --dyna <GAME>_dyna_all.json
+  --dyna-only` scan into that folder. Dynapoly scans of other setups, and ones
+  made from an export without `setups` (before 2026-09-27), are left out.
+  This lists the folder through the server's directory pages, which
+  `python -m http.server` has. **Import results** loads one file by hand.
+  Clicking a point describes it.
 - **In game:** set `TESTS_FILE` in `tools/clipfinder/wall_clip_tester.lua` to the JSON.
   It reads the walls from RAM, runs the tests for the form Link is in, and
   writes `wall_clip_results.txt`. See the settings at the top of that script
@@ -180,17 +193,20 @@ Without `--dyna` the scan sees only the scene's static collision. With it, the
 dynapoly actors the viewer had loaded join in, the way `z_bgcheck.c` handles
 them:
 
-- **Getting the file.** Load the map in the viewer (with **Render Actors** on),
-  then **Export dynapolys** in the wall clip panel. It writes each dynapoly
-  actor under the **Actors** rows in the order they take bg actor slots, which
-  is the order the game checks them in and can decide a clip: spawn order,
+- **Every map at once.** **Export all dynapolys** in the wall clip panel
+  writes `<GAME>_dyna_all.json` (format `dynapoly-set-1`): for every map,
+  every setup, the dynapoly actors that setup spawns, built the same way as
+  the Actors rows but without drawing anything (a few seconds). Setups with
+  identical dynapolys share one entry (`setups: [0, 2]`), and so one scan;
+  maps without any are left out. Every actor is in, in its default state.
+- **Order.** Each map's actors are written in the order they take bg actor
+  slots, which is the order the game checks them in and can decide a clip:
+  spawn order,
   except that the actors that register their collision from Update once
   their own object has loaded (Bg_Spot01_Objects2, Door_Shutter, ...:
   `LATE_BG_ACTORS` in `js/render_actors.js`) come after all the others. (In
   Kakariko setup 2 a crate pushes Link through the shooting gallery's wall
-  only because the gallery's walls are checked after the crate's.) Hide an actor's row to
-  leave it out, e.g. a door you'll have opened; the **Actor display** menu
-  doesn't count, only the rows. Each actor is its tangible polys in world
+  only because the gallery's walls are checked after the crate's.) Each actor is its tangible polys in world
   space as `DynaPoly_ExpandSRT` builds them (s16 vertices, normals and plane
   distances recomputed from those), plus the bounding sphere and Y range the
   game culls it with. The viewer draws each actor in its default state (switch

@@ -272,8 +272,8 @@ export function renderZeldaObjectBinary(scene, buffer, fresh, actorName, objectN
 async function fetchJSON(path) {
   try {
     // 1. Request the file path from your server
-    const response = await fetch(path);
-    
+    const response = await fetch(path, { cache: "no-cache" }); // (regenerated files: see main.js)
+
     // 2. Read the stream and automatically parse it as JSON
     const parsedObject = await response.json();
 
@@ -713,8 +713,11 @@ const LATE_BG_ACTORS = {
     ]),
 };
 
-export async function buildDynaPolyActors(scene, game, sceneName, spawns) {
+// exportOnly: build nothing, just return each actor's dynaExport (below) in an
+// array, in spawn order - wall_push_clips.js's "Export all dynapolys".
+export async function buildDynaPolyActors(scene, game, sceneName, spawns, { exportOnly = false } = {}) {
     const byActor = new Map();
+    const exports = [];
 
     function normalizeTriangleIndices(tris, vertexCount) {
         if (!tris || tris.length === 0) {
@@ -749,7 +752,7 @@ export async function buildDynaPolyActors(scene, game, sceneName, spawns) {
     const actors = await fetchJSON(json_path);
     if (!actors) {
         console.log("Failed to parse 'actors' json in game: " + game);
-        return byActor;
+        return exportOnly ? exports : byActor;
     }
     //console.log(actors);
 
@@ -760,7 +763,7 @@ export async function buildDynaPolyActors(scene, game, sceneName, spawns) {
     const objects = await fetchJSON(json_path);
     if (!objects) {
         console.log("Failed to parse 'objects' json in game: " + game);
-        return byActor;
+        return exportOnly ? exports : byActor;
     }
     //console.log(objects);
 
@@ -911,7 +914,8 @@ export async function buildDynaPolyActors(scene, game, sceneName, spawns) {
                  (dynaPolyActor.collision_file == null ||
                   i.file_name === dynaPolyActor.collision_file));
         if (!actorCollision) {
-            alert('No collision found for dynapoly actor: ' + dynaPolyActor.actor_name);
+            const msg = 'No collision found for dynapoly actor: ' + dynaPolyActor.actor_name;
+            if (exportOnly) console.warn(msg); else alert(msg);
             continue;
         }
         const objectName = actorCollision["file_name"];
@@ -1100,6 +1104,30 @@ export async function buildDynaPolyActors(scene, game, sceneName, spawns) {
                 continue;
             }
 
+            // What wall_push_clips.js's "Export all dynapolys" writes for this
+            // actor, for tools/clipfinder --dyna: its tangible polys (the
+            // intangible ones are skipped by Link's checks, like the static
+            // ones), in poly index order, as DynaPoly_ExpandSRT leaves them,
+            // and the bounding sphere / Y range the game culls the actor with.
+            // `order`: its place in the spawn order, i.e. its bg actor slot.
+            if (exportOnly) {
+                const sphere = dynaBoundingSphere(cachedObject.verts, xform);
+                if (sphere && actorTriangleData.length > 0) exports.push({
+                    order: spawnIndex + (LATE_BG_ACTORS[game]?.has(actorName) ? 1e6 : 0),
+                    late: LATE_BG_ACTORS[game]?.has(actorName) || undefined,
+                    actor: actorName, id: actorId, params: actorParams, room,
+                    pos: [posXYZ[0], posXYZ[1], posXYZ[2]], rot: [rotXYZ[0], rotXYZ[1], rotXYZ[2]],
+                    scale: [scaleVec.x, scaleVec.y, scaleVec.z], yOffset,
+                    collision: dynaPolyActor.collision_name, file: objectName,
+                    sphere: { center: sphere.center, radius: sphere.radius }, minY: sphere.minY, maxY: sphere.maxY,
+                    polys: actorTriangleData.map((t, k) => ({
+                        v: actorTris[k].map(vi => actorVerts[vi].slice()),
+                        n: t.normals.slice(), d: t.d, type: t.surfaceType,
+                    })),
+                });
+                continue;
+            }
+
             // ------------------------------------------------
             // Build actor group
             // ------------------------------------------------
@@ -1143,29 +1171,6 @@ export async function buildDynaPolyActors(scene, game, sceneName, spawns) {
                 ` pos=${posXYZ[0]}, ${posXYZ[1]}, ${posXYZ[2]} rot=${deg} (${rotRawXYZ.map(r => hex(r)).join(', ')})` +
                 ` params=${hex(actorParams)} room=${room} scale=${scaleText}` +
                 ` collision=${dynaPolyActor.collision_name} (${objectName})`;
-
-            // What wall_push_clips.js's "Export dynapolys" writes for this
-            // actor, for tools/clipfinder --dyna: its tangible polys (the
-            // intangible ones are skipped by Link's checks, like the static
-            // ones), in poly index order, as DynaPoly_ExpandSRT leaves them,
-            // and the bounding sphere / Y range the game culls the actor with.
-            // `order`: its place in the spawn order, i.e. its bg actor slot.
-            const sphere = dynaBoundingSphere(cachedObject.verts, xform);
-            if (sphere && actorTriangleData.length > 0) {
-                actorGroup.userData.dynaExport = {
-                    order: spawnIndex + (LATE_BG_ACTORS[game]?.has(actorName) ? 1e6 : 0),
-                    late: LATE_BG_ACTORS[game]?.has(actorName) || undefined,
-                    actor: actorName, id: actorId, params: actorParams, room,
-                    pos: [posXYZ[0], posXYZ[1], posXYZ[2]], rot: [rotXYZ[0], rotXYZ[1], rotXYZ[2]],
-                    scale: [scaleVec.x, scaleVec.y, scaleVec.z], yOffset,
-                    collision: dynaPolyActor.collision_name, file: objectName,
-                    sphere: { center: sphere.center, radius: sphere.radius }, minY: sphere.minY, maxY: sphere.maxY,
-                    polys: actorTriangleData.map((t, k) => ({
-                        v: actorTris[k].map(vi => actorVerts[vi].slice()),
-                        n: t.normals.slice(), d: t.d, type: t.surfaceType,
-                    })),
-                };
-            }
 
             // Each collision category keeps its own colour, matching the
             // scene-level models: tangible orange, intangible green,
@@ -1433,5 +1438,5 @@ export async function buildDynaPolyActors(scene, game, sceneName, spawns) {
         }
     }
 
-    return byActor;
+    return exportOnly ? exports : byActor;
 }

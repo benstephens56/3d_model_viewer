@@ -17,6 +17,7 @@
 
     <div id="sidebar">
       <h2>3D Model Viewer</h2>
+      <button id="resetDefaults" type="button" title="Forget every saved choice (the sidebar groups' checkboxes and collapsed state, auto-import settings) and reload the page with the defaults.">Reset to defaults</button>
 
       <div class="section">
         <!--<div class="muted">Game:</div>-->
@@ -72,7 +73,8 @@
           <div class="clip-region-title">Wall push clips</div>
           <button id="wallClipImport">Import results</button><input id="wallClipImportFile" type="file" accept=".json,application/json" style="display:none">
           <button id="wallClipExport">Export JSON</button>
-          <button id="wallClipDynaExport">Export dynapolys</button>
+          <button id="wallClipDynaExportAll" title="Every map's dynapoly actors, for every setup, in one file (nothing is drawn), for clipfinder --all --dyna. Setups with the same dynapolys are written once.">Export all dynapolys</button>
+          <label title="When a map loads, import every clipfinder results file for it from this folder (served by the viewer's server): files named by --out-dir, for this map, that are static scans or scans with the loaded setup's dynapolys. They're merged."><input id="wallClipAutoImport" type="checkbox" checked> Auto-import from <input id="wallClipAutoDir" type="text" value="tools/clipfinder/results" style="width:12em"></label>
           <label title="Only show points Link can get to from a standable in-bounds spot in one frame, at this speed or less (actor speed; he moves 1.5x that a frame). Defaults to the form's run speed."><input id="wallClipReachable" type="checkbox"> Reachable only, speed &le; <input id="wallClipMaxSpeed" type="number" min="0" max="100" step="0.5" value="6" style="width:4em"></label>
           <label title="How far Link can move in one frame (default 45 = speed 30; glitches can go 55+). Reachability looks for starts up to this far away. Imported results set it to what clipfinder --max-move used."><input id="wallClipMaxMove" type="number" min="1" max="150" step="1" value="45" style="width:4em"> max move per frame</label>
           <span id="wallClipStatus" style="font-size:12px"></span>

@@ -3,6 +3,7 @@ import { currentColCtx } from './parse_model.js';
 import { getPointSubdivisionIndex } from './subdivisions.js';
 import { addModelCheckbox, primaryColorTarget } from './render.js';
 import { sins } from './libultra_sins.js';
+import { setupDynaExports, sceneNumPolygons } from './oot_actors.js';
 
 ////////////////////////////////////////
 // System: Wall Push Clips (OOT / MM)
@@ -21,9 +22,14 @@ tools/clipfinder/wall_clip_tester.lua.
 The collision model below is the game's (BgCheck_CheckWallImpl's line test and
 BgCheck_SphVsStaticWall's pushes, the floor check), all in f32 in the decomp's
 operation order, for reachability. It has the dynapoly actors too when the
-results were scanned with them (clipfinder --dyna, from "Export dynapolys"
-here): the same checks as tools/clipfinder/src/collision.cpp. How the clips
-work and how they're categorised: tools/clipfinder.
+results were scanned with them (clipfinder --dyna, from "Export all
+dynapolys" here): the same checks as
+tools/clipfinder/src/collision.cpp. How the clips work and how they're
+categorised: tools/clipfinder.
+
+Loading a map also imports its results by itself ("Auto-import"): every file
+clipfinder --out-dir wrote for it in the results folder, the static scans and
+the dynapoly scans of the loaded setup, merged.
 */
 
 // R_RUN_SPEED_LIMIT / 100 of each form's boots (z_player_lib.c): the default
@@ -1131,44 +1137,82 @@ function exportJson(groups, info) {
     ].join("\n");
 }
 
-// The dynapoly actors of the loaded map, for tools/clipfinder --dyna: each one
-// render_actors.js built (actorGroup.userData.dynaExport) whose actor row is
-// shown -- hide a row to leave that actor out (a door you'll have opened, say).
-// The "Actor display" menu's layers don't count: only the rows do.
-// Order: the order they were spawned in, which is the order they take bg
-// actor slots (bgId), and so the order the game checks them in.
-function dynapolyExport(map, numPolygons) {
-    const rowShown = obj => {
-        for (let o = obj; o; o = o.parent) {
-            if (!o.visible && o.userData.actorLayer === undefined) return false;
-        }
-        return true;
-    };
-    const actors = loadedModels
-        .map(m => m.mesh)
-        .filter(o => o && o.userData.dynaExport && rowShown(o))
-        .map(o => o.userData.dynaExport)
-        .sort((a, b) => a.order - b.order)
-        .map(({ order, ...rest }) => rest);
-    return { format: "dynapoly-1", game, map, numPolygons, actors };
-}
+// dynaExports in bgId order, without the sort key
+const bgOrder = exports => exports.slice().sort((a, b) => a.order - b.order).map(({ order, ...rest }) => rest);
 
-// One actor / poly per line, so the file stays readable
-function exportDynapolyJson(data) {
+// One actor / poly per line, so the file stays readable. `ind`: extra
+// indentation (a scene of a dynapoly-set-1 file).
+function exportDynapolyJson(data, ind = "") {
     const actor = a => {
         const { polys, ...head } = a;
         const h = JSON.stringify(head);
-        return `    ${h.slice(0, -1)},"polys":[\n` + polys.map(q => `      ${JSON.stringify(q)}`).join(",\n") + `\n    ]}`;
+        return `${ind}    ${h.slice(0, -1)},"polys":[\n` + polys.map(q => `${ind}      ${JSON.stringify(q)}`).join(",\n") + `\n${ind}    ]}`;
     };
     return [
-        `{`,
-        `  "format": ${JSON.stringify(data.format)}, "game": ${JSON.stringify(data.game)}, "map": ${JSON.stringify(data.map)}, "numPolygons": ${data.numPolygons},`,
-        `  "actors": [`,
+        `${ind}{`,
+        `${ind}  "format": ${JSON.stringify(data.format)}, "game": ${JSON.stringify(data.game)}, "map": ${JSON.stringify(data.map)}, ` +
+            (data.setups ? `"setups": ${JSON.stringify(data.setups)}, ` : "") + `"numPolygons": ${data.numPolygons},`,
+        `${ind}  "actors": [`,
         data.actors.map(actor).join(",\n"),
-        `  ]`,
-        `}`,
-        ``,
+        `${ind}  ]`,
+        `${ind}}`,
     ].join("\n");
+}
+
+// Every map's dynapolys, every setup, for clipfinder --dyna with --all: one
+// dynapoly-1 export per distinct set of dynapolys a map's setups load (setups
+// with the same ones share an entry, `setups` listing them), in a
+// dynapoly-set-1 file. Nothing is drawn: the spawns are expanded and the
+// dynapoly actors built as for the Actors rows (setupDynaExports), each in
+// its default state and all of them (no rows to hide). Maps without dynapolys
+// are left out.
+async function exportAllDynapolys(g, progress) {
+    const maps = g === "OOT" ? OOT_Maps : MM_Maps;
+    const byScene = await (await fetch(`./models/${g}/actors/${g}_actors_by_scene.json`, { cache: "no-cache" })).json();
+    const scenes = [];
+    for (let i = 0; i < maps.length; i++) {
+        const m = maps[i];
+        progress(`${m.name} (${i + 1}/${maps.length})`);
+        const setups = byScene[m.file];
+        if (!setups) continue;
+        const res = await fetch(`./models/${g}/${m.file}`);
+        if (!res.ok) { console.warn(`Export all dynapolys: ${m.file}: ${res.status}`); continue; }
+        const buffer = await res.arrayBuffer();
+        const numPolygons = sceneNumPolygons(buffer);
+        const entries = [];
+        for (let s = 0; s < setups.length; s++) {
+            if (!setups[s]) continue;
+            const actors = bgOrder(await setupDynaExports(g, buffer, m.file, setups[s], s));
+            if (!actors.length) continue;
+            const key = JSON.stringify(actors);
+            const same = entries.find(e => e.key === key);
+            if (same) same.setups.push(s);
+            else entries.push({ key, setups: [s], actors });
+        }
+        for (const e of entries) scenes.push({ format: "dynapoly-1", game: g, map: m.name, setups: e.setups, numPolygons, actors: e.actors });
+    }
+    const text = `{\n  "format": "dynapoly-set-1", "game": ${JSON.stringify(g)},\n  "scenes": [\n` +
+        scenes.map(sc => exportDynapolyJson(sc, "    ")).join(",\n") + `\n  ]\n}\n`;
+    return { scenes, text };
+}
+
+// clipfinder --out-dir's file names: safeName in main.cpp
+const safeName = s => s.replace(/[^A-Za-z0-9_-]/g, "_");
+
+// The .json files the dev server lists in `dir` (python -m http.server's
+// directory page) whose names start with `prefix`
+async function listResultFiles(dir, prefix) {
+    const base = dir.replace(/\\/g, "/").replace(/\/*$/, "/");
+    const res = await fetch(base, { cache: "no-store" });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const names = new Set();
+    for (const m of html.matchAll(/href="([^"?#]+\.json)"/gi)) {
+        let name;
+        try { name = decodeURIComponent(m[1]); } catch { continue; }
+        if (!name.includes("/") && name.startsWith(prefix)) names.add(name);
+    }
+    return [...names].sort().map(name => ({ name, url: base + encodeURIComponent(name) }));
 }
 
 function logGroups(groups) {
@@ -1210,7 +1254,9 @@ export function setupWallPushClipUI(scene) {
     document.getElementById("selected-game").addEventListener("change", refresh);
     document.getElementById("loadMap").addEventListener("click", () => {
         reachToken++; // abandon reachability for the previous map
+        autoToken++;  // and its auto-import
         last = null;
+        loaded = null;
         status.textContent = "";
         refresh();
     });
@@ -1295,26 +1341,30 @@ export function setupWallPushClipUI(scene) {
         URL.revokeObjectURL(a.href);
     });
 
-    // The loaded map's dynapoly actors (render_actors.js), for clipfinder --dyna
-    document.getElementById("wallClipDynaExport").addEventListener("click", () => {
-        const colCtx = currentColCtx;
-        if (!colCtx) {
-            status.textContent = "Load the map first";
-            return;
+    // Every map and setup's dynapolys in one file, for clipfinder --all --dyna
+    const exportAllBtn = document.getElementById("wallClipDynaExportAll");
+    exportAllBtn.addEventListener("click", async () => {
+        const g = game;
+        if (g !== "OOT" && g !== "MM") return;
+        exportAllBtn.disabled = true;
+        const t0 = performance.now();
+        try {
+            const { scenes, text } = await exportAllDynapolys(g, what => { status.textContent = `Exporting dynapolys: ${what}`; });
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+            a.download = `${g}_dyna_all.json`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+            const maps = new Set(scenes.map(sc => sc.map)).size;
+            const setups = scenes.reduce((n, sc) => n + sc.setups.length, 0);
+            status.textContent = `Exported the dynapolys of ${maps} maps: ${setups} setups, ${scenes.length} distinct ` +
+                `(${((performance.now() - t0) / 1000).toFixed(0)} s)`;
+        } catch (err) {
+            console.error(err);
+            status.textContent = `Export all dynapolys failed: ${err.message}`;
+        } finally {
+            exportAllBtn.disabled = false;
         }
-        const map = document.getElementById("mapDropdown").value;
-        const data = dynapolyExport(map, colCtx.colHeader.numPolygons);
-        if (!data.actors.length) {
-            status.textContent = "No dynapoly actors loaded (Render Actors on, and their rows shown)";
-            return;
-        }
-        const text = exportDynapolyJson(data);
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
-        a.download = `${game}_${map}_dyna`.replace(/[^A-Za-z0-9_-]/g, "_") + ".json";
-        a.click();
-        URL.revokeObjectURL(a.href);
-        status.textContent = `Exported ${data.actors.length} dynapoly actors (${data.actors.reduce((n, x) => n + x.polys.length, 0)} polys)`;
     });
 
     // Max move a frame: how far away reachability looks for starts (the
@@ -1332,7 +1382,101 @@ export function setupWallPushClipUI(scene) {
 
     // Results from tools/clipfinder: the points are turned back into the
     // viewer's own objects on the loaded map's collision (markers, click info,
-    // Reachable only, test script export).
+    // Reachable only, test script export). Several files (auto-import) are
+    // merged: forms by name, each point once. The dynapolys (and so the poly
+    // ids past numPolygons) are the first dynapoly scan's; a static scan's
+    // points only use the scene's own ids.
+    const importResults = (files, how) => {
+        const main = loadedModels.find(m => m.name === "Main Model");
+        const colCtx = currentColCtx;
+        reachToken++;
+        removeMarkerModels(scene);
+        last = null;
+        const dynaFile = files.find(f => f.data.dyna);
+        const dyna = dynaFile?.data.dyna ?? null;
+        for (const f of files) {
+            if (f.data.dyna && f !== dynaFile && JSON.stringify(f.data.dyna.actors) !== JSON.stringify(dyna.actors))
+                console.warn(`wall push clips: ${f.name} was scanned with other dynapolys than ${dynaFile.name}; its dynapoly ids are read as ${dynaFile.name}'s`);
+        }
+        // (clipfinder --max-move: reachability as far as its scan went)
+        maxMoveInput.value = Math.max(...files.map(f => f.data.maxMove ?? DEFAULT_MAX_MOVE));
+        setMaxMove(Number(maxMoveInput.value));
+        // Format 1: one form. Format 2: `forms` (name, radius, check height)
+        // and each clip marked with its form, each form getting its own model.
+        const forms = [];
+        const formOf = new Map();
+        const fileForms = files.map(({ data }) => (data.forms ?? [{ form: data.form, radius: data.radius, checkHeight: data.checkHeight }]).map(f => {
+            if (!formOf.has(f.form)) {
+                const e = { form: f.form, model: new CollisionModel(colCtx, main.mesh.userData.triangles, f.radius, f.checkHeight, dyna) };
+                forms.push(e);
+                formOf.set(f.form, e);
+            }
+            return formOf.get(f.form);
+        }));
+        // Max speed: the first form's run speed ("Human/Deku": Human's)
+        const runSpeed = FORM_RUN_SPEED[String(forms[0].form).split("/")[0]];
+        if (runSpeed !== undefined) maxSpeedInput.value = runSpeed;
+        const vec = a => ({ x: a[0], y: a[1], z: a[2] });
+        const clips = [];
+        const seen = new Set();
+        files.forEach(({ data }, fi) => {
+            for (const c of data.clips) {
+                const f = c.form !== undefined ? formOf.get(c.form) : fileForms[fi][0];
+                if (!f) continue;
+                const pusher = f.model.polys.get(c.pusher), crossed = f.model.polys.get(c.crossed);
+                if (!pusher || !crossed) continue;
+                // (the same point in two files: a static scan and a dynapoly one)
+                const key = `${f.form}|${c.pusher}|${c.crossed}|${c.cross}|${c.drop}|${c.from}|${c.prev}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                const end = vec(c.end);
+                if (c.endNoFloor) end.noFloor = true;
+                const clip = {
+                    kind: c.kind, cross: c.cross, drop: c.drop, pusher, crossed,
+                    from: vec(c.from), prev: vec(c.prev), res: vec(c.res), end,
+                    form: f.form, model: f.model,
+                };
+                if (c.next) clip.next = vec(c.next);
+                if (c.hold) clip.hold = true;
+                if (c.floorY !== undefined) clip.floorY = c.floorY;
+                if (c.yaws) clip.yaws = c.yaws;
+                if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
+                // clipfinder --min-speed: the reachability already worked out
+                if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
+                clips.push(clip);
+            }
+        });
+        // One category per wall pair: files from before that could give a
+        // pair's points different ones (and "low" for all falling points), so a
+        // pair with any acute point is acute; their falling points too, and
+        // falling points of other pairs stay "low" (category not known)
+        const acutePairs = new Set(clips.filter(c => c.kind === "acute").map(c => `${c.form}:${c.pusher.id}:${c.crossed.id}`));
+        for (const c of clips) {
+            const acute = acutePairs.has(`${c.form}:${c.pusher.id}:${c.crossed.id}`);
+            if (c.kind === "low") { if (acute) c.kind = "acute"; }
+            else c.kind = acute ? "acute" : "extended";
+            c.cat = c.kind === "low" ? "low" : (c.drop > 0 ? "low-" : "") + c.kind;
+        }
+        const groups = groupClips(clips);
+        const falling = files.some(f => f.data.falling), extendedOnly = files.every(f => f.data.extendedOnly);
+        last = {
+            groups, forms, formLabel: forms.map(f => f.form).join("_"),
+            falling, extendedOnly, numPolygons: files[0].data.numPolygons,
+            note: `${how} ${forms.map(f => f.form).join(", ")}${falling ? ", falling" : ""}${extendedOnly ? ", extended plane only" : ""}` +
+                (dyna ? `, with ${dyna.actors.length} dynapoly actors` : "") +
+                (files.length > 1 ? `, from ${files.length} files` : ""),
+            dyna,
+        };
+        if (clips.every(c => c.reach !== undefined)) last.reachDone = true;
+        render();
+        logGroups(groups);
+    };
+
+    // The setups a results file is for: its dynapolys' (null: a static scan,
+    // any setup). A dynapoly scan without them (exported before setups were
+    // recorded) matches none.
+    const resultSetups = data => data.dyna ? (data.setups ?? data.dyna.setups ?? []) : null;
+
     const importInput = document.getElementById("wallClipImportFile");
     document.getElementById("wallClipImport").addEventListener("click", () => importInput.click());
     importInput.addEventListener("change", async () => {
@@ -1352,10 +1496,9 @@ export function setupWallPushClipUI(scene) {
             status.textContent = `${file.name}: not JSON (${err.message})`;
             return;
         }
-        const map = document.getElementById("mapDropdown").value;
-        if (data.format === "dynapoly-1") {
+        if (data.format === "dynapoly-1" || data.format === "dynapoly-set-1") {
             status.textContent = `${file.name} is a dynapoly export: scan with it first ` +
-                `(clipfinder.exe --game ${data.game} --map "${data.map}" --dyna ${file.name} -o results.json), then import the results`;
+                `(clipfinder.exe --game ${data.game} ${data.map ? `--map "${data.map}"` : "--all"} --dyna ${file.name} --out-dir tools/clipfinder/results), then import the results`;
             return;
         }
         if (data.format !== "wall-push-clips-1" && data.format !== "wall-push-clips-2") {
@@ -1366,67 +1509,77 @@ export function setupWallPushClipUI(scene) {
             status.textContent = `${file.name} is for ${data.game} ${data.map}; load that map first`;
             return;
         }
-        reachToken++;
-        removeMarkerModels(scene);
-        last = null;
-        // (clipfinder --max-move: reachability as far as its scan went)
-        maxMoveInput.value = data.maxMove ?? DEFAULT_MAX_MOVE;
-        setMaxMove(Number(maxMoveInput.value));
-        // Format 1: one form. Format 2: `forms` (name, radius, check height)
-        // and each clip marked with its form, each form getting its own model.
-        const forms = (data.forms ?? [{ form: data.form, radius: data.radius, checkHeight: data.checkHeight }]).map(f => ({
-            form: f.form,
-            model: new CollisionModel(colCtx, main.mesh.userData.triangles, f.radius, f.checkHeight, data.dyna ?? null),
-        }));
-        // Max speed: the first form's run speed ("Human/Deku": Human's)
-        const runSpeed = FORM_RUN_SPEED[String(forms[0].form).split("/")[0]];
-        if (runSpeed !== undefined) maxSpeedInput.value = runSpeed;
-        const formOf = new Map(forms.map(f => [f.form, f]));
-        const vec = a => ({ x: a[0], y: a[1], z: a[2] });
-        const clips = [];
-        for (const c of data.clips) {
-            const f = formOf.get(c.form ?? forms[0].form);
-            if (!f) continue;
-            const pusher = f.model.polys.get(c.pusher), crossed = f.model.polys.get(c.crossed);
-            if (!pusher || !crossed) continue;
-            const end = vec(c.end);
-            if (c.endNoFloor) end.noFloor = true;
-            const clip = {
-                kind: c.kind, cross: c.cross, drop: c.drop, pusher, crossed,
-                from: vec(c.from), prev: vec(c.prev), res: vec(c.res), end,
-                form: f.form, model: f.model,
-            };
-            if (c.next) clip.next = vec(c.next);
-            if (c.hold) clip.hold = true;
-            if (c.floorY !== undefined) clip.floorY = c.floorY;
-            if (c.yaws) clip.yaws = c.yaws;
-            if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
-            // clipfinder --min-speed: the reachability already worked out
-            if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
-            clips.push(clip);
-        }
-        // One category per wall pair: files from before that could give a
-        // pair's points different ones (and "low" for all falling points), so a
-        // pair with any acute point is acute; their falling points too, and
-        // falling points of other pairs stay "low" (category not known)
-        const acutePairs = new Set(clips.filter(c => c.kind === "acute").map(c => `${c.form}:${c.pusher.id}:${c.crossed.id}`));
-        for (const c of clips) {
-            const acute = acutePairs.has(`${c.form}:${c.pusher.id}:${c.crossed.id}`);
-            if (c.kind === "low") { if (acute) c.kind = "acute"; }
-            else c.kind = acute ? "acute" : "extended";
-            c.cat = c.kind === "low" ? "low" : (c.drop > 0 ? "low-" : "") + c.kind;
-        }
-        const groups = groupClips(clips);
-        last = {
-            groups, forms, formLabel: forms.map(f => f.form).join("_"),
-            falling: !!data.falling, extendedOnly: !!data.extendedOnly, numPolygons: data.numPolygons,
-            note: `imported ${forms.map(f => f.form).join(", ")}${data.falling ? ", falling" : ""}${data.extendedOnly ? ", extended plane only" : ""}` +
-                (data.dyna ? `, with ${data.dyna.actors.length} dynapoly actors` : ""),
-            dyna: data.dyna ?? null,
-        };
-        if (clips.every(c => c.reach !== undefined)) last.reachDone = true;
+        autoToken++; // (an auto-import still going would replace it)
+        const map = loaded?.map ?? document.getElementById("mapDropdown").value;
         if (data.map !== map) console.warn(`wall push clips: ${file.name} says map "${data.map}", "${map}" is loaded (same polygon count)`);
-        render();
-        logGroups(groups);
+        const setups = resultSetups(data);
+        if (setups && loaded && !setups.includes(loaded.setup))
+            console.warn(`wall push clips: ${file.name} was scanned with the dynapolys of setup ${setups.join(", ") || "?"}, setup ${loaded.setup} is loaded`);
+        importResults([{ name: file.name, data }], "imported");
+    });
+
+    // Auto-import: when a map has loaded (main.js's "zeldamaploaded" event),
+    // every results file clipfinder --out-dir named for it (<GAME>_<map>_...)
+    // in the folder that is for this map and either static (any setup) or
+    // scanned with the loaded setup's dynapolys, merged.
+    const autoChk = document.getElementById("wallClipAutoImport");
+    const autoDir = document.getElementById("wallClipAutoDir");
+    try {
+        const saved = JSON.parse(localStorage.getItem("wallClipAutoImport") ?? "null");
+        if (saved) { autoChk.checked = !!saved.on; if (saved.dir) autoDir.value = saved.dir; }
+    } catch { /* storage unavailable: the defaults */ }
+    const saveAuto = () => {
+        try { localStorage.setItem("wallClipAutoImport", JSON.stringify({ on: autoChk.checked, dir: autoDir.value })); } catch { /* ignore */ }
+    };
+    autoChk.addEventListener("change", () => { saveAuto(); if (autoChk.checked && loaded && !last) autoImport(); });
+    autoDir.addEventListener("change", () => { saveAuto(); if (autoChk.checked && loaded) autoImport(); });
+
+    let loaded = null; // { game, map, setup } of the map on screen
+    let autoToken = 0;
+    const autoImport = async () => {
+        const token = ++autoToken;
+        const { map, setup } = loaded;
+        const colCtx = currentColCtx;
+        const main = loadedModels.find(m => m.name === "Main Model");
+        if (!colCtx || !main?.mesh?.userData.triangles) return;
+        const dir = autoDir.value.trim() || "tools/clipfinder/results";
+        let list = null;
+        try {
+            list = await listResultFiles(dir, safeName(`${game}_${map}`) + "_");
+        } catch { /* reported below */ }
+        if (token !== autoToken) return;
+        if (!list) {
+            status.textContent = `Auto-import: can't list ${dir} (the server has to show folder pages, like python -m http.server)`;
+            return;
+        }
+        status.textContent = list.length ? `Auto-import: reading ${list.length} files…` : "";
+        const files = [];
+        const otherSetups = [];
+        for (const { name, url } of list) {
+            let data;
+            try {
+                data = await (await fetch(url, { cache: "no-store" })).json();
+            } catch (err) {
+                console.warn(`Auto-import: ${name}: ${err.message}`);
+                continue;
+            }
+            if (token !== autoToken) return;
+            if (data.format !== "wall-push-clips-1" && data.format !== "wall-push-clips-2") continue;
+            if (data.game !== game || data.map !== map || data.numPolygons !== colCtx.colHeader.numPolygons) continue;
+            const setups = resultSetups(data);
+            if (setups && !setups.includes(setup)) { otherSetups.push(name); continue; }
+            files.push({ name, data });
+        }
+        if (otherSetups.length) console.log(`Auto-import: other setups' dynapoly scans left out: ${otherSetups.join(", ")}`);
+        if (!files.length) {
+            status.textContent = `Auto-import: no results for ${map}${otherSetups.length ? ` setup ${setup}` : ""} in ${dir}`;
+            return;
+        }
+        console.log(`Auto-import (${map}, setup ${setup}): ${files.map(f => f.name).join(", ")}`);
+        importResults(files, `auto-imported (setup ${setup})`);
+    };
+    document.addEventListener("zeldamaploaded", e => {
+        loaded = e.detail;
+        if (loaded.game === game && autoChk.checked) autoImport();
     });
 }

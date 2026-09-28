@@ -21,13 +21,19 @@ static string jsonStr(const string& s) {
 // Format 2: every form's clips in one file, each clip marked with its form
 // (one of `forms`), so the viewer can show them all at once.
 string toJson(const string& game, const string& map, int numPolygons, bool falling, bool extendedOnly,
-	const vector<FormResult>& forms, const string& dynaRaw) {
+	const vector<FormResult>& forms, const string& dynaRaw, const vector<int>& setups) {
 	static const char* kinds[] = { "acute", "extended" };
 	std::ostringstream o;
 	o << "{\n  \"format\": \"wall-push-clips-2\",\n";
 	o << "  \"game\": " << jsonStr(game) << ", \"map\": " << jsonStr(map)
 		<< ", \"falling\": " << (falling ? "true" : "false") << ", \"extendedOnly\": " << (extendedOnly ? "true" : "false") << ", \"numPolygons\": " << numPolygons;
 	if (REACH_DIST != DEFAULT_MAX_MOVE) o << ", \"maxMove\": " << num(REACH_DIST);
+	// the scene setups whose dynapolys these are (the viewer's auto-import)
+	if (!setups.empty()) {
+		o << ", \"setups\": [";
+		for (size_t i = 0; i < setups.size(); i++) o << (i ? "," : "") << setups[i];
+		o << "]";
+	}
 	o << ",\n";
 	o << "  \"forms\": [";
 	for (size_t i = 0; i < forms.size(); i++) {

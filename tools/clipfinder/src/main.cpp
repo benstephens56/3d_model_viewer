@@ -26,9 +26,12 @@
 //     (--first-per-pair: one clip point per wall pair, the first found - much faster)
 //   clipfinder --game OOT --all --form Adult [--falling] --out-dir results/
 //   clipfinder --game OOT --map "Spot 01 - Kakariko Village" --form All -o kak.json
-//   clipfinder --game MM --map "South Clock Town" --form Human --dyna sct_dyna.json [--dyna-only] -o sct.json
-//     (--dyna: the scene's dynapoly actors too, from the viewer's "Export dynapolys";
+//   clipfinder --game MM --map "South Clock Town" --form Human --dyna MM_dyna_all.json [--setup N] [--dyna-only] -o sct.json
+//     (--dyna: the scene's dynapoly actors too, from the viewer's "Export all dynapolys";
 //      --dyna-only: just the wall pairs with a dynapoly wall in them)
+//   clipfinder --game OOT --all --form All --dyna OOT_dyna_all.json --dyna-only --out-dir results/
+//     (the viewer's "Export all dynapolys": each map scanned once per distinct
+//      set of dynapolys its setups load, the output named and marked with the setups)
 //     (--form All: every form's clips in the one JSON, each marked with its form;
 //      --form Adult,Child: just those forms, the same way)
 // Options: --root <viewer dir> (default: two levels up from the exe's dir, or
@@ -83,6 +86,7 @@ static string safeName(const string& s) {
 int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root, after, dynaPath;
 	bool dynaOnly = false;
+	int onlySetup = -1;  // --setup N: just the dynapolys of that setup
 	double radius = 0;
 	bool falling = false, all = false, extendedOnly = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
 	int onlyPusher = -1, onlyCrossed = -1;
@@ -141,6 +145,7 @@ int main(int argc, char** argv) {
 		else if (a == "--sim") simArg = val();
 		else if (a == "--dyna") dynaPath = val();
 		else if (a == "--dyna-only") dynaOnly = true;
+		else if (a == "--setup") onlySetup = std::stoi(val());
 		else if (a == "--pair") {
 			string v = val();
 			if (sscanf(v.c_str(), "%d,%d", &onlyPusher, &onlyCrossed) != 2) { fprintf(stderr, "--pair wants PUSHER,CROSSED (TRI ids), e.g. --pair 757,714\n"); return 2; }
@@ -178,7 +183,7 @@ int main(int argc, char** argv) {
 			"                  [--speed S (with --yaw: the CSV grids at exactly speed S; stands in for --max-speed)]\n"
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP]]  (one frame from a standing start, printed step by step)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
-			"                  [--dyna FILE [--dyna-only]]  (the viewer's dynapoly export for the map: its actors' collision too)\n"
+			"                  [--dyna FILE [--dyna-only] [--setup N]]  (the viewer's dynapoly export, one map's or every map's: the actors' collision too)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -245,19 +250,42 @@ int main(int argc, char** argv) {
 		fprintf(stderr, "starting after %s: %zu maps to go\n", after.c_str(), todo.size());
 	}
 
-	// --dyna: the dynapoly actors the viewer had loaded (one map's)
-	DynaFile dyna;
+	// --dyna: the dynapoly actors the viewer loads: one map's ("Export
+	// dynapolys") or every map's, per setup ("Export all dynapolys"). Each map
+	// is scanned once per export of it (a set of setups with the same
+	// dynapolys); a map without one once without dynapolys (not at all with
+	// --dyna-only).
+	vector<DynaFile> dynas;
 	if (dynaOnly && dynaPath.empty()) { fprintf(stderr, "--dyna-only needs --dyna FILE\n"); return 2; }
+	if (onlySetup >= 0 && dynaPath.empty()) { fprintf(stderr, "--setup needs --dyna FILE\n"); return 2; }
 	if (!dynaPath.empty()) {
-		if (all) { fprintf(stderr, "--dyna is one map's export: use --map, not --all\n"); return 2; }
 		string err;
-		if (!readDynaFile(dynaPath, dyna, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
-		if (!dyna.game.empty() && upper(dyna.game) != game) { fprintf(stderr, "%s is a %s export, not %s\n", dynaPath.c_str(), dyna.game.c_str(), game.c_str()); return 1; }
-		if (!dyna.map.empty() && dyna.map != mapName) { fprintf(stderr, "%s is %s's export, not %s's\n", dynaPath.c_str(), dyna.map.c_str(), mapName.c_str()); return 1; }
-		size_t n = 0;
-		for (const DynaActorIn& a : dyna.actors) n += a.polys.size();
-		fprintf(stderr, "dynapolys: %zu actors, %zu polys from %s\n", dyna.actors.size(), n, dynaPath.c_str());
+		if (!readDynaFile(dynaPath, dynas, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
+		for (const DynaFile& d : dynas)
+			if (!d.game.empty() && upper(d.game) != game) { fprintf(stderr, "%s is a %s export, not %s\n", dynaPath.c_str(), d.game.c_str(), game.c_str()); return 1; }
+		// one map's export with --map: it has to be that map's
+		if (!all && dynas.size() == 1 && !dynas[0].map.empty() && dynas[0].map != mapName) {
+			fprintf(stderr, "%s is %s's export, not %s's\n", dynaPath.c_str(), dynas[0].map.c_str(), mapName.c_str());
+			return 1;
+		}
+		if (onlySetup >= 0) {
+			dynas.erase(std::remove_if(dynas.begin(), dynas.end(), [&](const DynaFile& d) {
+				return std::find(d.setups.begin(), d.setups.end(), onlySetup) == d.setups.end();
+			}), dynas.end());
+		}
+		size_t n = 0, acts = 0;
+		for (const DynaFile& d : dynas) {
+			acts += d.actors.size();
+			for (const DynaActorIn& a : d.actors) n += a.polys.size();
+		}
+		fprintf(stderr, "dynapolys: %zu exports, %zu actors, %zu polys from %s\n", dynas.size(), acts, n, dynaPath.c_str());
+		if (!all && std::none_of(dynas.begin(), dynas.end(), [&](const DynaFile& d) { return d.map.empty() || d.map == mapName; })) {
+			fprintf(stderr, "%s has no dynapolys for %s%s\n", dynaPath.c_str(), mapName.c_str(),
+				onlySetup >= 0 ? (" setup " + std::to_string(onlySetup)).c_str() : "");
+			return 1;
+		}
 	}
+	const DynaFile noDyna;
 
 	int failures = 0;
 	for (const MapEntry& e : todo) {
@@ -268,195 +296,216 @@ int main(int argc, char** argv) {
 		try {
 			if (!parseScene(buf, game, ch, tris)) { fprintf(stderr, "%s - %s: no collision header\n", game.c_str(), e.name.c_str()); failures++; continue; }
 		} catch (const std::exception& ex) { fprintf(stderr, "%s - %s: bad scene file: %s\n", game.c_str(), e.name.c_str(), ex.what()); failures++; continue; }
-		if (!dynaPath.empty() && dyna.numPolygons >= 0 && dyna.numPolygons != ch.numPolygons) {
-			fprintf(stderr, "%s was exported with %d static polys, the scene file has %d\n", dynaPath.c_str(), dyna.numPolygons, ch.numPolygons);
-			return 1;
+		// this map's dynapoly exports, or none
+		vector<const DynaFile*> jobs;
+		for (const DynaFile& d : dynas) if (d.map.empty() || d.map == e.name) jobs.push_back(&d);
+		if (jobs.empty()) {
+			if (dynaOnly) { fprintf(stderr, "%s - %s: no dynapolys, skipped\n", game.c_str(), e.name.c_str()); continue; }
+			jobs.push_back(&noDyna);
 		}
-		// The output file is opened before the scan, so a path that can't be
-		// written (e.g. a missing directory) stops the run straight away
-		// instead of after the scan, and a write that fails stops it too.
-		string path = out;
-		if (path.empty() || all) {
-			string dir = outDir.empty() ? "." : outDir;
-			path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + (dynaPath.empty() ? "" : "_dyna") + ".json";
-		}
-		// (--sim writes nothing, so it doesn't open, and leave empty, the file)
-		std::ofstream f;
-		if (simArg.empty()) f.open(path, std::ios::binary);
-		if (simArg.empty() && !f) {
-			// (the full path: a Windows exe reads "/dir" as the root of the
-			// current drive, not as relative to the current directory)
-			std::error_code ec;
-			string full = std::filesystem::absolute(path, ec).string();
-			fprintf(stderr, "can't write %s (%s - does that directory exist?) - stopping\n", path.c_str(), ec ? path.c_str() : full.c_str());
-			return 1;
-		}
-		// Forms with the same radius and check height (Human / Deku) share a
-		// scan, listed once as "Human/Deku".
-		vector<FormResult> results;
-		vector<string> csvPaths;  // --yaw: the CSV written per yaw
-		for (const Variant& v : variants) {
-			auto same = std::find_if(results.begin(), results.end(),
-				[&](const FormResult& r) { return r.radius == v.radius && r.checkHeight == v.checkHeight; });
-			if (same != results.end()) {
-				fprintf(stderr, "%s - %s (%s): same radius and check height as %s, sharing its scan\n",
-					game.c_str(), e.name.c_str(), v.form.c_str(), same->form.c_str());
-				same->form += "/" + v.form;
-				continue;
+		for (const DynaFile* dy : jobs) {
+			const DynaFile& dyna = *dy;
+			if (dyna.numPolygons >= 0 && dyna.numPolygons != ch.numPolygons) {
+				fprintf(stderr, "%s: %s was exported with %d static polys, the scene file has %d\n", dynaPath.c_str(), e.name.c_str(), dyna.numPolygons, ch.numPolygons);
+				return 1;
 			}
-			fprintf(stderr, "%s - %s (%s, radius %g%s)\n", game.c_str(), e.name.c_str(), v.form.c_str(), v.radius, falling ? ", falling" : "");
-			Model m;
-			initColCtx(m.colCtx, game, e.name, ch);
-			initializeSubdivisions(m.colCtx, tris);
-			m.radius = F(v.radius);
-			m.checkHeight = F(v.checkHeight);
-			m.lowDrop = falling ? 30 : 0;
-			m.extendedOnly = extendedOnly;
-			m.build(tris, ch.numPolygons);
-			addDynaActors(m, dyna);
-			m.dynaPairsOnly = dynaOnly;
-			if (!simArg.empty()) return runSim(m, simArg);
-			vector<Clip> found = scan(m, threads, firstPerPair);
-			// --pair: just the clips of that wall pair
-			if (onlyPusher >= 0) {
-				found.erase(std::remove_if(found.begin(), found.end(),
-					[&](const Clip& c) { return c.pusher != onlyPusher || c.crossed != onlyCrossed; }), found.end());
-				fprintf(stderr, "  %zu clip points of TRI %d through TRI %d\n", found.size(), onlyPusher, onlyCrossed);
+			// the setups these dynapolys are for: "_setup0-2" in file names
+			string setupTag;
+			for (size_t k = 0; k < dyna.setups.size(); k++) setupTag += (k ? "-" : "_setup") + std::to_string(dyna.setups[k]);
+			if (!dyna.setups.empty())
+				fprintf(stderr, "%s - %s: setup%s %s: %zu dynapoly actors\n", game.c_str(), e.name.c_str(), dyna.setups.size() > 1 ? "s" : "",
+					setupTag.substr(6).c_str(), dyna.actors.size());
+			// The output file is opened before the scan, so a path that can't be
+			// written (e.g. a missing directory) stops the run straight away
+			// instead of after the scan, and a write that fails stops it too.
+			string path = out;
+			if (path.empty() || all) {
+				string dir = outDir.empty() ? "." : outDir;
+				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + setupTag + (dyna.raw.empty() ? "" : "_dyna") + ".json";
 			}
-			// --yaw / --max-speed: that pair at each yaw, from any start. A
-			// range goes every 0x10 (the sine table ignores the low 4 bits).
-			if (atYaw >= 0 && !found.empty()) {
-				// (only clips at those yaws are written: none found, no clips)
-				vector<Clip> atYaws;
-				vector<Refined> rs;
-				const int n = ((yawTo - atYaw) & 0xFFFF) / 16 + 1;
-				for (int k = 0; k < n; k++) {
-					const int yaw = (atYaw + k * 16) & 0xFFFF;
-					auto ty = std::chrono::steady_clock::now();
-					Refined r = clipAtYaw(m, found, onlyPusher, onlyCrossed, yaw, maxSpeed, sideStep, exact, gridSpeed, threads);
-					double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - ty).count();
-					if (!r.found) fprintf(stderr, "  YAW 0x%04X TRI %d -> %d: no clip at speeds up to %g (%d starts tried, %.1fs)\n",
-						yaw, onlyPusher, onlyCrossed, maxSpeed, r.starts, secs);
-					else {
-						fprintf(stderr, "  YAW 0x%04X TRI %d -> %d: min speed %.9g  start %.9g, %.9g, %.9g  -> end %.9g, %.9g, %.9g  (%d starts tried, %.1fs)\n",
-							yaw, onlyPusher, onlyCrossed, r.speed, r.start.x, r.start.y, r.start.z, r.end.x, r.end.y, r.end.z, r.starts, secs);
-						if (auto c = refinedClip(m, r, onlyPusher, onlyCrossed)) {
-							c->kind = found.front().kind; // the pair's category
-							atYaws.push_back(*c);
+			// -o with several exports of the map: one file each
+			else if (jobs.size() > 1) {
+				const bool js = path.size() > 5 && path.compare(path.size() - 5, 5, ".json") == 0;
+				path = (js ? path.substr(0, path.size() - 5) : path) + setupTag + ".json";
+			}
+			// (--sim writes nothing, so it doesn't open, and leave empty, the file)
+			std::ofstream f;
+			if (simArg.empty()) f.open(path, std::ios::binary);
+			if (simArg.empty() && !f) {
+				// (the full path: a Windows exe reads "/dir" as the root of the
+				// current drive, not as relative to the current directory)
+				std::error_code ec;
+				string full = std::filesystem::absolute(path, ec).string();
+				fprintf(stderr, "can't write %s (%s - does that directory exist?) - stopping\n", path.c_str(), ec ? path.c_str() : full.c_str());
+				return 1;
+			}
+			// Forms with the same radius and check height (Human / Deku) share a
+			// scan, listed once as "Human/Deku".
+			vector<FormResult> results;
+			vector<string> csvPaths;  // --yaw: the CSV written per yaw
+			for (const Variant& v : variants) {
+				auto same = std::find_if(results.begin(), results.end(),
+					[&](const FormResult& r) { return r.radius == v.radius && r.checkHeight == v.checkHeight; });
+				if (same != results.end()) {
+					fprintf(stderr, "%s - %s (%s): same radius and check height as %s, sharing its scan\n",
+						game.c_str(), e.name.c_str(), v.form.c_str(), same->form.c_str());
+					same->form += "/" + v.form;
+					continue;
+				}
+				fprintf(stderr, "%s - %s (%s, radius %g%s)\n", game.c_str(), e.name.c_str(), v.form.c_str(), v.radius, falling ? ", falling" : "");
+				Model m;
+				initColCtx(m.colCtx, game, e.name, ch);
+				initializeSubdivisions(m.colCtx, tris);
+				m.radius = F(v.radius);
+				m.checkHeight = F(v.checkHeight);
+				m.lowDrop = falling ? 30 : 0;
+				m.extendedOnly = extendedOnly;
+				m.build(tris, ch.numPolygons);
+				addDynaActors(m, dyna);
+				m.dynaPairsOnly = dynaOnly;
+				if (!simArg.empty()) return runSim(m, simArg);
+				vector<Clip> found = scan(m, threads, firstPerPair);
+				// --pair: just the clips of that wall pair
+				if (onlyPusher >= 0) {
+					found.erase(std::remove_if(found.begin(), found.end(),
+						[&](const Clip& c) { return c.pusher != onlyPusher || c.crossed != onlyCrossed; }), found.end());
+					fprintf(stderr, "  %zu clip points of TRI %d through TRI %d\n", found.size(), onlyPusher, onlyCrossed);
+				}
+				// --yaw / --max-speed: that pair at each yaw, from any start. A
+				// range goes every 0x10 (the sine table ignores the low 4 bits).
+				if (atYaw >= 0 && !found.empty()) {
+					// (only clips at those yaws are written: none found, no clips)
+					vector<Clip> atYaws;
+					vector<Refined> rs;
+					const int n = ((yawTo - atYaw) & 0xFFFF) / 16 + 1;
+					for (int k = 0; k < n; k++) {
+						const int yaw = (atYaw + k * 16) & 0xFFFF;
+						auto ty = std::chrono::steady_clock::now();
+						Refined r = clipAtYaw(m, found, onlyPusher, onlyCrossed, yaw, maxSpeed, sideStep, exact, gridSpeed, threads);
+						double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - ty).count();
+						if (!r.found) fprintf(stderr, "  YAW 0x%04X TRI %d -> %d: no clip at speeds up to %g (%d starts tried, %.1fs)\n",
+							yaw, onlyPusher, onlyCrossed, maxSpeed, r.starts, secs);
+						else {
+							fprintf(stderr, "  YAW 0x%04X TRI %d -> %d: min speed %.9g  start %.9g, %.9g, %.9g  -> end %.9g, %.9g, %.9g  (%d starts tried, %.1fs)\n",
+								yaw, onlyPusher, onlyCrossed, r.speed, r.start.x, r.start.y, r.start.z, r.end.x, r.end.y, r.end.z, r.starts, secs);
+							if (auto c = refinedClip(m, r, onlyPusher, onlyCrossed)) {
+								c->kind = found.front().kind; // the pair's category
+								atYaws.push_back(*c);
+							}
 						}
+						rs.push_back(r);
 					}
-					rs.push_back(r);
-				}
-				// every yaw's answer together, on stdout, one row each: its
-				// minimum speed and the x / z range of all the starts that clip at
-				// up to maxSpeed. Several separate regions: each on a row below.
-				printf("\nTRI %d -> %d, %s, speed up to %g\n", onlyPusher, onlyCrossed, v.form.c_str(), maxSpeed);
-				printf("  yaw      min speed    x range                  z range\n");
-				for (const Refined& r : rs) {
-					if (!r.found) { printf("  0x%04X   none\n", r.yaw); continue; }
-					double x0 = INFINITY, x1 = -INFINITY, z0 = INFINITY, z1 = -INFINITY;
-					for (const StartRegion& g : r.regions) {
-						x0 = std::min(x0, g.x0); x1 = std::max(x1, g.x1);
-						z0 = std::min(z0, g.z0); z1 = std::max(z1, g.z1);
+					// every yaw's answer together, on stdout, one row each: its
+					// minimum speed and the x / z range of all the starts that clip at
+					// up to maxSpeed. Several separate regions: each on a row below.
+					printf("\nTRI %d -> %d, %s, speed up to %g\n", onlyPusher, onlyCrossed, v.form.c_str(), maxSpeed);
+					printf("  yaw      min speed    x range                  z range\n");
+					for (const Refined& r : rs) {
+						if (!r.found) { printf("  0x%04X   none\n", r.yaw); continue; }
+						double x0 = INFINITY, x1 = -INFINITY, z0 = INFINITY, z1 = -INFINITY;
+						for (const StartRegion& g : r.regions) {
+							x0 = std::min(x0, g.x0); x1 = std::max(x1, g.x1);
+							z0 = std::min(z0, g.z0); z1 = std::max(z1, g.z1);
+						}
+						printf("  0x%04X   %-11.7f  %10.4f .. %-10.4f  %10.4f .. %.4f\n", r.yaw, r.speed, x0, x1, z0, z1);
+						if (r.regions.size() > 1)
+							for (const StartRegion& g : r.regions)
+								printf("    region %-11.7f  %10.4f .. %-10.4f  %10.4f .. %.4f\n", g.speed, g.x0, g.x1, g.z0, g.z1);
 					}
-					printf("  0x%04X   %-11.7f  %10.4f .. %-10.4f  %10.4f .. %.4f\n", r.yaw, r.speed, x0, x1, z0, z1);
-					if (r.regions.size() > 1)
-						for (const StartRegion& g : r.regions)
-							printf("    region %-11.7f  %10.4f .. %-10.4f  %10.4f .. %.4f\n", g.speed, g.x0, g.x1, g.z0, g.z1);
-				}
-				// then a CSV per yaw that clips, <output>_<YAW>.csv (with the form
-				// too when there are several): a grid of round x (columns) and z
-				// (rows) values over its starts that clip, each Yes if Link
-				// standing exactly there clips at some speed up to maxSpeed, else No.
-				// And <output>_<YAW>_speeds.csv, the same grid with the speed to
-				// check each cell at in game (wall_clip_tester.lua CSV_TESTS): a
-				// Yes cell's lowest speed that clips, a No cell's maxSpeed.
-				const string base = path.size() > 5 && path.compare(path.size() - 5, 5, ".json") == 0 ? path.substr(0, path.size() - 5) : path;
-				auto writeGrid = [](const string& file, const YawGrid& G, const std::function<string(size_t)>& cell) {
-					FILE* cf = fopen(file.c_str(), "w");
-					if (!cf) return false;
-					fprintf(cf, "z \\ x");
-					for (double x : G.xs) fprintf(cf, ",%.*f", G.xDecimals, x);
-					fprintf(cf, "\n");
-					for (size_t zi = 0; zi < G.zs.size(); zi++) {
-						fprintf(cf, "%.*f", G.zDecimals, G.zs[zi]);
-						for (size_t xi = 0; xi < G.xs.size(); xi++) fprintf(cf, ",%s", cell(zi * G.xs.size() + xi).c_str());
+					// then a CSV per yaw that clips, <output>_<YAW>.csv (with the form
+					// too when there are several): a grid of round x (columns) and z
+					// (rows) values over its starts that clip, each Yes if Link
+					// standing exactly there clips at some speed up to maxSpeed, else No.
+					// And <output>_<YAW>_speeds.csv, the same grid with the speed to
+					// check each cell at in game (wall_clip_tester.lua CSV_TESTS): a
+					// Yes cell's lowest speed that clips, a No cell's maxSpeed.
+					const string base = path.size() > 5 && path.compare(path.size() - 5, 5, ".json") == 0 ? path.substr(0, path.size() - 5) : path;
+					auto writeGrid = [](const string& file, const YawGrid& G, const std::function<string(size_t)>& cell) {
+						FILE* cf = fopen(file.c_str(), "w");
+						if (!cf) return false;
+						fprintf(cf, "z \\ x");
+						for (double x : G.xs) fprintf(cf, ",%.*f", G.xDecimals, x);
 						fprintf(cf, "\n");
-					}
-					bool bad = ferror(cf) != 0;
-					return fclose(cf) == 0 && !bad;
-				};
-				for (const Refined& r : rs) {
-					if (!r.found) continue;
-					char yawName[8];
-					snprintf(yawName, sizeof yawName, "%04X", r.yaw);
-					const string csvBase = base + (variants.size() > 1 ? "_" + safeName(v.form) : "") + "_" + yawName;
-					const YawGrid& G = r.grid;
-					if (!writeGrid(csvBase + ".csv", G, [&](size_t i) { return string(G.ok[i] ? "Yes" : "No"); })) {
-						fprintf(stderr, "can't write %s.csv - stopping\n", csvBase.c_str());
-						return 1;
-					}
-					if (!writeGrid(csvBase + "_speeds.csv", G, [&](size_t i) {
-						char b[40];
-						snprintf(b, sizeof b, "%.9g", G.ok[i] ? G.speed[i] : F(gridSpeed > 0 ? gridSpeed : maxSpeed));
-						return string(b);
-					})) {
-						fprintf(stderr, "can't write %s_speeds.csv - stopping\n", csvBase.c_str());
-						return 1;
-					}
-					csvPaths.push_back(csvBase + ".csv");
-				}
-				found = std::move(atYaws);
-			}
-			else if (minSpeed && !found.empty()) {
-				findMinSpeeds(m, found, threads);
-				if (refine) {
-					if (onlyPusher < 0) { fprintf(stderr, "--refine needs --pair PUSHER,CROSSED\n"); return 2; }
-					auto t0r = std::chrono::steady_clock::now();
-					Refined r = refineMinSpeed(m, found, onlyPusher, onlyCrossed, threads);
-					if (!r.found) fprintf(stderr, "  refine: no walking clip of this pair to start from\n");
-					else fprintf(stderr, "  REFINED TRI %d -> %d: min walking speed %.9g  start %.9g, %.9g, %.9g  yaw 0x%04X  -> end %.9g, %.9g, %.9g  (%d starts tried, %.1fs)\n",
-						onlyPusher, onlyCrossed, r.speed, r.start.x, r.start.y, r.start.z, r.yaw & 0xFFFF, r.end.x, r.end.y, r.end.z,
-						r.starts, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0r).count());
-					if (angles && (r.found || haveFrom)) {
-						auto ta = std::chrono::steady_clock::now();
-						Refined from = r;
-						if (haveFrom) {
-							from.start = { F(fromX), F(fromY), F(fromZ) };
-							if (fromSpeed > 0) from.speed = F(fromSpeed);
-							else if (!r.found) from.speed = 0;
-							Scratch s;
-							s.stamp.assign(m.polys.size(), 0);
-							auto rest = m.restingSpot(from.start);
-							if (!rest || rest->x != from.start.x || rest->z != from.start.z)
-								printf("(note: Link doesn't stand still at that start: the pushes move him%s)\n",
-									rest ? (string(" to ") + std::to_string(rest->x) + ", " + std::to_string(rest->z)).c_str() : "");
-							if (!m.isInBounds(s, from.start)) printf("(note: that start is out of bounds)\n");
+						for (size_t zi = 0; zi < G.zs.size(); zi++) {
+							fprintf(cf, "%.*f", G.zDecimals, G.zs[zi]);
+							for (size_t xi = 0; xi < G.xs.size(); xi++) fprintf(cf, ",%s", cell(zi * G.xs.size() + xi).c_str());
+							fprintf(cf, "\n");
 						}
-						angleRanges(m, from, onlyPusher, onlyCrossed, threads);
-						fprintf(stderr, "  (angles: %.1fs)\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count());
+						bool bad = ferror(cf) != 0;
+						return fclose(cf) == 0 && !bad;
+					};
+					for (const Refined& r : rs) {
+						if (!r.found) continue;
+						char yawName[8];
+						snprintf(yawName, sizeof yawName, "%04X", r.yaw);
+						const string csvBase = base + (variants.size() > 1 ? "_" + safeName(v.form) : "") + "_" + yawName;
+						const YawGrid& G = r.grid;
+						if (!writeGrid(csvBase + ".csv", G, [&](size_t i) { return string(G.ok[i] ? "Yes" : "No"); })) {
+							fprintf(stderr, "can't write %s.csv - stopping\n", csvBase.c_str());
+							return 1;
+						}
+						if (!writeGrid(csvBase + "_speeds.csv", G, [&](size_t i) {
+							char b[40];
+							snprintf(b, sizeof b, "%.9g", G.ok[i] ? G.speed[i] : F(gridSpeed > 0 ? gridSpeed : maxSpeed));
+							return string(b);
+						})) {
+							fprintf(stderr, "can't write %s_speeds.csv - stopping\n", csvBase.c_str());
+							return 1;
+						}
+						csvPaths.push_back(csvBase + ".csv");
 					}
-					if (r.found) {
-						if (auto c = refinedClip(m, r, onlyPusher, onlyCrossed)) {
-							c->kind = found.front().kind; // the pair's category
-							found = { *c };
+					found = std::move(atYaws);
+				}
+				else if (minSpeed && !found.empty()) {
+					findMinSpeeds(m, found, threads);
+					if (refine) {
+						if (onlyPusher < 0) { fprintf(stderr, "--refine needs --pair PUSHER,CROSSED\n"); return 2; }
+						auto t0r = std::chrono::steady_clock::now();
+						Refined r = refineMinSpeed(m, found, onlyPusher, onlyCrossed, threads);
+						if (!r.found) fprintf(stderr, "  refine: no walking clip of this pair to start from\n");
+						else fprintf(stderr, "  REFINED TRI %d -> %d: min walking speed %.9g  start %.9g, %.9g, %.9g  yaw 0x%04X  -> end %.9g, %.9g, %.9g  (%d starts tried, %.1fs)\n",
+							onlyPusher, onlyCrossed, r.speed, r.start.x, r.start.y, r.start.z, r.yaw & 0xFFFF, r.end.x, r.end.y, r.end.z,
+							r.starts, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0r).count());
+						if (angles && (r.found || haveFrom)) {
+							auto ta = std::chrono::steady_clock::now();
+							Refined from = r;
+							if (haveFrom) {
+								from.start = { F(fromX), F(fromY), F(fromZ) };
+								if (fromSpeed > 0) from.speed = F(fromSpeed);
+								else if (!r.found) from.speed = 0;
+								Scratch s;
+								s.stamp.assign(m.polys.size(), 0);
+								auto rest = m.restingSpot(from.start);
+								if (!rest || rest->x != from.start.x || rest->z != from.start.z)
+									printf("(note: Link doesn't stand still at that start: the pushes move him%s)\n",
+										rest ? (string(" to ") + std::to_string(rest->x) + ", " + std::to_string(rest->z)).c_str() : "");
+								if (!m.isInBounds(s, from.start)) printf("(note: that start is out of bounds)\n");
+							}
+							angleRanges(m, from, onlyPusher, onlyCrossed, threads);
+							fprintf(stderr, "  (angles: %.1fs)\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count());
+						}
+						if (r.found) {
+							if (auto c = refinedClip(m, r, onlyPusher, onlyCrossed)) {
+								c->kind = found.front().kind; // the pair's category
+								found = { *c };
+							}
 						}
 					}
 				}
+				results.push_back({ v.form, v.radius, F(v.checkHeight), std::move(found) });
 			}
-			results.push_back({ v.form, v.radius, F(v.checkHeight), std::move(found) });
-		}
-		f << toJson(game, e.name, ch.numPolygons, falling, extendedOnly, results, dyna.raw);
-		f.close();
-		if (!f) {
-			fprintf(stderr, "can't write %s - stopping\n", path.c_str());
-			return 1;
-		}
-		fprintf(stderr, "  wrote %s\n", path.c_str());
-		if (!csvPaths.empty()) {
-			// (on stdout too, after the table)
-			printf("\nA grid of the positions that clip, per yaw:\n");
-			for (const string& c : csvPaths) { printf("  %s\n", c.c_str()); fprintf(stderr, "  wrote %s\n", c.c_str()); }
+			f << toJson(game, e.name, ch.numPolygons, falling, extendedOnly, results, dyna.raw, dyna.setups);
+			f.close();
+			if (!f) {
+				fprintf(stderr, "can't write %s - stopping\n", path.c_str());
+				return 1;
+			}
+			fprintf(stderr, "  wrote %s\n", path.c_str());
+			if (!csvPaths.empty()) {
+				// (on stdout too, after the table)
+				printf("\nA grid of the positions that clip, per yaw:\n");
+				for (const string& c : csvPaths) { printf("  %s\n", c.c_str()); fprintf(stderr, "  wrote %s\n", c.c_str()); }
+			}
 		}
 	}
 	return failures ? 1 : 0;

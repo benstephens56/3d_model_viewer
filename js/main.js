@@ -333,6 +333,14 @@ function getMapProperty(game, mapName, prop) {
 }
 
 // Load selected map
+// Everything the viewer saved in this site's localStorage goes, then a reload
+// starts from the defaults.
+document.getElementById('resetDefaults').addEventListener('click', () => {
+    if (!confirm('Reset every saved setting to its default? The page will reload.')) return;
+    try { localStorage.clear(); } catch { /* nothing saved */ }
+    location.reload();
+});
+
 loadMap.addEventListener('click', async (e) => {
     const game = document.getElementById("selected-game").value;
     const mapLabel = document.getElementById("mapDropdown").value;
@@ -464,6 +472,13 @@ async function loadSelectedMap(game) {
             if ((game == "OOT" || game == "MM") && renderActorsCheckbox.checked && areaActors) {
                 await showLoading(`${mapName}: actors…`);
                 await renderOOTActors(scene, buffer1, mapFilename, game);
+            }
+
+            // The map is in: wall_push_clips.js auto-imports its results
+            if (game == "OOT" || game == "MM") {
+                document.dispatchEvent(new CustomEvent("zeldamaploaded", {
+                    detail: { game, map: mapName, setup: Number(setupDropdown.value || 0) },
+                }));
             }
 
 
@@ -730,7 +745,9 @@ document.addEventListener('keyup',(e)=>{
 
 async function fetchActorsByAreaJSON(path, sceneName) {
     try {
-        const response = await fetch(path);
+        // (revalidated every time: python http.server sends no cache headers,
+        // so a regenerated file would otherwise stay stale in the cache)
+        const response = await fetch(path, { cache: "no-cache" });
         let data = await response.json();
 
         const areaActors = data[sceneName];

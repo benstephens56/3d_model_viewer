@@ -448,11 +448,32 @@ export function getModelGroup(key, label) {
 // click on the master, or by rows being switched all on / all off by hand;
 // the per-row visibility lives in modelState
 // and is deliberately NOT carried between scenes (see resetGroupModelState).
-const groupMasterState = new Map();
+// Both maps are saved in localStorage, so they survive leaving the page too
+// (main.js's "Reset to defaults" clears them).
+const GROUP_STATE_KEY = 'viewer.modelGroups';
+const savedGroupState = (() => {
+    try { return JSON.parse(localStorage.getItem(GROUP_STATE_KEY) ?? 'null') ?? {}; }
+    catch { return {}; }
+})();
+const saveGroupState = () => {
+    try {
+        localStorage.setItem(GROUP_STATE_KEY, JSON.stringify({
+            master: Object.fromEntries(groupMasterState),
+            collapsed: Object.fromEntries(groupCollapsedState),
+        }));
+    } catch { /* storage unavailable: kept for this visit only */ }
+};
+const persistentMap = (saved) => {
+    const map = new Map(Object.entries(saved ?? {}));
+    const set = map.set.bind(map);
+    map.set = (k, v) => { set(k, v); saveGroupState(); return map; };
+    return map;
+};
+const groupMasterState = persistentMap(savedGroupState.master);
 
 // Collapsed/expanded choice per group key, kept across scene loads. Groups
 // default to collapsed.
-const groupCollapsedState = new Map();
+const groupCollapsedState = persistentMap(savedGroupState.collapsed);
 
 /**
  * Re-apply the last master-checkbox choice made for this group, if any, to
