@@ -1773,8 +1773,25 @@ function layerShown(layer) {
     return box ? box.checked : DEFAULT_LAYERS.has(layer);
 }
 
+// The menu's choices are kept in localStorage (main.js's "Reset to defaults"
+// clears them): put back before any actor is built, saved on every change.
+const LAYERS_KEY = 'viewer.actorLayers';
+try {
+    const saved = JSON.parse(localStorage.getItem(LAYERS_KEY) ?? 'null');
+    for (const layer of ACTOR_LAYERS) {
+        const box = document.getElementById('actorLayer_' + layer);
+        if (box && typeof saved?.[layer] === 'boolean') box.checked = saved[layer];
+    }
+} catch { /* storage unavailable: the defaults */ }
+const saveLayers = () => {
+    try {
+        localStorage.setItem(LAYERS_KEY, JSON.stringify(Object.fromEntries(ACTOR_LAYERS.map(l => [l, layerShown(l)]))));
+    } catch { /* kept for this visit only */ }
+};
+
 for (const layer of ACTOR_LAYERS) {
     document.getElementById('actorLayer_' + layer)?.addEventListener('change', () => {
+        saveLayers();
         const shown = layerShown(layer);
         for (const g of layerGroups) if (g.userData.actorLayer === layer) g.visible = shown;
         if (layerScene) clearSelection(layerScene);

@@ -207,61 +207,7 @@ export function renderZeldaObjectBinary(scene, buffer, fresh, actorName, objectN
         addModelCheckbox(scene, "Waterboxes", waterMesh, waterEdges, false, true, "#00FFFF");
         hasCollision = true;
 
-        waterboxCheckbox.addEventListener('change', () => {
-            // --- Remove old waterbox mesh & edges ---
-            const oldMeshIndex = loadedModels.findIndex(m => m.name === "Waterboxes");
-            if (oldMeshIndex >= 0) {
-                const old = loadedModels[oldMeshIndex];
-                if (old.mesh) {
-                    scene.remove(old.mesh);
-                    if (old.mesh.geometry) old.mesh.geometry.dispose();
-                    if (old.mesh.material) old.mesh.material.dispose();
-                }
-                if (old.edges) {
-                    scene.remove(old.edges);
-                    if (old.edges.geometry) old.edges.geometry.dispose();
-                    if (old.edges.material) old.edges.material.dispose();
-                }
-                loadedModels.splice(oldMeshIndex, 1);
-            }
-
-            // --- Remove old model checkbox from UI ---
-            const container = document.querySelector('.controls'); // adjust if your container is different
-            if (container) {
-                const oldCheckbox = Array.from(container.children).find(
-                    child => child.dataset && child.dataset.modelName === "Waterboxes"
-                );
-                if (oldCheckbox) container.removeChild(oldCheckbox);
-            }
-            
-            // Remove old waterbox mesh & edges
-            const oldMesh = loadedModels.find(m => m.name === "WaterboxesMesh");
-            if (oldMesh) {
-                scene.remove(oldMesh.mesh);
-                if (oldMesh.mesh.geometry) oldMesh.mesh.geometry.dispose();
-                if (oldMesh.mesh.material) oldMesh.mesh.material.dispose();
-                loadedModels.splice(loadedModels.indexOf(oldMesh), 1);
-            }
-
-            const oldEdges = loadedModels.find(m => m.name === "WaterboxesEdges");
-            if (oldEdges) {
-                scene.remove(oldEdges.mesh);
-                if (oldEdges.mesh.geometry) oldEdges.mesh.geometry.dispose();
-                if (oldEdges.mesh.material) oldEdges.mesh.material.dispose();
-                loadedModels.splice(loadedModels.indexOf(oldEdges), 1);
-            }
-
-            // Rebuild waterbox model with updated depth
-            const { mesh: waterMesh, edges: waterEdges } = buildWaterBoxModel(waterBoxes, waterboxCheckbox.checked);
-
-            // Add both to scene
-            scene.add(waterMesh);
-            scene.add(waterEdges);
-
-            // Add both to loadedModels for selection, toggles, etc.
-            loadedModels.push({ name: "Waterboxes", mesh: waterMesh, edges: waterEdges });
-            addModelCheckbox(scene, "Waterboxes", waterMesh, waterEdges, false, false, "#00FFFF");
-        });
+        // ("Full waterbox depth" reshapes it in place: installWaterboxDepthToggle)
     }
     if(!hasCollision) {
         clearAllModels(scene);

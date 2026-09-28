@@ -16,46 +16,49 @@
     </div>
 
     <div id="sidebar">
-      <h2>3D Model Viewer</h2>
-      <button id="resetDefaults" type="button" title="Forget every saved choice (the sidebar groups' checkboxes and collapsed state, auto-import settings) and reload the page with the defaults.">Reset to defaults</button>
+      <div class="sidebar-title">
+        <h2>3D Model Viewer</h2>
+        <button id="resetDefaults" type="button" title="Forget every saved choice (the sidebar groups' checkboxes and collapsed state, auto-import settings) and reload the page with the defaults.">Reset to defaults</button>
+      </div>
 
-      <div class="section">
-        <!--<div class="muted">Game:</div>-->
-        Game: <select id="selected-game">
+      <div class="section map-picker">
+        <label class="picker-row">Game <select id="selected-game">
             <option value="BK">Banjo-Kazooie</option>
             <option value="BT">Banjo-Tooie</option>
             <option value="OOT">OOT</option>
             <option value="OOT3D">OOT3D</option>
             <option value="MM">MM</option>
             <option value="MM3D">MM3D</option>
-            <!--<option value="Default">Default</option>-->
-        </select><br>
-        Map: <select id="mapDropdown"></select><br>
+        </select></label>
+        <label class="picker-row">Map <select id="mapDropdown"></select></label>
         <!--<label>Load model file (binary or text). Supported binary format:
           <div class="muted">[uint16 vertexCount][uint16 triCount][int16 x,y,z ...][uint16 i,j,k ...]</div>
         </label>-->
-        <div id="setupDropdownDiv" style="display:none; align-items:center; gap:8px;">Setup: <select id="setupDropdown"></select><label id="renderActorsLabel" title="OOT / MM: every actor in the setup's spawn lists, drawn with its model where the viewer knows it (js/oot_object_list.js, js/mm_object_list.js), else as a marker, plus the collision of the dynapoly ones. Choose what each actor row draws under Options, Actor display."><input id="renderActorsCheckbox" type="checkbox" checked> Render Actors</label></div>
-        <button id="loadMap">Load Map</button><br>
+        <label id="setupDropdownDiv" class="picker-row" style="display:none;" title="OOT / MM: the scene setup (layer) whose actors are drawn: every actor in its spawn lists, with its model where the viewer knows it, else as a marker, plus the collision of the dynapoly ones. Choose what each actor row draws under Options, Actor display.">Setup <select id="setupDropdown"></select></label>
+        <div class="picker-actions">
+          <button id="loadMap">Load Map</button>
+          <label class="file-button" title="Load a model file (binary or text)">Choose file<input id="file" type="file" accept="*/*" hidden></label>
+          <span id="fileName" class="file-name"></span>
+        </div>
+        <!-- (hidden for now: loading a single actor by id) -->
         <select id="actorDropdown" style="display:none;"></select>
         <button id="loadActor" style="display:none;">Load Actor</button>
-        <input id="file" type="file" accept="*/*" />
       </div>
 
       <div class="section controls">
         <h3>Options</h3>
-        <!--<div class="muted">Control mode:</div>-->
-        <select id="control-mode">
+        <label class="picker-row">Mode <select id="control-mode">
           <!--<option value="auto">Auto (try Pointer Lock, fallback to Orbit)</option>-->
-          <option value="pointer">Fly Mode (WASD)</option>
+          <option value="pointer">Fly (WASD)</option>
           <option value="orbit">Orbit (mouse drag + wheel)</option>
-        </select>
+        </select></label>
         <!-- Status bar removed: it only reported pointer-lock state. setStatus()
              in main.js no-ops without this element, so restoring it is just a
              matter of putting this div back. -->
-        <label>Flying Speed <input id="movementSpeedSlider" type="range" min="50" max="3050" step="200" value="850"></label>
+        <label id="movementSpeedRow" class="picker-row" title="Flying speed (Fly mode)">Speed <input id="movementSpeedSlider" type="range" min="50" max="3050" step="200" value="850"></label>
         <label id="display_fwc_label" style="display:none;"><input id="display_fwc" type="checkbox"> Display floors/walls/ceilings on load</label>
         <label><input id="wireframe" type="checkbox" checked> Draw triangle/cube edges</label>
-        <label><input id="backface" type="checkbox"> Double-sided triangles</label>
+        <label style="display:none;"><input id="backface" type="checkbox"> Double-sided triangles</label>
         <div id="bkViewModeLabel"><label title="Maps, model props and actors drawn with their in-game textures and vertex colours (decoded from the display lists). Off: the map's collision mesh and the props' geometry in flat colours."><input id="bkTextures" type="checkbox" checked> Textures</label><label id="bkPropCollisionLabel" title="Draw each model prop's / actor's collision list (often just a hitbox-sized shape, quite different from its display list). With textures on it is drawn translucent over the textured model; with textures off it replaces the prop's display-list triangles. Props with no collision list keep showing their display list, and say so in their description ('visual')."><input id="bkPropCollision" type="checkbox"> Prop collision</label></div>
         <details id="actorDisplay" class="actor-display" style="display:none;" title="What every row in the Actors group draws. The row checkboxes still show or hide an actor type as a whole.">
           <summary>Actor display</summary>
@@ -68,29 +71,30 @@
         </details>
         <div id="bkActorHitboxesLabel" style="margin-top:8px; font-size:13px" title="Draw actors' hitboxes: what the game tests Banjo against (BK func_803322F0, BT core2 0x801099D0). Most model actors carry a hit volume list in the model (boxes, cylinders and spheres, often one per body part) and are tested against those; the rest use the model's bounding sphere (vertex list centre and local_norm, times the actor's scale). A sprite actor's is half the sprite size, centred half a sprite up. Volumes pinned to a bone are shown in the rest pose. Enemies = contact hurts Banjo (red). Touch = things that react when touched: collectibles, pads, switches, doors, NPCs (cyan). Scenery actors like stairs and signs have a sphere nothing checks and are never drawn (in BT: actors whose info struct gives the marker no touch callbacks, see BT_Actor_Hitboxes).">Actor hitboxes: <label style="display:inline; margin:0 8px 0 0"><input id="bkActorHitboxesEnemy" type="checkbox"> enemies</label><label style="display:inline; margin:0"><input id="bkActorHitboxesTouch" type="checkbox"> touch</label></div>
         <label id="groundClipBandsLabel" style="display:none;" title="Blue = the portion of the surface below its lowest vertex. Red = safe standable ground. Yellow = a ground-clippable band (the raycast-through-floor bug is present there). Cyan = the entire surface is ground-clippable. Unchecking this skips computing the yellow/cyan bands and renders those areas as plain red instead."><input id="groundClipBandsCheckbox" type="checkbox"> Ground-clippable standable surface on load</label>
-        <div style="display: flex; align-items: center; margin-bottom: 4px; gap: 8px;" id="samplePointsContainer"><label id="samplePointsLabel"><input type="checkbox" id="samplePointsCheckbox">Sample Standable Points</label><input type="range" id="samplePointsResolution" value="0.02" min="0.005" max="0.03" step="0.005"></div>
+        <div id="samplePointsContainer"><label id="samplePointsLabel"><input type="checkbox" id="samplePointsCheckbox"> Sample standable points</label><input type="range" id="samplePointsResolution" value="0.02" min="0.005" max="0.03" step="0.005" title="Sample spacing"></div>
         <div id="wallClipContainer" class="clip-region" style="display:none;">
           <div class="clip-region-title">Wall push clips</div>
-          <button id="wallClipImport">Import results</button><input id="wallClipImportFile" type="file" accept=".json,application/json" style="display:none">
-          <button id="wallClipExport">Export JSON</button>
-          <button id="wallClipDynaExportAll" title="Every map's dynapoly actors, for every setup, in one file (nothing is drawn), for clipfinder --all --dyna. Setups with the same dynapolys are written once.">Export all dynapolys</button>
-          <label title="When a map loads, import every clipfinder results file for it from this folder (served by the viewer's server): files named by --out-dir, for this map, that are static scans or scans with the loaded setup's dynapolys. They're merged."><input id="wallClipAutoImport" type="checkbox" checked> Auto-import from <input id="wallClipAutoDir" type="text" value="tools/clipfinder/results" style="width:12em"></label>
-          <label title="Only show points Link can get to from a standable in-bounds spot in one frame, at this speed or less (actor speed; he moves 1.5x that a frame). Defaults to the form's run speed."><input id="wallClipReachable" type="checkbox"> Reachable only, speed &le; <input id="wallClipMaxSpeed" type="number" min="0" max="100" step="0.5" value="6" style="width:4em"></label>
-          <label title="How far Link can move in one frame (default 45 = speed 30; glitches can go 55+). Reachability looks for starts up to this far away. Imported results set it to what clipfinder --max-move used."><input id="wallClipMaxMove" type="number" min="1" max="150" step="1" value="45" style="width:4em"> max move per frame</label>
+          <div class="clip-buttons">
+            <button id="wallClipImport" title="Load one clipfinder results file for the loaded map">Import</button><input id="wallClipImportFile" type="file" accept=".json,application/json" style="display:none">
+            <button id="wallClipExport" title="Write the shown points out as JSON (clipfinder's format, for wall_clip_tester.lua)">Export JSON</button>
+            <button id="wallClipDynaExportAll" title="Every map's dynapoly actors, for every setup, in one file (nothing is drawn), for clipfinder --all --dyna. Setups with the same dynapolys are written once.">Export all dynapolys</button>
+          </div>
+          <label class="clip-line" title="When a map loads, import every clipfinder results file for it from this folder (served by the viewer's server): files named by --out-dir, for this map, that are static scans or scans with the loaded setup's dynapolys. They're merged."><input id="wallClipAutoImport" type="checkbox" checked> Auto-import <input id="wallClipAutoDir" type="text" value="tools/clipfinder/results"></label>
+          <div class="clip-line">
+            <label title="Only show points Link can get to from a standable in-bounds spot in one frame, at this speed or less (actor speed; he moves 1.5x that a frame). Defaults to the form's run speed."><input id="wallClipReachable" type="checkbox"> Reachable, speed &le; <input id="wallClipMaxSpeed" type="number" min="0" max="100" step="0.5" value="6"></label>
+            <label title="Max move per frame: how far Link can move in one frame (default 45 = speed 30; glitches can go 55+). Reachability looks for starts up to this far away. Imported results set it to what clipfinder --max-move used.">Max move <input id="wallClipMaxMove" type="number" min="1" max="150" step="1" value="45"></label>
+          </div>
           <span id="wallClipStatus" style="font-size:12px"></span>
         </div>
-        <div class="dropdown" id="surfaceDropdown" style="display:none;">
-            <button class="dropdown-btn">Surface Flags ▼</button>
+        <div class="surface-row">
+          <div class="dropdown" id="surfaceDropdown" style="display:none;">
+            <button class="dropdown-btn">Surface flags ▾</button>
             <div class="dropdown-content" id="surfaceDropdownContent"></div>
-        </div>
-        <label>
-        <div id="waterboxCheckboxDiv" style="display:none;">
-        <input type="checkbox" id="showFullWaterboxDepth" />
-            Show full waterbox depth
-        </label>
+          </div>
+          <label id="waterboxCheckboxDiv" style="display:none;"><input type="checkbox" id="showFullWaterboxDepth"> Full waterbox depth</label>
         </div>
         <div id="subdivisionSelectorContainer" style="display:none;">
-            <label>Subdivision <select id="subdivisionSelector"></select></label>
+            <label class="subdivision-row">Subdivision <select id="subdivisionSelector"></select></label>
         </div>
         <label style="display:none;"><input id="translucent" type="checkbox" checked> Translucent (opacity)</label>
         <label style="display:none;">Opacity <input id="opacity" type="range" min="0" max="1" step="0.01" value="1.0"></label>
@@ -98,16 +102,18 @@
       </div>
       
       <div class="section">
-        <h3>Selected Entities</h3>
-        <div class="select-info">
+        <div class="section-heading">
+          <h3>Selected Entities</h3>
           <label><input id="multiSelect" type="checkbox"> Multi-select</label>
-          <textarea id="selectionListEl" rows="6" cols="40" readonly></textarea>
+        </div>
+        <div class="select-info">
+          <textarea id="selectionListEl" rows="5" cols="40" readonly></textarea>
         </div>
       </div>
 
       <div class="section">
         <h3>Camera</h3>
-        <div class="info">
+        <div class="info camera-info">
           <div>pos: <span id="cam-pos">0,0,0</span></div>
           <div>rot (deg): <span id="cam-rot">0,0,0</span></div>
         </div>

@@ -66,6 +66,8 @@ export function buildWaterBoxModel(waterBoxes, fullDepth = false) {
     mesh.renderOrder = 1000; // draw in front
     mesh.name = "WaterboxesMesh";
     mesh.userData.waterboxes = metadata;
+    // (what installWaterboxDepthToggle rebuilds it from)
+    mesh.userData.waterBoxSource = waterBoxes;
 
     // ----- Edges -----
     const edgesGeom = new THREE.EdgesGeometry(merged);
@@ -75,6 +77,38 @@ export function buildWaterBoxModel(waterBoxes, fullDepth = false) {
     );
     edges.name = "WaterboxesEdges";
     edges.userData.waterboxes = metadata; // same metadata for selection
+    edges.userData.waterBoxSource = waterBoxes;
 
     return { mesh, edges };
+}
+
+/**
+ * "Full waterbox depth": when the checkbox changes, every waterbox model in
+ * the scene (the map's and the dynapoly actors') gets the other depth. The
+ * geometry is swapped inside the existing mesh and edges, so their sidebar
+ * rows, visibility, colour and place in the scene all stay as they are.
+ * Installed once (main.js).
+ */
+export function installWaterboxDepthToggle(scene, checkbox) {
+    checkbox.addEventListener('change', () => {
+        const rebuilt = new Map();
+        scene.traverse(object => {
+            const source = object.userData.waterBoxSource;
+            if (!source || !object.geometry) return;
+            let model = rebuilt.get(source);
+            if (!model) {
+                model = buildWaterBoxModel(source, checkbox.checked);
+                rebuilt.set(source, model);
+            }
+            const fresh = object.isLineSegments ? model.edges : model.mesh;
+            object.geometry.dispose();
+            object.geometry = fresh.geometry;
+            object.userData.waterboxes = fresh.userData.waterboxes;
+        });
+        // (only the geometry was taken)
+        for (const { mesh, edges } of rebuilt.values()) {
+            mesh.material.dispose();
+            edges.material.dispose();
+        }
+    });
 }

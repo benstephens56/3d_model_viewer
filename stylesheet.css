@@ -161,6 +161,61 @@ button {
     flex-basis: 100%
 }
 
+/* The wall push clip panel: small buttons on one line, then one line each for
+   auto-import and the reachability filter */
+.clip-buttons,
+.clip-line {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+}
+
+.clip-line {
+    justify-content: space-between;
+    gap: 4px;
+}
+
+.clip-buttons button {
+    margin: 0;
+    padding: 4px 7px;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.clip-line label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.clip-line input[type=checkbox] {
+    margin: 0;
+}
+
+.clip-line input[type=text] {
+    flex: 1;
+    min-width: 0;
+    padding: 3px 5px;
+    font-size: 12px;
+    background: #1e1e1e;
+    color: #efefef;
+    border: 1px solid #555;
+    border-radius: 4px;
+}
+
+.clip-line input[type=number] {
+    width: 3.2em;
+    margin: 0;
+    padding: 2px 4px;
+    font-size: 12px;
+    border-radius: 4px;
+}
+
 /* ---- Per-model rows (built by addModelCheckbox in render.js) ----
    One grid-like row per loaded model: [checkbox + name] [swatch] [delete].
    The label is the only item allowed to flex, so the swatch and the delete
@@ -172,8 +227,8 @@ button {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 4px;
-    min-height: 24px;
+    margin-bottom: 1px;
+    min-height: 20px;
 }
 
 .model-label {
@@ -208,7 +263,7 @@ button {
     /* flex:none is the fix for the swatch changing width per row. */
     flex: none;
     width: 24px;
-    height: 20px;
+    height: 18px;
     padding: 0;
     border: 1px solid #3a4a5e;
     border-radius: 4px;
@@ -467,12 +522,6 @@ a.download-link {
     height: 2px;
 }
 
-#mapDropdown {
-    min-width: 200px;
-    max-width: 220px;
-    box-sizing: border-box;
-}
-
 #setupDropdown {
     min-width: 30px;
     max-width: 60px;
@@ -512,12 +561,12 @@ a.download-link {
     border-radius: 6px;
     padding: 6px;
     font-family: monospace;
-    font-size: 13px;
+    font-size: 12px;
     resize: vertical;
     width: 100%;
     box-sizing: border-box;
-    margin-top: 6px;
-    margin-bottom: 8px;
+    margin: 0;
+    display: block;
 }
 
 .dropdown {
@@ -544,8 +593,20 @@ a.download-link {
 
 .dropdown-content label {
     display: block;
-    margin: 4px 0;
+    margin: 1px 0;
+    font-size: 12px;
+    white-space: nowrap;
     cursor: pointer;
+}
+
+.surface-row .dropdown-content {
+    width: max-content;
+    padding: 6px 8px;
+}
+
+.dropdown-content label input[type=checkbox] {
+    margin: 0 4px 0 0;
+    vertical-align: -2px;
 }
 
 .dropdown.show .dropdown-content {
@@ -573,4 +634,201 @@ a.download-link {
 .actor-display-content label {
     display: inline;
     margin: 0;
+}
+
+/* The title row and the game / map / setup picker at the top of the sidebar:
+   one line per choice, the label beside its select. */
+.sidebar-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.sidebar-title h2 {
+    margin: 0;
+}
+
+.sidebar-title button {
+    margin: 0;
+    padding: 4px 8px;
+    font-size: 12px;
+    background: #334155;
+}
+
+/* (also the Mode and Speed rows under Options) */
+.picker-row {
+    display: grid;
+    grid-template-columns: 3.2em minmax(0, 1fr);
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 4px;
+}
+
+.picker-row select,
+.picker-row input[type=range] {
+    width: 100%;
+    margin: 0;
+    padding: 4px 6px;
+}
+
+.picker-row input[type=range] {
+    padding: 0;
+}
+
+.map-picker .picker-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.map-picker .picker-actions button,
+.map-picker .file-button {
+    margin: 0;
+    padding: 5px 10px;
+    font-size: 13px;
+    border-radius: 6px;
+}
+
+.map-picker .file-button {
+    display: inline-block;
+    background: #334155;
+    color: white;
+    cursor: pointer;
+}
+
+.map-picker .file-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: #94a3b8;
+}
+
+/* Sample standable points: the checkbox and the spacing slider on one line,
+   the debug toggle under them (sample_points.js adds it) */
+#samplePointsContainer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 8px;
+    margin: 6px 0 4px;
+}
+
+#samplePointsContainer > label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    white-space: nowrap;
+}
+
+#samplePointsContainer input[type=checkbox] {
+    margin: 0;
+}
+
+#samplePointsResolution {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+}
+
+#showExcludedPointsLabel {
+    flex-basis: 100%;
+    font-size: 12px;
+    color: #94a3b8;
+}
+
+/* The Options checkboxes (floors/walls/ceilings on load, edges, double-sided,
+   textures, ground-clippable...): one tight line each */
+.controls > label:not(.picker-row),
+#bkViewModeLabel > label {
+    margin-top: 3px;
+}
+
+#bkActorHitboxesLabel {
+    margin-top: 3px !important;
+}
+
+/* (every checkbox of the panel on the same left edge) */
+.controls > label:not(.picker-row) > input[type=checkbox],
+#bkViewModeLabel input[type=checkbox],
+#groundClipBandsLabel input[type=checkbox] {
+    margin: 0 4px 0 0;
+    vertical-align: -2px;
+}
+
+/* Surface flags menu and the waterbox depth toggle on one line */
+.surface-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
+}
+
+.surface-row .dropdown-btn {
+    margin: 0;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.surface-row > label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    white-space: nowrap;
+}
+
+.surface-row input[type=checkbox] {
+    margin: 0;
+}
+
+/* Subdivision: its label beside the list */
+.subdivision-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0 2px;
+}
+
+.subdivision-row select {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 3px 4px;
+}
+
+/* A section's heading with a control beside it (Selected Entities' Multi-select) */
+.section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.section-heading h3 {
+    margin: 0;
+}
+
+.section-heading label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    font-size: 12px;
+}
+
+.section-heading input[type=checkbox] {
+    margin: 0;
+}
+
+.camera-info {
+    margin-top: 4px;
+    padding: 4px 6px;
+    font-size: 12px;
 }

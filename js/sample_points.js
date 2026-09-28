@@ -20,10 +20,9 @@ showExcludedPointsCheckbox.type = 'checkbox';
 showExcludedPointsCheckbox.id = 'showExcludedPointsCheckbox';
 const showExcludedPointsLabel = document.createElement('label');
 showExcludedPointsLabel.htmlFor = 'showExcludedPointsCheckbox';
-showExcludedPointsLabel.textContent = 'Show excluded points (debug)';
-showExcludedPointsLabel.style.marginLeft = '4px';
+showExcludedPointsLabel.id = 'showExcludedPointsLabel';
+showExcludedPointsLabel.append(showExcludedPointsCheckbox, ' Show excluded points (debug)');
 if (samplePointsContainer) {
-    samplePointsContainer.appendChild(showExcludedPointsCheckbox);
     samplePointsContainer.appendChild(showExcludedPointsLabel);
 }
 

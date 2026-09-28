@@ -74,6 +74,7 @@ export function addModelCheckbox(scene, name, meshObj, edgesObj, clearFirst, che
 
         // Save visibility
         modelState[name].visible = chk.checked;
+        if (!container.closest('.model-group')) saveRowVisibility(name, chk.checked);
 
         clearSelection(scene);
     });
@@ -499,6 +500,25 @@ export function resetGroupModelState(groupKey) {
 }
 
 const modelState = {};
+
+// The shown / hidden choice of the rows outside any group (Main Model,
+// Waterboxes, Standable Surface, the wall clip marker rows...), kept in
+// localStorage so it survives leaving the page (main.js's "Reset to defaults"
+// clears it). Rows inside a group are left out on purpose: their visibility
+// isn't even carried from one map to the next (resetGroupModelState).
+const ROWS_KEY = 'viewer.modelRows';
+const savedRows = (() => {
+    try { return JSON.parse(localStorage.getItem(ROWS_KEY) ?? 'null') ?? {}; }
+    catch { return {}; }
+})();
+for (const [name, visible] of Object.entries(savedRows)) {
+    if (typeof visible === 'boolean') modelState[name] = { visible };
+}
+function saveRowVisibility(name, visible) {
+    savedRows[name] = visible;
+    try { localStorage.setItem(ROWS_KEY, JSON.stringify(savedRows)); }
+    catch { /* kept for this visit only */ }
+}
 
 ////////////////////////////////////////
 // System: Geometry creation

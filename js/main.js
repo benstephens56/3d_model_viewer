@@ -21,6 +21,7 @@ import { renderZeldaSceneTextured, parseZeldaSceneInfo, zeldaRoomFileName, zelda
 import { renderOOTActors } from './oot_actors.js';
 import { addModelCheckbox, buildTest } from './render.js';
 import { setupWallPushClipUI } from './wall_push_clips.js';
+import { installWaterboxDepthToggle } from './waterboxes.js';
 
 ////////////////////////////////////////
 // System: DOM / Static UI Elements
@@ -29,7 +30,6 @@ import { setupWallPushClipUI } from './wall_push_clips.js';
 const mapDropdown = document.getElementById("mapDropdown");
 const setupDropdown = document.getElementById("setupDropdown");
 const setupDropdownDiv = document.getElementById("setupDropdownDiv");
-const renderActorsCheckbox = document.getElementById("renderActorsCheckbox");
 const actorDropdown = document.getElementById("actorDropdown");
 const fileInput = document.getElementById('file');
 const loadMapButton = document.getElementById('loadMap');
@@ -86,6 +86,7 @@ renderer.shadowMap.enabled = false;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b1220);
 setupWallPushClipUI(scene);
+installWaterboxDepthToggle(scene, document.getElementById('showFullWaterboxDepth'));
 
 // Depth precision goes as near / distance^2, and the meshes use polygonOffset
 // so their wireframes draw on top: with a 0.1 near plane, one depth-buffer
@@ -287,7 +288,7 @@ gameSel.addEventListener('change',(e)=>{
         groundClipBandsLabel.style.display = "none";
     }
     else {
-        display_fwc_label.style.display = "block";
+        // (display_fwc_label stays hidden for now: floors/walls/ceilings are never split on load)
         dropdownElement.style.display = "block";
         waterboxCheckboxElement.style.display = "block";
         subdivisionSelectorContainer.style.display = "block";
@@ -295,9 +296,8 @@ gameSel.addEventListener('change',(e)=>{
     }
 
     if (["OOT","MM"].includes(game)) {
-        actorDropdown.style.display = "block";
-        loadActor.style.display = "block";
-        setupDropdownDiv.style.display = "flex";
+        // (the single-actor picker, actorDropdown / loadActor, stays hidden for now)
+        setupDropdownDiv.style.display = "";
         
         const game = document.getElementById("selected-game").value;
         if (game == "OOT" || game == "MM") {
@@ -307,8 +307,6 @@ gameSel.addEventListener('change',(e)=>{
         }
     }
     else {
-        actorDropdown.style.display = "none";
-        loadActor.style.display = "none";
         setupDropdownDiv.style.display = "none";
     }
         
@@ -469,7 +467,7 @@ async function loadSelectedMap(game) {
 
             // OOT / MM: every actor of the selected setup, drawn with its model
             // (oot_actors.js), dynapoly collision in the same rows.
-            if ((game == "OOT" || game == "MM") && renderActorsCheckbox.checked && areaActors) {
+            if ((game == "OOT" || game == "MM") && areaActors) {
                 await showLoading(`${mapName}: actors…`);
                 await renderOOTActors(scene, buffer1, mapFilename, game);
             }
@@ -554,6 +552,7 @@ loadActor.addEventListener('click', async (e) => {
 // File parsing
 fileInput.addEventListener('change', async (ev)=>{
     const f = ev.target.files[0];
+    document.getElementById('fileName').textContent = f ? f.name : '';
     if(!f) return;
     const buf = await f.arrayBuffer();
     const game = document.getElementById("selected-game").value;
@@ -661,8 +660,14 @@ document.addEventListener('pointerlockerror', (ev)=>{
 });
 
 // Control mode selector
+// The flying speed only matters in Fly mode
+const movementSpeedRow = document.getElementById('movementSpeedRow');
+const showSpeedRow = () => { movementSpeedRow.style.display = controlModeSel.value === 'orbit' ? 'none' : ''; };
+showSpeedRow();
+
 controlModeSel.addEventListener('change',(e)=>{
     controlMode = e.target.value;
+    showSpeedRow();
     if(controlMode === 'orbit'){
         enableOrbitControls();
     }else if(controlMode === 'pointer'){
