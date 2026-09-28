@@ -4,6 +4,8 @@
 // Output
 ////////////////////////////////////////
 
+int MAX_PER_PAIR = 0;
+
 static string num(double v) {
 	char buf[40];
 	// %.9g round-trips any f32
@@ -28,6 +30,7 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 	o << "  \"game\": " << jsonStr(game) << ", \"map\": " << jsonStr(map)
 		<< ", \"falling\": " << (falling ? "true" : "false") << ", \"extendedOnly\": " << (extendedOnly ? "true" : "false") << ", \"numPolygons\": " << numPolygons;
 	if (REACH_DIST != DEFAULT_MAX_MOVE) o << ", \"maxMove\": " << num(REACH_DIST);
+	if (MAX_PER_PAIR > 0) o << ", \"maxPerPair\": " << MAX_PER_PAIR;
 	// the scene setups whose dynapolys these are (the viewer's auto-import)
 	if (!setups.empty()) {
 		o << ", \"setups\": [";

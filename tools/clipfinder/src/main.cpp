@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root, after, dynaPath;
 	bool dynaOnly = false, noSlope = false, slopeOnly = false, noGround = false, groundOnly = false, slopeStarts = false, keepLoadVoid = false;
 	int onlySetup = -1;  // --setup N: just the dynapolys of that setup
+	int maxPerPair = 0;  // --max-per-pair N: at most N points a wall pair, spread out (thinClips)
 	double radius = 0;
 	bool falling = false, all = false, extendedOnly = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
 	bool angleSweep = false;  // --angles: every yaw that clips, each from its own start (like --yaw)
@@ -114,6 +115,11 @@ int main(int argc, char** argv) {
 		else if (a == "--falling") falling = true;
 		else if (a == "--extended-only") extendedOnly = true;
 		else if (a == "--first-per-pair") firstPerPair = true;
+		else if (a == "--max-per-pair") {
+			maxPerPair = std::stoi(val());
+			if (maxPerPair < 1) { fprintf(stderr, "--max-per-pair wants a number of points >= 1\n"); return 2; }
+			MAX_PER_PAIR = maxPerPair;
+		}
 		else if (a == "--min-speed") minSpeed = true;
 		else if (a == "--refine") { refine = true; minSpeed = true; }
 		else if (a == "--angles") angleSweep = true;
@@ -220,6 +226,7 @@ int main(int argc, char** argv) {
 			"                  [--dyna FILE [--dyna-only] [--setup N]]  (the viewer's dynapoly export, one map's or every map's: the actors' collision too)\n"
 			"                  [--no-slope | --slope-only] [--slope-starts] [--keep-load-void]  (slope clips: the floor check lifting Link behind a wall)\n"
 			"                  [--no-ground | --ground-only]  (ground clips: falling at velocity.y -20 from the floor, through it and under a wall)\n"
+			"                  [--max-per-pair N]  (at most N points per wall pair, spread out evenly: smaller files)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -713,6 +720,12 @@ int main(int argc, char** argv) {
 							}
 						}
 					}
+				}
+				// --max-per-pair: after --min-speed, so the slowest reach is kept
+				// (not for --refine / --yaw / --angles: their clips are the answer)
+				if (maxPerPair > 0 && !refine && atYaw < 0 && !angleSweep) {
+					size_t before = found.size(), dropped = thinClips(found, maxPerPair);
+					if (dropped) fprintf(stderr, "  --max-per-pair %d: kept %zu of %zu clip points\n", maxPerPair, found.size(), before);
 				}
 				results.push_back({ v.form, v.radius, F(v.checkHeight), std::move(found) });
 			}

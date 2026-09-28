@@ -38,3 +38,10 @@ struct Clip {
 // one clip through it is found (like wall_clip_tester.lua's
 // RECORD_ONE_PER_PAIR) - one point per pair, much faster.
 vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false);
+
+// --max-per-pair N: at most n points per wall pair (and per row the viewer
+// shows it in: crossing / standing, walking / falling), spread out evenly
+// (farthest point sampling on the clip points). Always kept: the lowest
+// --min-speed reach, and an acute point of an acute pair. Keeps the order.
+// Returns how many were left out.
+size_t thinClips(vector<Clip>& clips, int n);

@@ -15,5 +15,8 @@ struct FormResult {
 // (one of `forms`), so the viewer can show them all at once.
 // dynaRaw: the --dyna export, passed through as "dyna" (the viewer rebuilds the
 // same dynapolys from it, with the same poly ids: numPolygons on, in order).
+// --max-per-pair N (0: all points), written to the JSON as "maxPerPair"
+extern int MAX_PER_PAIR;
+
 string toJson(const string& game, const string& map, int numPolygons, bool falling, bool extendedOnly,
 	const vector<FormResult>& forms, const string& dynaRaw = "", const vector<int>& setups = {});

@@ -816,7 +816,10 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	if (m.ground && !m.slopeOnly) {
 		for (const Poly& p : m.polys) {
 			if (!p.exists || !p.isWall || !(p.nXZ > 0)) continue;
-			if (m.dynaPairsOnly && p.bg < 0) continue;
+			// --dyna-only: a static wall only near a dynapoly actor (its floor can be the one he falls through)
+			if (m.dynaPairsOnly && p.bg < 0 && std::none_of(m.bgActors.begin(), m.bgActors.end(), [&](const BgActor& b) {
+				return b.cx + b.r >= p.minX - 50 && b.cx - b.r <= p.maxX + 50 && b.cz + b.r >= p.minZ - 50 && b.cz - b.r <= p.maxZ + 50;
+			})) continue;
 			if (m.nearFocus(p, focusMargin)) groundWalls.push_back(p.id);
 		}
 	}
@@ -887,4 +890,47 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		fprintf(stderr, "  (extended only: left out %zu acute wall pairs, and their %zu points that aren't acute on their own)\n",
 			acutePairs.size(), acuteDropped);
 	return out;
+}
+
+size_t thinClips(vector<Clip>& clips, int n) {
+	if (n <= 0) return 0;
+	std::map<std::tuple<int, int, int, bool, bool>, vector<size_t>> groups;
+	for (size_t i = 0; i < clips.size(); i++) {
+		const Clip& c = clips[i];
+		groups[{ c.pusher, c.crossed, c.kind, c.cross, c.drop > 0 }].push_back(i);
+	}
+	vector<bool> keep(clips.size(), false);
+	for (auto& [k, idx] : groups) {
+		if ((int)idx.size() <= n) { for (size_t i : idx) keep[i] = true; continue; }
+		vector<size_t> chosen;
+		auto choose = [&](size_t i) { if (std::find(chosen.begin(), chosen.end(), i) == chosen.end()) chosen.push_back(i); };
+		// the slowest reach, and a point that makes the pair acute
+		const Clip* best = nullptr;
+		size_t bestI = 0;
+		for (size_t i : idx) if (clips[i].hasReach && (!best || clips[i].reachSpeed < best->reachSpeed)) { best = &clips[i]; bestI = i; }
+		if (best) choose(bestI);
+		for (size_t i : idx) if (clips[i].acutePoint) { choose(i); break; }
+		if (chosen.empty()) choose(idx[0]);
+		// then over and over the point farthest from every chosen one
+		vector<double> d(idx.size(), INFINITY);
+		auto dist2 = [&](size_t a, size_t b) {
+			const V3 &p = clips[a].from, &q = clips[b].from;
+			return (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y) + (p.z - q.z) * (p.z - q.z);
+		};
+		size_t seen = 0;
+		while ((int)chosen.size() < n) {
+			for (; seen < chosen.size(); seen++)
+				for (size_t j = 0; j < idx.size(); j++) d[j] = std::min(d[j], dist2(idx[j], chosen[seen]));
+			size_t far = 0;
+			for (size_t j = 1; j < idx.size(); j++) if (d[j] > d[far]) far = j;
+			if (!(d[far] > 0)) break; // the rest are on chosen points
+			chosen.push_back(idx[far]);
+		}
+		for (size_t i : chosen) keep[i] = true;
+	}
+	size_t w = 0;
+	for (size_t i = 0; i < clips.size(); i++) if (keep[i]) clips[w++] = clips[i];
+	const size_t dropped = clips.size() - w;
+	clips.resize(w);
+	return dropped;
 }
