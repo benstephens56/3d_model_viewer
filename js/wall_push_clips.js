@@ -63,8 +63,8 @@ const EXTENDED_COLOR = 0xff40ff;
 const LOW_ACUTE_COLOR = 0x3070ff;
 const LOW_EXTENDED_COLOR = 0x30e0ff;
 const LOW_COLOR = 0x30c8ff; // falling clips from older files, not split by category
-const SLOPE_COLOR = 0x40ff60; // slope clips (clipfinder slope.h)
-const GROUND_COLOR = 0xff9020; // ground clips (clipfinder ground.h)
+const SLOPE_COLOR = 0xff90d0; // slope clips (clipfinder slope.h)
+const GROUND_COLOR = 0xd4a017; // ground clips (clipfinder ground.h)
 const PUSHER_COLOR = 0xffd000;
 
 const SNORMAL_FLOOR = Math.trunc(0.5 * 32767);   // COLPOLY_SNORMAL(0.5f)
@@ -831,10 +831,12 @@ function landing(model, res, floorY, crossed = null) {
 // where he comes to rest (the wall pushes applied until they stop moving him,
 // e.g. resting against a slope) from a spot one frame's movement away in one
 // of 32 directions, on a floor near the clip's floor height and in bounds. The
-// frame from there straight at the point has to produce the clip (for a
-// standing point: nothing stops him on the way to it; for a crossing point:
-// the line check stops him on the crossed wall and the clip follows). Returns
-// the lowest speed that works, the start and the yaw, or null.
+// frame from there straight at the point has to produce the clip through the
+// same wall, ending out of bounds (for a standing point: nothing stops him on
+// the way and the pushes do it; for a crossing point: the line check stops
+// him on the pusher and the clip follows), as clipfinder's reachability()
+// (tools/clipfinder/src/reach.cpp). Returns the lowest speed that works, the
+// start and the yaw, or null.
 function reachability(model, c) {
     const floorRef = c.floorY ?? c.from.y;
     const P = c.from;
@@ -857,18 +859,26 @@ function reachability(model, c) {
             const speed = F((len + over) / SPEED_RATE);
             if (best && speed >= best.speed) continue;
             const yaw = yawOf(vx, vz);
+            // the game's move at that yaw and speed
+            const next = moveStep(start, yaw, speed);
+            if (c.drop > 0) next.y = P.y;
+            // (moving, a drop with checkHeight + dy < 5 gets the feet-level line
+            // test that stops him on his floor)
+            if (F(model.checkHeight + F(next.y - start.y)) < 5) continue;
             if (c.cross) {
-                // the game's move at that yaw and speed
-                const next = moveStep(start, yaw, speed);
-                if (c.drop > 0) next.y = P.y;
                 const f = lineFrame(model, start, next, LOOSE);
                 if (!f || f.hit.poly !== c.pusher) continue;
                 const clip = clipFromFrame(model, start, f.res, f.trace, LOOSE, c.drop > 0 ? null : start.y, { yaw, speed });
                 if (!clip || clip.crossed !== c.crossed) continue;
                 if (c.drop > 0 ? !landing(model, f.res, floorRef, clip.crossed) : !endCounts(model, clip.crossed, clip.end)) continue;
             } else {
-                const h = F(P.y + model.checkHeight);
-                if (model.lineHit({ x: start.x, y: h, z: start.z }, { x: P.x, y: h, z: P.z }, LOOSE, false, true)) continue;
+                // nothing in the way, then the frame's pushes clip through the same wall
+                if (lineFrame(model, start, next, LOOSE)) continue;
+                const trace = [];
+                const res = model.sphereStep(next, LOOSE, trace, start);
+                const clip = clipFromFrame(model, start, res, trace, LOOSE, c.drop > 0 ? null : start.y, { yaw, speed });
+                if (!clip || clip.crossed !== c.crossed) continue;
+                if (c.drop > 0 ? !landing(model, res, floorRef, clip.crossed) : !endCounts(model, clip.crossed, clip.end)) continue;
             }
             if (!model.isInBounds(start, true)) continue;
             best = { speed, start, yaw };
@@ -1070,10 +1080,12 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
     group.add(wallMesh([...crossed], color, 0.45));
     group.add(wallMesh([...pushers].filter(p => !crossed.has(p)), PUSHER_COLOR, 0.35));
 
-    // Where Link is on the frame before each clip, and a line to where he ends up.
-    // Each dot's description goes in userData.clipSpots (same order as the
-    // positions) for selection.js to show when it's clicked.
-    // A second, dimmer line runs from where Link stands still before the frame.
+    // A dot where Link stands still before each clip (in bounds, so it shows
+    // without "Points on top"; older files without one: where he is on the
+    // frame), a dimmer line from there to where he is on the frame and a line
+    // on to where he ends up. Each dot's description goes in
+    // userData.clipSpots (same order as the positions) for selection.js to
+    // show when it's clicked.
     const pts = [], lines = [], startLines = [], spots = [];
     const lift = 2;
     for (const g of groups) {
@@ -1089,7 +1101,8 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
                 const under = model.floorsAt(c.from.x, c.from.z).filter(y => y <= top + 20 && y >= top - 20);
                 up += (under.length ? Math.max(...under) : top) - c.from.y;
             }
-            pts.push(c.from.x, c.from.y + up, c.from.z);
+            if (c.prev) pts.push(c.prev.x, c.prev.y + lift, c.prev.z);
+            else pts.push(c.from.x, c.from.y + up, c.from.z);
             lines.push(c.from.x, c.from.y + up, c.from.z, c.end.x, c.end.y + up, c.end.z);
             if (c.prev) startLines.push(c.prev.x, c.prev.y + lift, c.prev.z, c.from.x, c.from.y + up, c.from.z);
             spots.push(describeClip(g, c, checkHeight));
@@ -1373,6 +1386,7 @@ export function setupWallPushClipUI(scene) {
                 if (list.length === 0) continue;
                 const name = MODEL_NAMES[kind] + (several ? ` - ${f.form}` : "");
                 const g = buildMarkerGroup(f.model, list, colors[kind], f.model.checkHeight);
+                g.userData.clipGroups = list;
                 scene.add(g);
                 loadedModels.push({ name, mesh: g, edges: null });
                 markerNames.push(name);
@@ -1388,7 +1402,19 @@ export function setupWallPushClipUI(scene) {
         window.wallPushClips = shown;
     };
     reachableChk.addEventListener("change", render);
-    maxSpeedInput.addEventListener("change", render);
+    // Set by hand, the speed stays through map loads and page reloads
+    // (remembered in this browser; imports set the form's run speed only
+    // until then).
+    let maxSpeedChosen = false;
+    try {
+        const v = localStorage.getItem("wallClipMaxSpeed");
+        if (v !== null && v !== "" && Number.isFinite(Number(v))) { maxSpeedInput.value = v; maxSpeedChosen = true; }
+    } catch (e) { }
+    maxSpeedInput.addEventListener("change", () => {
+        maxSpeedChosen = true;
+        try { localStorage.setItem("wallClipMaxSpeed", maxSpeedInput.value); } catch (e) { }
+        render();
+    });
     // (remembered in this browser)
     const onTopChk = document.getElementById("wallClipOnTop");
     try { const v = localStorage.getItem("wallClipOnTop"); if (v !== null) onTopChk.checked = v === "1"; } catch (e) { }
@@ -1404,8 +1430,15 @@ export function setupWallPushClipUI(scene) {
             status.textContent = "Import results first";
             return;
         }
+        // The shown points of the clip kinds whose rows are ticked
+        const ticked = loadedModels.filter(m => markerNames.includes(m.name) && m.mesh.visible)
+            .flatMap(m => m.mesh.userData.clipGroups ?? []);
+        if (ticked.length === 0) {
+            status.textContent = "No clip points shown to export";
+            return;
+        }
         const map = document.getElementById("mapDropdown").value;
-        const text = exportJson(window.wallPushClips, {
+        const text = exportJson(ticked, {
             game, map, falling: last.falling, extendedOnly: last.extendedOnly,
             numPolygons: last.numPolygons, dyna: last.dyna,
         });
@@ -1488,9 +1521,10 @@ export function setupWallPushClipUI(scene) {
             }
             return formOf.get(f.form);
         }));
-        // Max speed: the first form's run speed ("Human/Deku": Human's)
+        // Max speed: the first form's run speed ("Human/Deku": Human's), unless
+        // one was set by hand
         const runSpeed = FORM_RUN_SPEED[String(forms[0].form).split("/")[0]];
-        if (runSpeed !== undefined) maxSpeedInput.value = runSpeed;
+        if (runSpeed !== undefined && !maxSpeedChosen) maxSpeedInput.value = runSpeed;
         const vec = a => ({ x: a[0], y: a[1], z: a[2] });
         const clips = [];
         const seen = new Set();

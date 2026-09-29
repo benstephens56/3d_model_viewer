@@ -3,6 +3,13 @@
 const double GROUND_VYS[] = { -20 };
 const int GROUND_NVY = sizeof(GROUND_VYS) / sizeof(GROUND_VYS[0]);
 
+// How far apart the points along a wall's bottom edge are searched, by how
+// long the stretch is with the same floors in front: 1 unit up to 60, 2 up to
+// 120, then 3 (at most --ground-step). A pair's floor is the one Link starts
+// on, so short stretches of it along a wall are what a wide step misses.
+// Every unit everywhere takes ~2.5x as long for 3% more (floor, wall) pairs (OoT
+// Hyrule Field, child: 394 pairs, 55000 points in ~55 s; this: 384, 20000 in ~20 s).
+static int groundStep(int len, int most) { return std::min(most, len <= 60 ? 1 : len <= 120 ? 2 : 3); }
 // How far past the wall's bottom edge the frame's move ends (posNext)
 static const double PAST[] = { 1, 2.5, 4, 6, 9, 13, 18, 24 };
 // How far in front of the wall the start is looked for
@@ -106,7 +113,10 @@ void groundClipsForWall(const Model& m, Scratch& s, const Poly& W,
 	// the deepest the frame's wall check can run below the start's floor
 	const double lowest = F(GROUND_VYS[0] * SPEED_RATE) + ch;
 	const double u0 = std::min({ vu[0], vu[1], vu[2] }), u1 = std::max({ vu[0], vu[1], vu[2] });
-	std::set<std::array<double, 4>> tried;
+	// Every unit along the bottom edge: where it is and the floors in front
+	// (cheap), then the stretches with the same floors, searched at their step.
+	struct Spot { std::pair<double, double> base; double bottom; vector<double> front; vector<int> floors; };
+	vector<Spot> spots;
 	for (double u = u0 + 0.5; u < u1; u += 1) {
 		double bottom = INFINITY, top = -INFINITY;
 		for (int i = 0; i < 3; i++) {
@@ -117,45 +127,69 @@ void groundClipsForWall(const Model& m, Scratch& s, const Poly& W,
 			bottom = std::min(bottom, y);
 			top = std::max(top, y);
 		}
-		if (!(bottom <= top)) continue;
-		const auto base = onPlane(u, bottom);
-		// A floor in front, at the wall's bottom: the wall rises out of the
-		// ground there (the line test, under the ground, passes under it)
-		vector<double> front;
-		for (double y : m.floorsAt(base.first + 1 * nx, base.second + 1 * nz))
-			if (std::fabs(y - bottom) <= 3 && y + lowest < bottom) front.push_back(y);
-		if (front.empty()) continue;
-		bool found = false;
-		for (double y0 : front) {
-			for (double e : PAST) {
-				const double qx = base.first - e * nx, qz = base.second - e * nz;
-				for (double deg : FAN) {
-					const double a = deg * PI / 180;
-					const double dx = -nx * std::cos(a) + tx * std::sin(a), dz = -nz * std::cos(a) + tz * std::sin(a);
-					for (double d : FRONT) {
-						// starts from pressed against the wall to d further back
-						const double back = e + m.radius + d;
-						auto startO = standSpotCached(m, s, F(qx - back * dx), F(qz - back * dz), y0);
-						if (!startO) continue;
-						V3 start = *startO;
-						if (planeDist(W, start.x, F(start.y + ch), start.z) <= 0) continue;
-						const double vx = qx - start.x, vz = qz - start.z, len = std::hypot(vx, vz);
-						if (len < 0.5 || len > REACH_DIST) continue;
-						if (!tried.insert({ start.x, start.z, F(qx), F(qz) }).second) continue;
-						if (!m.isInBounds(s, start, true)) continue;
-						for (int k = 0; k < GROUND_NVY && !found; k++) {
-							auto c = groundFrame(m, s, start, yawOf(vx, vz), F(len / SPEED_RATE), GROUND_VYS[k], W.id);
-							if (!c || pairDone(c->pusher, c->crossed)) continue;
-							yield(*c);
-							found = true;
-						}
-						if (found) break;
-					}
-					if (found) break;
-				}
-				if (found) break;
+		Spot sp{ {}, bottom, {}, {} };
+		if (bottom <= top) {
+			sp.base = onPlane(u, bottom);
+			// A floor in front, at the wall's bottom: the wall rises out of the
+			// ground there (the line test, under the ground, passes under it)
+			const double fx = sp.base.first + 1 * nx, fz = sp.base.second + 1 * nz;
+			for (double y : m.floorsAt(fx, fz)) {
+				if (!(std::fabs(y - bottom) <= 3 && y + lowest < bottom)) continue;
+				sp.front.push_back(y);
+				int poly = -1;
+				m.floorCheck(fx, fz, F(y + 1), &poly);
+				sp.floors.push_back(poly);
 			}
-			if (found) break;
+			std::sort(sp.floors.begin(), sp.floors.end());
+		}
+		spots.push_back(std::move(sp));
+	}
+	std::set<std::array<double, 4>> tried;
+	for (size_t r0 = 0; r0 < spots.size();) {
+		size_t r1 = r0 + 1;
+		while (r1 < spots.size() && spots[r1].floors == spots[r0].floors) r1++;
+		const int step = groundStep((int)(r1 - r0), m.groundStepMax);
+		// (centred in the stretch)
+		const size_t first = r0 + ((r1 - r0 - 1) % step) / 2;
+		const size_t runEnd = r1;
+		r0 = r1;
+		if (spots[first].front.empty()) continue;
+		for (size_t si = first; si < runEnd; si += step) {
+			const Spot& sp = spots[si];
+			const auto& base = sp.base;
+			const vector<double>& front = sp.front;
+			// every start floor that clips here, once each (not just the first
+			// clip: the pair is the floor Link starts on, which can be a small one
+			// further back that only clips at a few points along the wall)
+			std::set<int> got;
+			for (double y0 : front) {
+				for (double e : PAST) {
+					const double qx = base.first - e * nx, qz = base.second - e * nz;
+					for (double deg : FAN) {
+						const double a = deg * PI / 180;
+						const double dx = -nx * std::cos(a) + tx * std::sin(a), dz = -nz * std::cos(a) + tz * std::sin(a);
+						for (double d : FRONT) {
+							// starts from pressed against the wall to d further back
+							const double back = e + m.radius + d;
+							auto startO = standSpotCached(m, s, F(qx - back * dx), F(qz - back * dz), y0);
+							if (!startO) continue;
+							V3 start = *startO;
+							if (planeDist(W, start.x, F(start.y + ch), start.z) <= 0) continue;
+							const double vx = qx - start.x, vz = qz - start.z, len = std::hypot(vx, vz);
+							if (len < 0.5 || len > REACH_DIST) continue;
+							if (!tried.insert({ start.x, start.z, F(qx), F(qz) }).second) continue;
+							if (!m.isInBounds(s, start, true)) continue;
+							for (int k = 0; k < GROUND_NVY; k++) {
+								auto c = groundFrame(m, s, start, yawOf(vx, vz), F(len / SPEED_RATE), GROUND_VYS[k], W.id);
+								if (!c || got.count(c->pusher) || pairDone(c->pusher, c->crossed)) continue;
+								yield(*c);
+								got.insert(c->pusher);
+								break;
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 }

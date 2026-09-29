@@ -97,6 +97,8 @@ the radius, so scan each form you care about.
 | `--slope-only` | Only the slope clips: the wall push and ground clip scans are skipped. `--out-dir` names the file `..._slope.json`. |
 | `--no-ground` | Leave out the ground clips (see **Ground clips** below). |
 | `--ground-only` | Only the ground clips: the wall push and slope clip scans are skipped. `--out-dir` names the file `..._ground.json`, so it doesn't overwrite the full scan's. |
+| `--slope-step 1\|2\|3` | The slope clip scan's widest step along a wall's bottom edge (default 3; see **Slope clips** below). `1` searches every unit. |
+| `--ground-step 1\|2\|3` | The ground clip scan's widest step along a wall's bottom edge (default 3; see **Ground clips** below). `1` searches every unit: the most (floor, wall) pairs, about 2.5x as long. |
 | `--keep-load-void` | Keep the clips whose start is on a loading zone (a floor with an exit, `SurfaceType_GetExitIndex`) or a void plane (floor property 5 / 12, MM 13 too). Left out by default: standing there takes Link out of the scene before any clip matters. Only the floor under the start counts; dynapolys never do (the export has no surface types). E.g. OoT Death Mountain Trail, adult: 374 of 1818 points, nearly all of TRI 348 → 346 / 345, start on the summit's exit to the crater (TRI 453, exit 5). `--sim` prints the start's floor, and `--tri` a poly's exit and floor property. |
 | `--slope-starts` | Also search the crossing points whose surroundings are only in bounds when the rays that go into a slope first are ignored (see **In bounds** below). Finds some more crossing clips starting on slopes, but about 3x slower on a mountain: OoT Death Mountain Trail setup 2, adult, falling: 21333 points (4 more wall pairs) in 110 s instead of 21039 in 38 s. |
 | `--dyna-only` | With `--dyna`: only scan the wall pairs that have a dynapoly wall in them (pusher or clipped wall), and skip maps without dynapolys. Much faster; the static-only pairs are what a scan without `--dyna` finds, give or take the dynapolys' effect on them. |
@@ -338,7 +340,10 @@ Field: TRI 762 behind TRI 758).
 A clip's `pusher` is the floor that lifts Link and `crossed` the wall. The
 frame's own pushes and line test mustn't put him behind any wall (then it's
 an ordinary wall push clip). The scan goes along every wall's bottom edge,
-every unit. At each point it needs a floor that would put Link's check
+split into stretches with the same floors behind the wall: every unit along
+a stretch up to 60 long, every 2 up to 120, every 3 past that (at most
+`--slope-step`; OoT Hyrule Field, child: 12 pairs in 6 s, `--slope-step 1`
+16 s; Death Mountain Trail, adult: 5 of 6 pairs in 1.7 s, 3.7 s). At each point it needs a floor that would put Link's check
 height on the wall, behind its plane, and a lower floor in front. It aims
 moves from standing starts in front to land from 24 in front of the bottom
 edge to 24 past it.
@@ -387,8 +392,13 @@ floor behind TRI 507:
 tools/clipfinder/clipfinder.exe --game OOT --map "Spot 01 - Kakariko Village" --form Child --sim "435.5778,35.55124,626,0,18,v-20"
 ```
 
-The scan goes along every wall's bottom edge, every unit, where a floor
-meets it. It tries starts on that floor (resting spots) moving at the wall
+The scan goes along every wall's bottom edge where a floor meets it, split
+into stretches with the same floors in front: every unit along a stretch up
+to 60 long, every 2 up to 120, every 3 past that (at most `--ground-step`).
+At each point it keeps one clip per floor Link starts on (a pair's floor,
+which can be a small one further back). OoT Hyrule Field, child: 384
+(floor, wall) pairs in about 20 s; `--ground-step 1`, 394 in about 55 s.
+It tries starts on that floor (resting spots) moving at the wall
 from pressed against it to 24 further back, aimed to end 1 to 24 past it,
 at y velocity -20 (the fastest, `minVelocityY`: it goes deepest, soonest).
 A clip's `pusher` is the floor Link starts on, `crossed` the wall he goes

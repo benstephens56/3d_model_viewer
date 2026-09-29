@@ -87,6 +87,7 @@ static string safeName(const string& s) {
 
 int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root, after, dynaPath;
+	int groundStepMax = 3, slopeStepMax = 3;
 	bool dynaOnly = false, noSlope = false, slopeOnly = false, noGround = false, groundOnly = false, slopeStarts = false, keepLoadVoid = false;
 	int onlySetup = -1;  // --setup N: just the dynapolys of that setup
 	int maxPerPair = 0;  // --max-per-pair N: at most N points a wall pair, spread out (thinClips)
@@ -178,6 +179,14 @@ int main(int argc, char** argv) {
 		else if (a == "--slope-starts") slopeStarts = true;
 		else if (a == "--no-ground") noGround = true;
 		else if (a == "--ground-only") groundOnly = true;
+		else if (a == "--slope-step") {
+			slopeStepMax = std::stoi(val());
+			if (slopeStepMax < 1 || slopeStepMax > 3) { fprintf(stderr, "--slope-step wants 1, 2 or 3\n"); return 2; }
+		}
+		else if (a == "--ground-step") {
+			groundStepMax = std::stoi(val());
+			if (groundStepMax < 1 || groundStepMax > 3) { fprintf(stderr, "--ground-step wants 1, 2 or 3\n"); return 2; }
+		}
 		else if (a == "--keep-load-void") keepLoadVoid = true;
 		else if (a == "--setup") {
 			// one setup (std::stoi took "0,1,2,3" as 0 without a word)
@@ -237,8 +246,8 @@ int main(int argc, char** argv) {
 			"                  [--tri ID[,ID...]]  (print those polys: vertices, normal, type)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
 			"                  [--dyna FILE [--dyna-only] [--setup N]]  (the viewer's dynapoly export, one map's or every map's: the actors' collision too)\n"
-			"                  [--no-slope | --slope-only] [--slope-starts] [--keep-load-void]  (slope clips: the floor check lifting Link behind a wall)\n"
-			"                  [--no-ground | --ground-only]  (ground clips: falling at velocity.y -20 from the floor, through it and under a wall)\n"
+			"                  [--no-slope | --slope-only] [--slope-step 1|2|3] [--slope-starts] [--keep-load-void]  (slope clips: the floor check lifting Link behind a wall)\n"
+			"                  [--no-ground | --ground-only] [--ground-step 1|2|3]  (ground clips: falling at velocity.y -20 from the floor, through it and under a wall)\n"
 			"                  [--max-per-pair N]  (at most N points per wall pair, spread out evenly: smaller files)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
@@ -493,6 +502,8 @@ int main(int argc, char** argv) {
 				m.slopeStarts = slopeStarts;
 				m.ground = !noGround;
 				m.groundOnly = groundOnly;
+				m.groundStepMax = groundStepMax;
+				m.slopeStepMax = slopeStepMax;
 				m.keepLoadVoid = keepLoadVoid;
 				// --pair: the scan only looks near those two polys
 				if (onlyPusher >= 0) {

@@ -242,6 +242,10 @@ struct Model {
 	// --slope-starts: crossing points whose surroundings are only in bounds
 	// not counting the rays into a slope are searched too (slower)
 	bool slopeStarts = false;
+	// --ground-step: the ground clip scan's widest step along a wall (1: every unit)
+	int groundStepMax = 3;
+	// --slope-step: the same for the slope clip scan
+	int slopeStepMax = 3;
 	// --keep-load-void: keep clips that start on a loading zone or void plane
 	bool keepLoadVoid = false;
 	// Whether the floor Link stands on at `start` is a loading zone or void plane.

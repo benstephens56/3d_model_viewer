@@ -1,7 +1,10 @@
 #include "slope.h"
 
-// How far apart the points along a wall's bottom edge are
-static const double SLOPE_STEP = 1;
+// How far apart the points along a wall's bottom edge are searched, as for
+// ground clips (ground.cpp): by how long the stretch is with the same floors
+// behind the wall (a slope clip's pair is the floor Link is lifted onto and
+// the wall): 1 unit up to 60, 2 up to 120, then 3 (at most --slope-step).
+static int slopeStep(int len, int most) { return std::min(most, len <= 60 ? 1 : len <= 120 ? 2 : 3); }
 // How far behind the wall's bottom edge the frame's move ends (posNext): a
 // slope only lifts Link past its edge by its 1 unit tolerance, a floor
 // behind the wall can be anywhere. In front of it too (negative): a wall
@@ -100,8 +103,13 @@ void slopeClipsForWall(const Model& m, Scratch& s, const Poly& W,
 		return std::pair<double, double>(c * W.nx + u * tx, c * W.nz + u * tz);
 	};
 	const double u0 = std::min({ vu[0], vu[1], vu[2] }), u1 = std::max({ vu[0], vu[1], vu[2] });
-	std::set<std::array<double, 4>> tried;
-	for (double u = u0 + SLOPE_STEP / 2; u < u1; u += SLOPE_STEP) {
+	// Every unit along the bottom edge: the floors behind and in front
+	// (cheap), then the stretches with the same floors behind, searched at
+	// their step.
+	struct Spot { std::pair<double, double> base; vector<std::pair<double, vector<double>>> behind; vector<double> front; vector<int> floors; };
+	vector<Spot> spots;
+	for (double u = u0 + 0.5; u < u1; u += 1) {
+		Spot& sp = spots.emplace_back();
 		// the wall's bottom and top at u
 		double bottom = INFINITY, top = -INFINITY;
 		for (int i = 0; i < 3; i++) {
@@ -114,8 +122,8 @@ void slopeClipsForWall(const Model& m, Scratch& s, const Poly& W,
 		}
 		if (!(bottom <= top)) continue;
 		const auto base = onPlane(u, bottom);
+		sp.base = base;
 		// Floors that put his check height on the wall, behind its plane
-		vector<std::pair<double, vector<double>>> behind;
 		double hiY = -INFINITY;
 		for (double e : BEHIND) {
 			vector<double> ys;
@@ -125,50 +133,66 @@ void slopeClipsForWall(const Model& m, Scratch& s, const Poly& W,
 				if (h < bottom - 1 || h > top + 1 || planeDist(W, qx, h, qz) >= 0) continue;
 				ys.push_back(y);
 				hiY = std::max(hiY, y);
+				int poly = -1;
+				m.floorCheck(qx, qz, F(y + 1), &poly);
+				if (std::find(sp.floors.begin(), sp.floors.end(), poly) == sp.floors.end()) sp.floors.push_back(poly);
 			}
-			if (!ys.empty()) behind.push_back({ e, ys });
+			if (!ys.empty()) sp.behind.push_back({ e, ys });
 		}
-		if (behind.empty()) continue;
+		std::sort(sp.floors.begin(), sp.floors.end());
+		if (sp.behind.empty()) continue;
 		// Floors in front whose check height is under its bottom (a unit of
 		// slack: the extended planes) and below one behind
-		vector<double> front;
 		for (double d : { 1.0, 3.0, 6.0, 10.0, 15.0, 21.0, 28.0, 36.0, 45.0 }) {
 			if (d > REACH_DIST) break;
 			for (double y : m.floorsAt(base.first + d * nx, base.second + d * nz)) {
 				if (!(y + ch - GROUND_DROP < bottom + 2) || !(y < hiY) || hiY - y > 50) continue;
-				if (std::none_of(front.begin(), front.end(), [&](double v) { return std::fabs(v - y) < 0.5; })) front.push_back(y);
+				if (std::none_of(sp.front.begin(), sp.front.end(), [&](double v) { return std::fabs(v - y) < 0.5; })) sp.front.push_back(y);
 			}
 		}
-		if (front.empty()) continue;
-		bool found = false;
-		for (double y0 : front) {
-			for (const auto& [e, ys] : behind) {
-				if (std::none_of(ys.begin(), ys.end(), [&](double y) { return y > y0 && y - y0 <= 50; })) continue;
-				const double qx = base.first - e * nx, qz = base.second - e * nz;
-				for (double deg : FAN) {
-					const double a = deg * PI / 180;
-					// into the wall, turned by a
-					const double dx = -nx * std::cos(a) + tx * std::sin(a), dz = -nz * std::cos(a) + tz * std::sin(a);
-					for (double dist : MOVE_STEPS) {
-						auto startO = standSpotCached(m, s, F(qx - dist * dx), F(qz - dist * dz), y0);
-						if (!startO) continue;
-						const V3 start = *startO;
-						if (planeDist(W, start.x, F(start.y + ch - GROUND_DROP), start.z) <= 0) continue;
-						double vx = qx - start.x, vz = qz - start.z, len = std::hypot(vx, vz);
-						if (len < 0.5 || len > REACH_DIST) continue;
-						if (!tried.insert({ start.x, start.z, F(qx), F(qz) }).second) continue;
-						if (!m.isInBounds(s, start, true)) continue;
-						auto c = slopeFrame(m, s, start, yawOf(vx, vz), F(len / SPEED_RATE), W.id);
-						if (!c || pairDone(c->pusher, c->crossed)) continue;
-						yield(*c);
-						found = true;
-						break;
+	}
+	std::set<std::array<double, 4>> tried;
+	for (size_t r0 = 0; r0 < spots.size();) {
+		size_t r1 = r0 + 1;
+		while (r1 < spots.size() && spots[r1].floors == spots[r0].floors) r1++;
+		const int step = slopeStep((int)(r1 - r0), m.slopeStepMax);
+		// (centred in the stretch)
+		const size_t first = r0 + ((r1 - r0 - 1) % step) / 2, runEnd = r1;
+		r0 = r1;
+		for (size_t si = first; si < runEnd; si += step) {
+			const Spot& sp = spots[si];
+			if (sp.behind.empty() || sp.front.empty()) continue;
+			const auto& base = sp.base;
+			bool found = false;
+			for (double y0 : sp.front) {
+				for (const auto& [e, ys] : sp.behind) {
+					if (std::none_of(ys.begin(), ys.end(), [&](double y) { return y > y0 && y - y0 <= 50; })) continue;
+					const double qx = base.first - e * nx, qz = base.second - e * nz;
+					for (double deg : FAN) {
+						const double a = deg * PI / 180;
+						// into the wall, turned by a
+						const double dx = -nx * std::cos(a) + tx * std::sin(a), dz = -nz * std::cos(a) + tz * std::sin(a);
+						for (double dist : MOVE_STEPS) {
+							auto startO = standSpotCached(m, s, F(qx - dist * dx), F(qz - dist * dz), y0);
+							if (!startO) continue;
+							const V3 start = *startO;
+							if (planeDist(W, start.x, F(start.y + ch - GROUND_DROP), start.z) <= 0) continue;
+							double vx = qx - start.x, vz = qz - start.z, len = std::hypot(vx, vz);
+							if (len < 0.5 || len > REACH_DIST) continue;
+							if (!tried.insert({ start.x, start.z, F(qx), F(qz) }).second) continue;
+							if (!m.isInBounds(s, start, true)) continue;
+							auto c = slopeFrame(m, s, start, yawOf(vx, vz), F(len / SPEED_RATE), W.id);
+							if (!c || pairDone(c->pusher, c->crossed)) continue;
+							yield(*c);
+							found = true;
+							break;
+						}
+						if (found) break;
 					}
 					if (found) break;
 				}
 				if (found) break;
 			}
-			if (found) break;
 		}
 	}
 }
