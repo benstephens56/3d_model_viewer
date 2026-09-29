@@ -1326,6 +1326,8 @@ export function setupWallPushClipUI(scene) {
     const reachableChk = document.getElementById("wallClipReachable");
     const maxSpeedInput = document.getElementById("wallClipMaxSpeed");
     const maxMoveInput = document.getElementById("wallClipMaxMove");
+    const vyChk = document.getElementById("wallClipVyFilter");
+    const maxVyInput = document.getElementById("wallClipMaxVy");
     if (!container) return;
 
     // The imported results, drawn again when the reachable filter changes.
@@ -1338,6 +1340,7 @@ export function setupWallPushClipUI(scene) {
     document.getElementById("loadMap").addEventListener("click", () => {
         reachToken++; // abandon reachability for the previous map
         autoToken++;  // and its auto-import
+        importToken++; // and an import still going
         last = null;
         loaded = null;
         status.textContent = "";
@@ -1348,6 +1351,9 @@ export function setupWallPushClipUI(scene) {
     // Reachability (when the file doesn't have it) is worked out the first
     // time the filter is switched on.
     let reachToken = 0;
+    // (an import yields to the page as it goes: a newer import or map load
+    // abandons it)
+    let importToken = 0;
     const computeReach = async () => {
         const token = ++reachToken;
         const clips = last.groups.flatMap(g => g.clips);
@@ -1365,6 +1371,17 @@ export function setupWallPushClipUI(scene) {
         return true;
     };
 
+    // The |velocity.y| a clip needs this frame (Actor_UpdatePos moves 1.5x
+    // it): ground clips their vy, falling ones their fall / 1.5 (from the
+    // reachable start when `useReach`, as reachability() falls to the clip
+    // point). Walking and slope clips don't depend on it: 0, never filtered.
+    const neededVy = (c, useReach) => {
+        if (c.kind === "ground") return Math.abs(c.vy ?? -20);
+        if (!(c.drop > 0)) return 0;
+        if (useReach && c.reach) return (c.reach.start.y - c.from.y) / SPEED_RATE;
+        return (c.next ? c.prev.y - c.next.y : c.drop) / SPEED_RATE;
+    };
+
     const render = async () => {
         if (!last) return;
         if (reachableChk.checked && !last.reachDone) {
@@ -1375,9 +1392,12 @@ export function setupWallPushClipUI(scene) {
         }
         removeMarkerModels(scene);
         const maxSpeed = Number(maxSpeedInput.value);
-        const shown = reachableChk.checked
-            ? last.groups.map(g => ({ ...g, clips: g.clips.filter(c => c.reach && c.reach.speed <= maxSpeed) }))
-                .filter(g => g.clips.length > 0)
+        const byReach = reachableChk.checked, byVy = vyChk.checked;
+        const maxVy = Number(maxVyInput.value);
+        const keep = c => (!byReach || (c.reach && c.reach.speed <= maxSpeed)) &&
+            (!byVy || neededVy(c, byReach) <= maxVy + 1e-4);
+        const shown = byReach || byVy
+            ? last.groups.map(g => ({ ...g, clips: g.clips.filter(keep) })).filter(g => g.clips.length > 0)
             : last.groups;
         const byKind = {};
         for (const cat of Object.keys(MODEL_NAMES)) byKind[cat] = shown.filter(g => g.cat === cat);
@@ -1403,10 +1423,21 @@ export function setupWallPushClipUI(scene) {
         status.textContent = `${points("acute")} acute, ${points("extended")} extended-plane, ${low} low (falling` +
             (points("low") ? "" : `: ${points("low-acute")} acute, ${points("low-extended")} extended`) + `)` +
             (points("slope") ? `, ${points("slope")} slope` : "") + (points("ground") ? `, ${points("ground")} ground` : "") + ` ` +
-            `clip points${reachableChk.checked ? ` reachable at speed ${maxSpeed}` : ""} (${last.note})`;
+            `clip points${byReach ? ` reachable at speed ${maxSpeed}` : ""}${byVy ? ` at |y velocity| ${maxVy} or less` : ""} (${last.note})`;
         window.wallPushClips = shown;
     };
     reachableChk.addEventListener("change", render);
+    // (remembered in this browser)
+    try {
+        const v = JSON.parse(localStorage.getItem("wallClipVy") ?? "null");
+        if (v) { vyChk.checked = !!v.on; if (Number.isFinite(Number(v.max))) maxVyInput.value = v.max; }
+    } catch (e) { }
+    const onVyChange = () => {
+        try { localStorage.setItem("wallClipVy", JSON.stringify({ on: vyChk.checked, max: maxVyInput.value })); } catch (e) { }
+        render();
+    };
+    vyChk.addEventListener("change", onVyChange);
+    maxVyInput.addEventListener("change", onVyChange);
     // Set by hand, the speed stays through map loads and page reloads
     // (remembered in this browser; imports set the form's run speed only
     // until then).
@@ -1499,10 +1530,21 @@ export function setupWallPushClipUI(scene) {
     // merged: forms by name, each point once. The dynapolys (and so the poly
     // ids past numPolygons) are the first dynapoly scan's; a static scan's
     // points only use the scene's own ids.
-    const importResults = (files, how) => {
+    const importResults = async (files, how) => {
+        const token = ++importToken;
         const main = loadedModels.find(m => m.name === "Main Model");
         const colCtx = currentColCtx;
         reachToken++;
+        // Progress in the status line, yielding to the page every 30 ms (so
+        // it shows); false when abandoned
+        let lastYield = performance.now();
+        const progress = async (text, force = false) => {
+            if (!force && performance.now() - lastYield <= 30) return true;
+            status.textContent = text;
+            await nextTask();
+            lastYield = performance.now();
+            return token === importToken;
+        };
         removeMarkerModels(scene);
         last = null;
         const dynaFile = files.find(f => f.data.dyna);
@@ -1518,14 +1560,20 @@ export function setupWallPushClipUI(scene) {
         // and each clip marked with its form, each form getting its own model.
         const forms = [];
         const formOf = new Map();
-        const fileForms = files.map(({ data }) => (data.forms ?? [{ form: data.form, radius: data.radius, checkHeight: data.checkHeight }]).map(f => {
-            if (!formOf.has(f.form)) {
-                const e = { form: f.form, model: new CollisionModel(colCtx, main.mesh.userData.triangles, f.radius, f.checkHeight, dyna) };
-                forms.push(e);
-                formOf.set(f.form, e);
+        const fileForms = [];
+        for (const { data } of files) {
+            const list = [];
+            for (const f of data.forms ?? [{ form: data.form, radius: data.radius, checkHeight: data.checkHeight }]) {
+                if (!formOf.has(f.form)) {
+                    if (!await progress(`Importing clips: collision for ${f.form}…`, true)) return;
+                    const e = { form: f.form, model: new CollisionModel(colCtx, main.mesh.userData.triangles, f.radius, f.checkHeight, dyna) };
+                    forms.push(e);
+                    formOf.set(f.form, e);
+                }
+                list.push(formOf.get(f.form));
             }
-            return formOf.get(f.form);
-        }));
+            fileForms.push(list);
+        }
         // Max speed: the first form's run speed ("Human/Deku": Human's), unless
         // one was set by hand
         const runSpeed = FORM_RUN_SPEED[String(forms[0].form).split("/")[0]];
@@ -1533,8 +1581,12 @@ export function setupWallPushClipUI(scene) {
         const vec = a => ({ x: a[0], y: a[1], z: a[2] });
         const clips = [];
         const seen = new Set();
-        files.forEach(({ data }, fi) => {
+        const total = files.reduce((n, f) => n + f.data.clips.length, 0);
+        let done = 0;
+        for (let fi = 0; fi < files.length; fi++) {
+            const { data } = files[fi];
             for (const c of data.clips) {
+                if (!await progress(`Importing clips ${Math.floor(done++ / total * 100)}%`)) return;
                 const f = c.form !== undefined ? formOf.get(c.form) : fileForms[fi][0];
                 if (!f) continue;
                 const pusher = f.model.polys.get(c.pusher), crossed = f.model.polys.get(c.crossed);
@@ -1561,7 +1613,7 @@ export function setupWallPushClipUI(scene) {
                 if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
                 clips.push(clip);
             }
-        });
+        }
         // One category per wall pair: files from before that could give a
         // pair's points different ones (and "low" for all falling points), so a
         // pair with any acute point is acute; their falling points too, and
@@ -1587,7 +1639,8 @@ export function setupWallPushClipUI(scene) {
             dyna,
         };
         if (clips.every(c => c.reach !== undefined)) last.reachDone = true;
-        render();
+        if (!await progress(`Importing clips: drawing ${clips.length} points…`, true)) return;
+        await render();
         logGroups(groups);
     };
 
@@ -1674,7 +1727,8 @@ export function setupWallPushClipUI(scene) {
         status.textContent = list.length ? `Auto-import: reading ${list.length} files…` : "";
         const files = [];
         const otherSetups = [];
-        for (const { name, url } of list) {
+        for (const [i, { name, url }] of list.entries()) {
+            status.textContent = `Auto-import: reading file ${i + 1} of ${list.length}…`;
             let data;
             try {
                 data = await (await fetch(url, { cache: "no-store" })).json();
