@@ -41,10 +41,16 @@
 -- wall_clip_tests.json next to this script. Its clips are turned into tests,
 -- with the walls read from RAM (load that map first). (A .lua test file from
 -- an older viewer still works too.)
-local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\OOT_Spot_01_-_Kakariko_Village_Adult_Child_falling_setup2_dyna.json]]
+local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\OOT_Grottos_Adult_Child.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
-local MAX_PER_GROUP = 5          -- points tried per wall pair (spread evenly); 0 = all
+local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
 local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --falling scans)
+-- Only test one area of the map: the clip points (the viewer's dots) outside
+-- these ranges are ignored. Each is { min, max } (ends included), or nil for
+-- no limit on that axis. E.g. X_RANGE = { 300, 500 }, Z_RANGE = { 550, 700 }.
+local X_RANGE = nil -- { -250, 270 }
+local Y_RANGE = nil
+local Z_RANGE = nil -- { -350, 520 }
 -- "needed": a wall pair's falling clips ("low-acute" / "low-extended") only if
 -- the pair has no walking clips of that kind, or the falling ones need a lower
 -- speed (the slowest move in the file: --min-speed's reach, or the clip's own).
@@ -61,7 +67,7 @@ local FAST = true                 -- skip drawing while testing (client.invisibl
 -- facing the way he'll go, and Z is tapped - Z-targeting nothing swings the
 -- camera behind him), and pauses RECORD_BUFFER emulated frames (60 a second)
 -- before and after each one. Off by default.
-local RECORD = true
+local RECORD = false
 local RECORD_BUFFER = 90
 local RECORD_ONE_PER_PAIR = true  -- recording: once a wall pair's test works, skip the rest of that pair's
 if RECORD then FAST = false end
@@ -414,7 +420,7 @@ local function testsFromJson(path)
 			seen[k] = true
 			T.tests[#T.tests + 1] = {
 				group = groupOf[gk], form = form, kind = kind, type = c.cross and "cross" or "stand",
-				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt,
+				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt, from = vec(c.from),
 				yaw = c.speed and c.yaw or nil, speed = c.speed, speed2 = c.speed2, vy = c.vy, expect = vec(c["end"]),
 				reachSpeed = type(c.reach) == "table" and c.reach.speed or nil,
 			}
@@ -681,13 +687,37 @@ if T.forms then
 	print(string.format("Form: %s (%d of %d tests; the file has %s)", runForm, #tests, #T.tests, table.concat(names, ", ")))
 end
 
+-- X_RANGE / Y_RANGE / Z_RANGE: only the clip points in that area
+if X_RANGE or Y_RANGE or Z_RANGE then
+	local ranges = { X_RANGE, Y_RANGE, Z_RANGE }
+	local function inArea(p)
+		for i = 1, 3 do
+			local r = ranges[i]
+			if r and (p[i] < math.min(r[1], r[2]) or p[i] > math.max(r[1], r[2])) then return false end
+		end
+		return true
+	end
+	local kept = {}
+	for _, t in ipairs(tests) do
+		-- (a .lua tests file from an older viewer has no clip point: the move's end)
+		if inArea(t.from or t.next) then kept[#kept + 1] = t end
+	end
+	local function show(name, r) return r and string.format(" %s %g..%g", name, math.min(r[1], r[2]), math.max(r[1], r[2])) or "" end
+	print(string.format("area:%s%s%s - %d of %d tests", show("x", X_RANGE), show("y", Y_RANGE), show("z", Z_RANGE), #kept, #tests))
+	tests = kept
+	if #tests == 0 then error("no clip points in the X_RANGE / Y_RANGE / Z_RANGE area") end
+end
+
 -- Falling crossings whose drop makes checkHeight + dy < 5 can't work: the
 -- game's wall line test then runs from Link's feet with floors included and
--- stops him on the floor he starts from (older exports still have them).
+-- stops him on the floor he starts from (tested in game: OoT Kakariko child,
+-- 20 of 20 didn't clip). Scans from before clipfinder checked this from the
+-- start still have them. Not ground clips (kind "ground"): that line test
+-- missing the floor is how they work.
 do
 	local kept = {}
 	for _, t in ipairs(tests) do
-		if not (t.type == "cross" and checkHeight + (t.next[2] - t.prev[2]) < 5) then kept[#kept + 1] = t end
+		if t.kind == "ground" or not (t.type == "cross" and checkHeight + (t.next[2] - t.prev[2]) < 5) then kept[#kept + 1] = t end
 	end
 	if #kept < #tests then
 		print(string.format("left out %d falling crossing tests with a drop over %g (can't clip)", #tests - #kept, checkHeight - 5))
@@ -1059,6 +1089,12 @@ for i, t in ipairs(queue) do
 				t.csv.header[t.xi], t.csv.rows[t.zi].label, t.speed, t.expectClip and "Yes" or "No", status))
 		else
 			print(string.format("  %d / %d: %s %s TRI %d -> %d: %s", i, #queue, t.kind, t.type, t.pusher, t.crossed, r.status))
+			-- the test's move: where Link starts, angle, speedXZ and the frame's y
+			-- velocity (after gravity: ground clips' vy, else from the drop)
+			local yaw, speed = r.yaw or t.yaw, r.speed or t.speed
+			local vy = t.vy or (t.next[2] - t.prev[2]) / 1.5
+			print(string.format("      start %s  angle %s  linear %s  y vel %.9g", fmt(t.prev),
+				yaw and string.format("0x%04X", yaw % 0x10000) or "-", speed and string.format("%.9g", speed) or "-", vy))
 		end
 		if worked(r.status) then pairDone[pairKey] = true end
 	end

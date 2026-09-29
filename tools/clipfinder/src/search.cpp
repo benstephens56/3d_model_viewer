@@ -398,6 +398,11 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 			double speed = F((len + 1) / SPEED_RATE);
 			V3 next = moveStep(prev, yaw, speed);
 			if (cp.drop > 0) next.y = cp.p.y;
+			// The drop is from the floor at the clip point, but downhill the start
+			// is higher: from the start, checkHeight + dy < 5 makes the game's line
+			// test run at the feet, which stops him on his floor (tested in game:
+			// OoT Kakariko child TRI 142 -> 673, 141 -> 21 etc., 20 of 20 didn't clip).
+			if (cp.drop > 0 && F(m.checkHeight + F(next.y - prev.y)) < 5) continue;
 			auto f = lineFrame(m, s, prev, next, tol);
 			if (!f || f->hit.poly != A.id) continue;
 			const Move mv{ yaw, speed };

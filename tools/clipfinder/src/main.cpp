@@ -104,6 +104,8 @@ int main(int argc, char** argv) {
 	double sideStep = 0.002;  // --side-step (with --yaw)
 	bool exact = false;       // --exact (with --yaw)
 	double gridSpeed = 0;     // --speed (with --yaw): the CSV at exactly this speed
+	int clipKind = -1;        // --clip-kind: which of the pair's clips --refine / --yaw / --angles do (-1: auto, FrameSpec::type)
+	double fallDrop = 0;      // --drop: falling clips, posNext this far below the start (0: the pair's smallest that works)
 	int threads = (int)std::max(1u, std::thread::hardware_concurrency());
 	for (int i = 1; i < argc; i++) {
 		string a = argv[i];
@@ -153,6 +155,16 @@ int main(int argc, char** argv) {
 			if (!(sideStep > 0 && sideStep <= 3)) { fprintf(stderr, "--side-step wants a distance > 0 and <= 3\n"); return 2; }
 		}
 		else if (a == "--exact") exact = true;
+		else if (a == "--clip-kind") {
+			string v = val();
+			clipKind = -1;
+			for (int k = 0; k < 4; k++) if (v == FRAME_TYPE_NAMES[k]) clipKind = k;
+			if (clipKind < 0) { fprintf(stderr, "--clip-kind wants walking, falling, slope or ground\n"); return 2; }
+		}
+		else if (a == "--drop") {
+			fallDrop = std::stod(val());
+			if (!(fallDrop > 0)) { fprintf(stderr, "--drop wants a distance > 0\n"); return 2; }
+		}
 		else if (a == "--speed") {
 			gridSpeed = std::stod(val());
 			if (!(gridSpeed > 0)) { fprintf(stderr, "--speed wants a speed > 0\n"); return 2; }
@@ -220,6 +232,7 @@ int main(int argc, char** argv) {
 			"                  [--side-step D (with --yaw: starts every D across the yaw, default 0.002)]\n"
 			"                  [--exact (with --yaw: then every f32 x, z around each region found)]\n"
 			"                  [--speed S (with --yaw: the CSV grids at exactly speed S; stands in for --max-speed)]\n"
+			"                  [--clip-kind walking|falling|slope|ground] [--drop D]  (with --refine / --yaw / --angles: which of the pair's clips; falling: posNext D below the floor)\n"
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP | ,vVY]]  (one frame from a standing start, printed step by step; SPEED as 15/7: a frame per speed)\n"
 			"                  [--tri ID[,ID...]]  (print those polys: vertices, normal, type)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
@@ -506,7 +519,36 @@ int main(int argc, char** argv) {
 				// range goes every 0x10 (the sine table ignores the low 4 bits).
 				// --angles: the same for every yaw that clips, found by walking out
 				// from the yaws of the scan's clip points (see below).
-				if ((atYaw >= 0 || angleSweep) && !found.empty()) {
+				// --refine / --yaw / --angles / --from: the kind of clip (and frame) they
+				// work on, from the pair's clips (reach.h FrameSpec)
+				const bool perPair = refine || atYaw >= 0 || angleSweep;
+				bool specOk = true;  // (false: --refine / --yaw / --angles have nothing to do)
+				if (perPair && !found.empty()) {
+					const int why = chooseFrameSpec(found, clipKind, fallDrop, m.checkHeight);
+					if (why == 1) {
+						fprintf(stderr, "  --clip-kind %s: TRI %d -> %d has no clips of that kind\n", FRAME_TYPE_NAMES[clipKind], onlyPusher, onlyCrossed);
+						found.clear();
+					} else if (why == 2) {
+						// (the scan measures a falling clip's drop from the floor at the
+						// clip point: downhill, Link falls further than that)
+						specOk = false;
+						if (fallDrop > 0) fprintf(stderr, "  --drop %g: over checkHeight - 5 (%g), the game's line test runs at the feet: not a wall push\n", fallDrop, F(m.checkHeight - 5));
+						else fprintf(stderr, "  falling clips: every one of this pair's falls further than checkHeight - 5 (%g) from its start, where the game's line test "
+							"runs at the feet (not a wall push): nothing to refine. --drop D tries a smaller one.\n", F(m.checkHeight - 5));
+					} else {
+						const FrameSpec& sp = FRAME_SPEC;
+						fprintf(stderr, "  %s clips", FRAME_TYPE_NAMES[sp.type]);
+						if (sp.type == 1) fprintf(stderr, " (posNext %.9g below the start: y velocity %.9g)", sp.drop, F(-sp.drop / SPEED_RATE));
+						if (sp.type == 3) fprintf(stderr, " (y velocity %g)", sp.vy);
+						std::set<int> kinds;
+						for (const Clip& c : found) kinds.insert(c.kind >= 2 ? c.kind : c.drop > 0 ? 1 : 0);
+						if (kinds.size() > 1 && clipKind < 0) fprintf(stderr, " - the pair has other kinds too: --clip-kind picks one");
+						fprintf(stderr, "\n");
+					}
+				}
+				// the pair's category, for the clips written (its clips of that kind)
+				auto pairKind = [&]() { for (const Clip& c : found) if (inFrameSpec(c)) return c.kind; return found.front().kind; };
+				if ((atYaw >= 0 || angleSweep) && !found.empty() && specOk) {
 					// (only clips at those yaws are written: none found, no clips)
 					vector<Clip> atYaws;
 					vector<Refined> rs;
@@ -533,7 +575,7 @@ int main(int argc, char** argv) {
 							}
 							if (gridSpeed <= 0 || atSpeed[yaw]) {
 								if (auto c = refinedClip(m, rc, onlyPusher, onlyCrossed)) {
-									c->kind = found.front().kind; // the pair's category
+									c->kind = pairKind(); // the pair's category
 									atYaws.push_back(*c);
 								}
 							}
@@ -560,14 +602,15 @@ int main(int argc, char** argv) {
 						const int ANGLE_GAP = angleGap;
 						std::set<int> seedSet;
 						for (const Clip& c : found)
-							if (c.hasMove && c.drop == 0 && c.speed <= maxSpeed) seedSet.insert(c.yaw & 0xFFF0);
+							if (c.hasMove && inFrameSpec(c) && c.speed <= maxSpeed) seedSet.insert(c.yaw & 0xFFF0);
 						int best = -1;
-						if (std::any_of(found.begin(), found.end(), [](const Clip& c) { return c.drop == 0; })) {
+						if (std::any_of(found.begin(), found.end(), inFrameSpec)) {
 							findMinSpeeds(m, found, threads);
 							Refined rf = refineMinSpeed(m, found, onlyPusher, onlyCrossed, threads);
 							if (rf.found) {
 								best = rf.yaw & 0xFFF0;
 								fprintf(stderr, "  refined: min speed %.9g at yaw 0x%04X - starting there\n", rf.speed, rf.yaw & 0xFFFF);
+								if (FRAME_SPEC.type == 1) fprintf(stderr, "    (falling %.9g from the start: the yaws are tried at that)\n", FRAME_SPEC.drop);
 							}
 						}
 						vector<int> seeds(seedSet.begin(), seedSet.end());
@@ -687,14 +730,16 @@ int main(int argc, char** argv) {
 				}
 				else if (minSpeed && !found.empty()) {
 					findMinSpeeds(m, found, threads);
-					if (refine) {
+					if (refine && specOk) {
 						if (onlyPusher < 0) { fprintf(stderr, "--refine needs --pair PUSHER,CROSSED\n"); return 2; }
 						auto t0r = std::chrono::steady_clock::now();
 						Refined r = refineMinSpeed(m, found, onlyPusher, onlyCrossed, threads);
-						if (!r.found) fprintf(stderr, "  refine: no walking clip of this pair to start from\n");
-						else fprintf(stderr, "  REFINED TRI %d -> %d: min walking speed %.9g  start %.9g, %.9g, %.9g  yaw 0x%04X  -> end %.9g, %.9g, %.9g  (%d starts tried, %.1fs)\n",
+						if (!r.found) fprintf(stderr, "  refine: no %s clip of this pair to start from\n", FRAME_TYPE_NAMES[FRAME_SPEC.type]);
+						else fprintf(stderr, "  REFINED TRI %d -> %d: min speed %.9g  start %.9g, %.9g, %.9g  yaw 0x%04X  -> end %.9g, %.9g, %.9g  (%d starts tried, %.1fs)\n",
 							onlyPusher, onlyCrossed, r.speed, r.start.x, r.start.y, r.start.z, r.yaw & 0xFFFF, r.end.x, r.end.y, r.end.z,
 							r.starts, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0r).count());
+						if (r.found && FRAME_SPEC.type == 1)
+							fprintf(stderr, "    falling %.9g from the start: y velocity %.9g\n", FRAME_SPEC.drop, F(-FRAME_SPEC.drop / SPEED_RATE));
 						if (angles && (r.found || haveFrom)) {
 							auto ta = std::chrono::steady_clock::now();
 							Refined from = r;
@@ -715,7 +760,7 @@ int main(int argc, char** argv) {
 						}
 						if (r.found) {
 							if (auto c = refinedClip(m, r, onlyPusher, onlyCrossed)) {
-								c->kind = found.front().kind; // the pair's category
+								c->kind = pairKind(); // the pair's category
 								found = { *c };
 							}
 						}

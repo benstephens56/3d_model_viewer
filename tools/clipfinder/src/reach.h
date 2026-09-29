@@ -14,6 +14,30 @@ struct StartRegion { double x0, x1, z0, z1; int n; double speed; V3 start; vecto
 struct YawGrid { vector<double> xs, zs; int xDecimals = 0, zDecimals = 0; vector<char> ok; vector<double> speed; };
 struct Refined { bool found = false; double speed = 0; int yaw = 0; V3 start, end; int starts = 0; vector<StartRegion> regions; YawGrid grid; };
 
+// Which of a wall pair's clips --refine / --yaw / --angles / --from / --speed
+// work on (a pair can have several kinds: a sloped floor pusher's crossing
+// clips and a ground clip share (floor, wall)), and so which frame they run
+// from each start: 0 walking wall push, 1 falling wall push (posNext `drop`
+// below the START, i.e. y velocity -drop / 1.5 - not the scan's Clip::drop,
+// which is below the floor at the clip point, and on a slope can be ~10
+// less), 2 slope clip (slopeFrame), 3 ground clip (groundFrame at
+// velocity.y vy). Set once per pair (chooseFrameSpec) before they run.
+// autoDrop (falling, no --drop): --refine picks the fall of the pair's slowest
+// move that works (and sets drop to it); --yaw / --angles keep `drop`.
+struct FrameSpec { int type = 0; double drop = 0; double vy = -20; bool autoDrop = false; };
+extern FrameSpec FRAME_SPEC;
+static const char* const FRAME_TYPE_NAMES[] = { "walking", "falling", "slope", "ground" };
+// Whether clip c is of FRAME_SPEC's kind (falling: any drop)
+bool inFrameSpec(const Clip& c);
+// A falling clip's real fall in its frame: prev.y - next.y
+double fallOf(const Clip& c);
+// Picks FRAME_SPEC from the pair's clips: `want` (-1: the first of walking,
+// slope, ground, falling the pair has), `drop` (falling, 0: the smallest real
+// fall of the pair's falling clips that's still a wall push: checkHeight -
+// drop >= 5, else the game's line test runs at the feet). 0 ok, 1 the pair
+// has no clip of that kind, 2 falling with no such drop (or `drop` isn't one).
+int chooseFrameSpec(const vector<Clip>& clips, int want, double drop, double checkHeight);
+
 // wall_push_clips.js reachability: the lowest speed Link can do clip `c` at,
 // from a standable in-bounds start one frame's move away (32 directions, every
 // REACH_STEP up to REACH_DIST). Crossings: the game's move at that yaw and

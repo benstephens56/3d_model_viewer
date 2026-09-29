@@ -1,4 +1,6 @@
 #include "reach.h"
+#include "ground.h"
+#include "slope.h"
 
 // wall_push_clips.js reachability: the lowest speed Link can do clip `c` at,
 // from a standable in-bounds start one frame's move away (32 directions, every
@@ -64,22 +66,95 @@ void reachability(const Model& m, Scratch& s, Clip& c) {
 	}
 }
 
-// One walking frame from a standing start: does moving at yaw / speed make
-// TRI pusher push Link through TRI crossed and leave him out of bounds?
-// (line test, pushes, floor check, two more frames: the scan's own checks)
-static std::optional<ClipResult> walkFrameClips(const Model& m, Scratch& s, const V3& start, int yaw, double speed,
+FrameSpec FRAME_SPEC;
+
+bool inFrameSpec(const Clip& c) {
+	switch (FRAME_SPEC.type) {
+	case 0: return c.kind < 2 && c.drop == 0;
+	case 1: return c.kind < 2 && c.drop > 0;
+	default: return c.kind == FRAME_SPEC.type;
+	}
+}
+
+double fallOf(const Clip& c) {
+	return c.hasNext ? F(c.prev.y - c.next.y) : (double)c.drop;
+}
+
+int chooseFrameSpec(const vector<Clip>& clips, int want, double drop, double checkHeight) {
+	FrameSpec sp;
+	auto has = [&](int type) {
+		FrameSpec keep = FRAME_SPEC;
+		FRAME_SPEC.type = type;
+		bool any = std::any_of(clips.begin(), clips.end(), inFrameSpec);
+		FRAME_SPEC = keep;
+		return any;
+	};
+	if (want >= 0) {
+		if (!has(want)) return 1;
+		sp.type = want;
+	} else {
+		sp.type = -1;
+		for (int t : { 0, 2, 3, 1 }) if (has(t)) { sp.type = t; break; }
+		if (sp.type < 0) return 1;
+	}
+	// still a wall push: checkHeight + dy >= 5 (else the line test runs at the feet)
+	auto pushable = [&](double d) { return F(checkHeight - d) >= 5; };
+	if (sp.type == 1) {
+		// the smallest real fall (the least y velocity), or the one asked for
+		sp.drop = drop;
+		sp.autoDrop = drop <= 0;
+		if (drop <= 0) {
+			sp.drop = INFINITY;
+			for (const Clip& c : clips) {
+				const double d = fallOf(c);
+				if (c.kind < 2 && c.drop > 0 && pushable(d)) sp.drop = std::min(sp.drop, d);
+			}
+		}
+		if (!(sp.drop < INFINITY) || !pushable(sp.drop)) { FRAME_SPEC = sp; return 2; }
+	}
+	if (sp.type == 3) {
+		sp.vy = GROUND_VYS[0];
+		for (const Clip& c : clips) if (c.kind == 3) { sp.vy = c.vy; break; }
+	}
+	FRAME_SPEC = sp;
+	return 0;
+}
+
+// One frame of FRAME_SPEC's kind from a standing start at yaw / speed: does
+// it do this pair's clip, leaving him somewhere that counts? Where he ends
+// up, or none. Walking / falling: TRI pusher pushes Link through TRI crossed
+// (line test, pushes, floor check or the fall, two more frames: the scan's
+// own checks). Slope / ground: slopeFrame / groundFrame through TRI crossed,
+// starting on (slope: lifted by) TRI pusher.
+static std::optional<V3> walkFrameClips(const Model& m, Scratch& s, const V3& start, int yaw, double speed,
 	int pusher, int crossed) {
+	const FrameSpec& spec = FRAME_SPEC;
+	if (spec.type == 2 || spec.type == 3) {
+		auto c = spec.type == 2 ? slopeFrame(m, s, start, yaw, speed, crossed) : groundFrame(m, s, start, yaw, speed, spec.vy, crossed);
+		if (!c || c->pusher != pusher) return std::nullopt;
+		return c->end;
+	}
 	V3 next = moveStep(start, yaw, speed);
+	const bool falling = spec.type == 1;
+	if (falling) {
+		next.y = F(start.y - spec.drop);
+		// (checkHeight + dy < 5: the line test at the feet stops him on his floor)
+		if (F(m.checkHeight + F(next.y - start.y)) < 5) return std::nullopt;
+	}
 	V3 res;
 	PushList trace;
 	auto f = lineFrame(m, s, start, next, LOOSE);
 	if (f) { res = f->res; trace = f->trace; }
 	else res = m.sphereStep(next, LOOSE, &trace, &start);
 	const Move mv{ yaw, speed };
-	auto clip = clipFromFrame(m, s, start, res, trace, LOOSE, start.y, &mv);
+	auto clip = clipFromFrame(m, s, start, res, trace, LOOSE, falling ? NAN : start.y, &mv);
 	if (!clip || clip->crossed != crossed || clip->pusher != pusher) return std::nullopt;
+	if (falling) {
+		bool noFloor;
+		return landing(m, s, res, start.y, noFloor, clip->crossed);
+	}
 	if (!m.endCounts(s, clip->crossed, clip->end)) return std::nullopt;
-	return clip;
+	return clip->end;
 }
 
 
@@ -197,16 +272,52 @@ void angleRanges(const Model& m, const Refined& r, int pusher, int crossed, int 
 // f32 boundary. Returns the best found.
 Refined refineMinSpeed(const Model& m, const vector<Clip>& clips, int pusher, int crossed, int threads) {
 	Refined best;
-	const Clip* seed = nullptr;
-	// (walking only: falling clips need a y velocity as well)
-	for (const Clip& c : clips) if (c.drop == 0 && c.hasReach && (!seed || c.reachSpeed < seed->reachSpeed)) seed = &c;
-	if (!seed) return best;
-	best.found = true;
-	best.speed = seed->reachSpeed;
-	best.yaw = seed->reachYaw;
-	best.start = seed->reachStart;
+	// The seed: the slowest move of the pair's clips of FRAME_SPEC's kind that
+	// does it in this frame - their --min-speed reaches and the scan's own
+	// moves (reachability can miss a clip: OoT Kakariko child, falling, TRI
+	// 141 -> 21 has none). Each is checked: a slope clip's reach is the faster
+	// of its two frames, and a falling one falls from its own start (OoT
+	// Kakariko child 142 -> 673: the best reach falls 20.8, not the 14.93
+	// being refined). None that works: the bound is the fastest move there is,
+	// from the slowest candidate (much slower).
+	// Falling without --drop (autoDrop): each candidate at its own fall (from
+	// its start to its posNext), if that's still a wall push, and the refine is
+	// at the fall of the slowest one that works - the lowest speed is the
+	// point, and a smallest-fall default can need speed 30 (Kakariko 142 ->
+	// 673: 14.93 needs 30.74; searching up to there took over 10 minutes).
+	struct Seed { double speed; int yaw; V3 start; double fall; };
+	vector<Seed> cands;
+	for (const Clip& c : clips) {
+		if (!inFrameSpec(c)) continue;
+		if (c.hasReach) cands.push_back({ c.reachSpeed, c.reachYaw, c.reachStart, F(c.reachStart.y - c.from.y) });
+		if (c.hasMove && c.hasNext) cands.push_back({ c.speed, c.yaw, c.prev, F(c.prev.y - c.next.y) });
+	}
+	const bool autoDrop = FRAME_SPEC.type == 1 && FRAME_SPEC.autoDrop;
+	if (autoDrop)
+		cands.erase(std::remove_if(cands.begin(), cands.end(), [&](const Seed& c) { return !(c.fall > 0 && F(m.checkHeight - c.fall) >= 5); }), cands.end());
+	if (cands.empty()) return best;
+	std::stable_sort(cands.begin(), cands.end(), [](const Seed& a, const Seed& b) { return a.speed < b.speed; });
+	best.speed = cands[0].speed;
+	best.yaw = cands[0].yaw;
+	best.start = cands[0].start;
+	{
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		const double chosenDrop = FRAME_SPEC.drop;
+		// (none works: back to the smallest fall chooseFrameSpec picked)
+		auto restore = [&]() { if (autoDrop && !best.found) FRAME_SPEC.drop = chosenDrop; };
+		for (const Seed& c : cands) {
+			if (autoDrop) FRAME_SPEC.drop = c.fall;
+			if (!walkFrameClips(m, s, c.start, c.yaw, c.speed, pusher, crossed)) continue;
+			best.found = true;
+			best.speed = c.speed; best.yaw = c.yaw; best.start = c.start;
+			break;
+		}
+		restore();
+		if (!best.found) best.speed = F(REACH_DIST / SPEED_RATE);
+	}
 	vector<V3> targets;
-	for (const Clip& c : clips) if (c.drop == 0) targets.push_back(c.from);
+	for (const Clip& c : clips) if (inFrameSpec(c)) targets.push_back(c.from);
 	auto nearest = [&](const V3& p) {
 		double d = 1e9;
 		for (const V3& t : targets) d = std::min(d, std::hypot(t.x - p.x, t.z - p.z));
@@ -218,7 +329,7 @@ Refined refineMinSpeed(const Model& m, const vector<Clip>& clips, int pusher, in
 		Scratch s;
 		s.stamp.assign(m.polys.size(), 0);
 		std::set<std::pair<float, float>> seen;
-		const V3 B = seed->reachStart;
+		const V3 B = best.start;
 		for (double dx = -24; dx <= 24; dx += 0.25) {
 			for (double dz = -24; dz <= 24; dz += 0.25) {
 				if (dx * dx + dz * dz > 24 * 24) continue;
@@ -270,7 +381,8 @@ Refined refineMinSpeed(const Model& m, const vector<Clip>& clips, int pusher, in
 				if (sp > 0 && sp < myBest) { myBest = sp; myYaw = yaw; }
 			}
 			std::lock_guard<std::mutex> g(mu);
-			if (myBest < best.speed) {
+			if (myBest < best.speed || (!best.found && myBest <= best.speed)) {
+				best.found = true;
 				best.speed = myBest;
 				best.yaw = myYaw;
 				best.start = S;
@@ -283,7 +395,7 @@ Refined refineMinSpeed(const Model& m, const vector<Clip>& clips, int pusher, in
 	best.starts = (int)starts.size();
 	Scratch s;
 	s.stamp.assign(m.polys.size(), 0);
-	if (auto c = walkFrameClips(m, s, best.start, best.yaw, best.speed, pusher, crossed)) best.end = c->end;
+	if (auto e = walkFrameClips(m, s, best.start, best.yaw, best.speed, pusher, crossed)) best.end = *e;
 	return best;
 }
 
@@ -329,15 +441,28 @@ void findMinSpeeds(const Model& m, vector<Clip>& found, int threads) {
 std::optional<Clip> refinedClip(const Model& m, const Refined& r, int pusher, int crossed) {
 	Scratch s;
 	s.stamp.assign(m.polys.size(), 0);
-	auto frame = [&](const Tol& tol, V3& res, V3& at, bool& cross) {
+	const FrameSpec& spec = FRAME_SPEC;
+	// slope / ground clips: their frame's own clip
+	if (spec.type == 2 || spec.type == 3) {
+		auto c = spec.type == 2 ? slopeFrame(m, s, r.start, r.yaw, r.speed, crossed) : groundFrame(m, s, r.start, r.yaw, r.speed, spec.vy, crossed);
+		if (!c || c->pusher != pusher) return std::nullopt;
+		return c;
+	}
+	const bool falling = spec.type == 1;
+	auto posNext = [&]() {
 		V3 nx = moveStep(r.start, r.yaw, r.speed);
+		if (falling) nx.y = F(r.start.y - spec.drop);
+		return nx;
+	};
+	auto frame = [&](const Tol& tol, V3& res, V3& at, bool& cross) {
+		V3 nx = posNext();
 		PushList trace;
 		auto f = lineFrame(m, s, r.start, nx, tol);
 		cross = (bool)f;
 		if (f) { res = f->res; trace = f->trace; at = { f->hit.x, nx.y, f->hit.z }; }
 		else { res = m.sphereStep(nx, tol, &trace, &r.start); at = nx; }
 		const Move mv{ r.yaw, r.speed };
-		auto cl = clipFromFrame(m, s, r.start, res, trace, tol, r.start.y, &mv);
+		auto cl = clipFromFrame(m, s, r.start, res, trace, tol, falling ? NAN : r.start.y, &mv);
 		if (cl && (cl->crossed != crossed || cl->pusher != pusher)) cl.reset();
 		return cl;
 	};
@@ -350,8 +475,18 @@ std::optional<Clip> refinedClip(const Model& m, const Refined& r, int pusher, in
 		c.acutePoint = scl && scl->onFace;
 		c.cross = cross;
 		c.pusher = pusher; c.crossed = crossed;
-		c.prev = r.start; c.next = moveStep(r.start, r.yaw, r.speed); c.hasNext = true;
+		c.prev = r.start; c.next = posNext(); c.hasNext = true;
 		c.from = at; c.res = res; c.end = cl->end;
+		if (falling) {
+			// where he lands, as the scan's falling clips
+			bool noFloor;
+			auto land = landing(m, s, res, r.start.y, noFloor, crossed);
+			if (!land) return std::nullopt;
+			// (the scan's field is whole units; prev / next hold the exact fall)
+			c.drop = std::max(1, (int)std::lround(spec.drop));
+			c.end = *land;
+			c.endNoFloor = noFloor;
+		}
 		c.floorY = r.start.y; c.hasFloorY = true;
 		c.yaw = r.yaw; c.speed = r.speed; c.hasMove = true;
 		if (cross) c.yaws = { r.yaw };
@@ -376,7 +511,7 @@ Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int cro
 	const double dx = unit.x / len, dz = unit.z / len;
 	struct Target { V3 p; double floorY; };
 	vector<Target> targets;
-	for (const Clip& c : clips) if (c.drop == 0) targets.push_back({ c.from, c.hasFloorY ? c.floorY : c.from.y });
+	for (const Clip& c : clips) if (inFrameSpec(c)) targets.push_back({ c.from, c.hasFloorY ? c.floorY : c.from.y });
 	if (targets.empty()) return best;
 	const double back = maxSpeed * SPEED_RATE + 1;
 	// the points (x, z, floor) behind the clip points: every sideStep across
@@ -630,7 +765,7 @@ Refined clipAtYaw(const Model& m, const vector<Clip>& clips, int pusher, int cro
 	if (best.found) {
 		Scratch s;
 		s.stamp.assign(m.polys.size(), 0);
-		if (auto c = walkFrameClips(m, s, best.start, yaw, best.speed, pusher, crossed)) best.end = c->end;
+		if (auto e = walkFrameClips(m, s, best.start, yaw, best.speed, pusher, crossed)) best.end = *e;
 	}
 	// The grid for the CSV: about GRID_COLS x GRID_ROWS round steps (1, 2 or 5
 	// x a power of ten, no finer than the f32 spacing there) over the starts
