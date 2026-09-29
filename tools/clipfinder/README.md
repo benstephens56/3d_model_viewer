@@ -348,6 +348,12 @@ height on the wall, behind its plane, and a lower floor in front. It aims
 moves from standing starts in front to land from 24 in front of the bottom
 edge to 24 past it.
 
+**Standing starts.** A start is where Link comes to rest on a floor near the
+clip's floor height, and not under a floor within 50 above his feet: the
+game's floor check runs down from there and would put him up on it (OoT
+Kokiri Forest, child: the ground under a tree's roots or a ledge; 5 of 424
+pairs were such starts).
+
 **In bounds.** Link is out of bounds if he's behind a wall, or if one of 8
 level rays at his check height meets the back of a wall first. For where he
 starts or stands (every clip kind, and the viewer's reachability), a ray that

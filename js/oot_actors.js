@@ -3,7 +3,7 @@ import { addModelCheckbox, getModelGroup, resetGroupModelState, applyGroupMaster
 import { replayDisplayLists, makeZeldaMesh, parseZeldaSceneInfo, scrollSegment, SEG_FLEX_MATRICES } from './zelda_textured.js';
 import { attachTextured, clearTexturedPairs } from './bk_textured.js';
 import { addTypeRow, makeYawLine, groupBy, ACTOR_COLOR } from './bk_setup.js';
-import { decodeActorSpawnEntry, actorShapeRot, buildDynaPolyActors } from './render_actors.js';
+import { decodeActorSpawnEntry, actorShapeRot, buildDynaPolyActors, ootActorPresent, ootSetupAges } from './render_actors.js';
 import { clearSelection } from './selection.js';
 import { MM_ACTOR_OVERRIDES } from './mm_actor_overrides.js';
 
@@ -1939,12 +1939,13 @@ export function sceneNumPolygons(sceneBuffer) {
 // The dynapoly exports (render_actors.js dynaExport) of one setup, without
 // drawing anything: wall_push_clips.js's "Export all dynapolys". In spawn
 // order, like the rows; the caller sorts them into bgId order.
-export async function setupDynaExports(game, sceneBuffer, sceneName, setup, setupID) {
+// setupIDs: every setup index the scene has (which ages play this one).
+export async function setupDynaExports(game, sceneBuffer, sceneName, setup, setupID, setupIDs = null) {
     const sceneDv = new DataView(sceneBuffer);
     const spawns = [];
     forEachSetupSpawn(game, sceneDv, setup, setupID, (spawn, base, name, override, roomIndex) =>
         spawns.push({ spawn, position: spawn.position, room: roomIndex }));
-    return buildDynaPolyActors(null, game, sceneName, spawns, { exportOnly: true });
+    return buildDynaPolyActors(null, game, sceneName, spawns, { exportOnly: true, setup: setupID, setups: setupIDs });
 }
 
 export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT') {
@@ -1977,7 +1978,12 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
     // The same spawns, before any `place` (a draw-only adjustment), for the
     // dynapoly collision.
     const dynaSpawns = [];
+    // OoT: the actors whose Init kills them at the ages playing this setup
+    // aren't drawn (ootActorPresent)
+    const setupIDs = areaActors.flatMap((s, i) => s ? [i] : []);
+    const setupAges = game === 'OOT' ? ootSetupAges(setupID, new Set(setupIDs)) : null;
     const addSpawn = (spawn, base, name, override, roomIndex) => {
+        if (!ootActorPresent(name, spawn.params, setupAges, sceneName)) return;
         dynaSpawns.push({ spawn, position: spawn.position, room: roomIndex });
         // The shape.rot the actor's Init leaves (MM: MM_ACTOR_INIT_SHAPE_ROT in
         // render_actors.js, shared with the DynaPoly rows -- rot fields that
@@ -2010,7 +2016,8 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
     for (const inst of instances) if (inst.model && !built.has(inst.model.key)) inst.model = null;
 
     // Dynapoly collision, keyed by actor name like the rows.
-    const dyna = await buildDynaPolyActors(scene, game, sceneName, dynaSpawns);
+    const dyna = await buildDynaPolyActors(scene, game, sceneName, dynaSpawns,
+        { setup: setupID, setups: setupIDs });
 
     const rowLabel = (name, count) => count > 1 ? `${name} (x${count})` : name;
     const byType = groupBy(instances, i => i.name);

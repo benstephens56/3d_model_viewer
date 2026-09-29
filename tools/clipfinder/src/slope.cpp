@@ -73,11 +73,12 @@ std::optional<Clip> slopeFrame(const Model& m, Scratch& s, const V3& start, int 
 			c.end = r2;
 			c.endNoFloor = true;
 			ok = true;
-		} else if (F(*fy2 - r2.y) >= -11) {
-			ok = standStill(r2, *fy2, c.end);
 		} else {
-			bool noFloor;
-			if (auto end = landing(m, s, r2, y1, noFloor, crossed)) { c.end = *end; c.endNoFloor = noFloor; ok = true; }
+			// on the floor there, or falling onto it: still behind the wall at
+			// his check height once he's down, not under its bottom (OoT Kokiri
+			// Forest, child, TRI 5 -> 11: a tree's root and trunk; off the root
+			// he lands under the trunk wall and walks back out beneath it)
+			ok = standStill(r2, *fy2, c.end);
 		}
 		if (ok) c.speed2 = v2;
 	}

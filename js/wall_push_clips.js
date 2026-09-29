@@ -805,7 +805,12 @@ function standSpot(model, x, z, floorY) {
         if (!rest) return null;
         const ry = floorAt(rest.x, rest.z);
         if (ry === undefined) return null;
-        if (rest.x === x && rest.z === z && ry === y) return rest;
+        if (rest.x === x && rest.z === z && ry === y) {
+            // not under a floor within 50 above his feet: the floor check
+            // (from pos.y + 50) would put him up on it (clipfinder standSpot)
+            const fy = model.floorCheck(rest.x, rest.z, F(rest.y + 50));
+            return fy !== null && fy > rest.y ? null : rest;
+        }
         x = rest.x; z = rest.z; y = ry;
     }
     return null;
@@ -1260,7 +1265,7 @@ async function exportAllDynapolys(g, progress) {
         const entries = [];
         for (let s = 0; s < setups.length; s++) {
             if (!setups[s]) continue;
-            const actors = bgOrder(await setupDynaExports(g, buffer, m.file, setups[s], s));
+            const actors = bgOrder(await setupDynaExports(g, buffer, m.file, setups[s], s, setups.flatMap((x, i) => x ? [i] : [])));
             if (!actors.length) continue;
             const key = JSON.stringify(actors);
             const same = entries.find(e => e.key === key);

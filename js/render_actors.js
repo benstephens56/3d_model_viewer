@@ -659,9 +659,82 @@ const LATE_BG_ACTORS = {
     ]),
 };
 
+// OoT actors whose Init kills them at one of Link's ages: (params, adult,
+// cutscene layer, sceneName) => whether the actor is there (model and
+// collision). Where the answer also hangs on a save flag the viewer doesn't
+// model (carpenters rescued, a switch), it's kept. From the decomp's Inits:
+const OOT_ACTOR_ALIVE = {
+    // z_bg_spot09_obj.c func_808B1AE0 (params &= 0xFF): a cutscene layer keeps
+    // just 0 (the bridge's sides, no collision); adult 1 (broken bridge,
+    // carpenters not all rescued), 3 (tent), 4 (repaired bridge, rescued);
+    // child 2 (child bridge)
+    "Bg_Spot09_Obj": (p, adult, cs) => {
+        const t = p & 0xFF;
+        if (cs) return t === 0;
+        return adult ? t === 1 || t === 3 || t === 4 : t === 2;
+    },
+    // z_bg_spot18_obj.c D_808B90F0[type][age]: the spear (1) isn't there adult
+    "Bg_Spot18_Obj": (p, adult) => (p & 0xF) !== 1 || !adult,
+    // z_bg_spot00_break.c: Actor_Kill `if (!LINK_IS_ADULT)`
+    "Bg_Spot00_Break": (p, adult) => adult,
+    // z_bg_spot00_hanebasi.c: the drawbridge (-1) is killed adult outside a
+    // cutscene layer (its chains stay)
+    "Bg_Spot00_Hanebasi": (p, adult, cs) => (p & 0xFFFF) !== 0xFFFF || !adult || cs,
+    // z_bg_spot01_idosoko.c: the well's stone, killed `if (!LINK_IS_ADULT)`
+    "Bg_Spot01_Idosoko": (p, adult) => adult,
+    // z_bg_spot02_objects.c: 1 killed `if (LINK_IS_ADULT)`
+    "Bg_Spot02_Objects": (p, adult) => (p & 0xFF) !== 1 || !adult,
+    // z_bg_spot05_soko.c: 0 killed `if (LINK_IS_ADULT)`
+    "Bg_Spot05_Soko": (p, adult) => (p & 0xFF) !== 0 || !adult,
+    // z_bg_spot06_objects.c: LHO_ICE_BLOCK (params >> 8 == 3) killed as a child
+    "Bg_Spot06_Objects": (p, adult) => ((p >> 8) & 0xFF) !== 3 || adult,
+    // z_bg_spot08_iceblock.c: killed `if (LINK_AGE_IN_YEARS == YEARS_CHILD)`
+    "Bg_Spot08_Iceblock": (p, adult) => adult,
+    // z_bg_ingate.c: killed outside Lon Lon Ranch or as a child
+    "Bg_Ingate": (p, adult, cs, sceneName) => adult && sceneName === "spot20_scene",
+    // z_bg_jya_block.c: killed unless a child (and its switch is set)
+    "Bg_Jya_Block": (p, adult) => !adult,
+};
+
+// OoT actors that stay but load no collision at one of Link's ages (the same
+// arguments): drawn at both.
+const OOT_DYNA_ALIVE = {
+    // z_bg_spot07_taki.c: DynaPoly_SetBgActor only `if (LINK_IS_ADULT)` (the
+    // frozen waterfall and ice; a child sees it flowing)
+    "Bg_Spot07_Taki": (p, adult) => adult,
+    // z_obj_bean.c: the platform's collision only as an adult (its switch
+    // set); a child sees the soft soil
+    "Obj_Bean": (p, adult) => adult,
+};
+
+// Whether an OoT actor is there in a setup played at `setupAges` (ootSetupAges;
+// null: anything goes), at some age that plays it; collision: and has its
+// collision loaded.
+export function ootActorPresent(name, params, setupAges, sceneName, collision = false) {
+    if (!setupAges) return true;
+    const tests = [OOT_ACTOR_ALIVE[name], collision ? OOT_DYNA_ALIVE[name] : null].filter(Boolean);
+    return setupAges.ages.some(adult => tests.every(alive => alive(params, adult, setupAges.cutscene, sceneName)));
+}
+
+// Which of Link's ages play an OoT scene setup (0 / 1 child day / night,
+// 2 / 3 adult; a missing one resolved as Scene_CommandAlternateHeaderList
+// does: adult night falls back to adult day, anything else to 0), and whether
+// it's a cutscene layer (4+: either age). `present`: the scene's setups.
+export function ootSetupAges(setup, present) {
+    if (setup >= 4) return { ages: [false, true], cutscene: true };
+    const resolve = l => l === 0 || present.has(l) ? l : l === 3 && present.has(2) ? 2 : 0;
+    const ages = [];
+    if (resolve(0) === setup || resolve(1) === setup) ages.push(false);
+    if (resolve(2) === setup || resolve(3) === setup) ages.push(true);
+    return { ages, cutscene: false };
+}
+
 // exportOnly: build nothing, just return each actor's dynaExport (below) in an
 // array, in spawn order - wall_push_clips.js's "Export all dynapolys".
-export async function buildDynaPolyActors(scene, game, sceneName, spawns, { exportOnly = false } = {}) {
+// setup / setups (the setup's index and every index the scene has): OoT
+// actors that aren't there at the ages playing it are left out (ootActorPresent).
+export async function buildDynaPolyActors(scene, game, sceneName, spawns, { exportOnly = false, setup = null, setups = null } = {}) {
+    const setupAges = game === "OOT" && setup !== null && setups ? ootSetupAges(setup, new Set(setups)) : null;
     const byActor = new Map();
     const exports = [];
 
@@ -739,6 +812,7 @@ export async function buildDynaPolyActors(scene, game, sceneName, spawns, { expo
             continue;
         }
         const actorName = actorTableEntry["name"];
+        if (!ootActorPresent(actorName, actorParams, setupAges, sceneName, true)) continue;
         //const actorObjectId = actorTableEntry["objectId"];
         //const objectName = objects[actorObjectId]["name"];
 

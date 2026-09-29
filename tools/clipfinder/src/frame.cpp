@@ -131,7 +131,9 @@ static std::optional<double> standFloor(const Model& m, double x, double z, doub
 	for (double v : ys) if (v <= *best + 3 && v > top) top = v;
 	return top;
 }
-// wall_push_clips.js standSpot: where Link can stand still near (x, z).
+// wall_push_clips.js standSpot: where Link can stand still near (x, z). Not
+// under a floor within 50 above his feet: the floor check (from pos.y + 50)
+// would put him up on it (OoT Kokiri Forest: the ground under a tree's roots).
 std::optional<V3> standSpot(const Model& m, double x, double z, double floorY) {
 	auto y = standFloor(m, x, z, floorY);
 	if (!y) return std::nullopt;
@@ -141,7 +143,11 @@ std::optional<V3> standSpot(const Model& m, double x, double z, double floorY) {
 		if (!rest) return std::nullopt;
 		auto ry = standFloor(m, rest->x, rest->z, floorY);
 		if (!ry) return std::nullopt;
-		if (rest->x == x && rest->z == z && *ry == cy) return rest;
+		if (rest->x == x && rest->z == z && *ry == cy) {
+			auto fy = m.floorCheck(rest->x, rest->z, F(rest->y + 50));
+			if (fy && *fy > rest->y) return std::nullopt;
+			return rest;
+		}
 		x = rest->x; z = rest->z; cy = *ry;
 	}
 	return std::nullopt;
