@@ -27,6 +27,9 @@
 --   3. Run this script. Progress prints to the Lua console; the summary goes
 --      to the console and to wall_clip_results.txt next to the tests file.
 --      The game is put back to the starting savestate at the end.
+--   Action clips (clipfinder --actions, a sword lunge doing the clip): the
+--   game does the attack itself - see ACTION_HOLD below for what the
+--   savestate needs.
 --   Recording a video: set RECORD = true below, run BizHawk at normal speed
 --   (not unthrottled) and start BizHawk's AVI/video recording before the
 --   script. Each test then gets the camera behind Link and a pause before and
@@ -41,7 +44,7 @@
 -- wall_clip_tests.json next to this script. Its clips are turned into tests,
 -- with the walls read from RAM (load that map first). (A .lua test file from
 -- an older viewer still works too.)
-local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\zr_1111_843.json]]
+local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\MM_Clock_Tower_Interior_Human_actions_setup0_dyna.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
 local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --falling scans)
@@ -93,6 +96,30 @@ local FORM = nil
 -- speed (shouldn't). Each grid's in-game result goes to <that CSV>_ingame.csv,
 -- mismatches marked, and the summary lists them.
 local CSV_TESTS = false
+-- Action clips (clipfinder --actions: the lunge's own movement does the clip).
+-- Each test: Link held at the start facing the test's facing, with Z held
+-- (Z-targeting nothing swings the camera behind him), then B pressed with the
+-- stick forward for one game frame - the stabs keep Z held (the targeted
+-- stab), the slashes let go of it first (the forward slash). The game does
+-- the rest. The savestate needs Link on foot, no menus or text.
+-- The weapon: each test puts the one its action is for on B (ACTION_WEAPONS)
+-- and presses B once while holding him at the start, so he draws it (and
+-- swings it: that's over before the test). Two-handed (Player_HoldsTwoHandedWeapon):
+-- OoT the Biggoron Sword / Giant's Knife, and the Deku stick (which always
+-- does the forward slash); MM the Great Fairy's Sword.
+local SET_WEAPON = true           -- false: use whatever the savestate has on B (and drawn)
+local ACTION_WEAPONS = {          -- B button item per game / form / one- or two-handed
+	OOT = {
+		Adult = { ["1h"] = 0x3C, ["2h"] = 0x3D },     -- Master Sword, Biggoron Sword / Giant's Knife
+		Child = { ["1h"] = 0x3B, stick = 0x00 },      -- Kokiri Sword, Deku stick
+	},
+	MM = {
+		Human = { ["1h"] = 0x4D, ["2h"] = 0x10, stick = 0x08 },  -- Kokiri Sword (77), Great Fairy's Sword (16), Deku stick (8)
+	},
+}
+local ACTION_HOLD = 150           -- emulated frames Link is held at the start first (3 per game frame; he draws the weapon in them)
+local STICK_FORWARD = 127         -- the analog "Y Axis" value for stick up (forward, with the camera behind him)
+local ACTION_KEYS = nil           -- nil: every action in the file; or a list, e.g. { "2h-stab" }
 local CSV_CELLS = "all"           -- "all", or "border": only cells next to one with the other answer
 local CSV_DRIFT = 0.0001          -- Link pushed further than this off a cell's start before the move: No
 
@@ -142,6 +169,10 @@ if GAME == "OOT" then
 	K.stateFlags2 = 0x670
 	K.crawling = 0x40000                -- PLAYER_STATE2_CRAWLING
 	K.linkAge = 0x11A5D4                -- gSaveContext.linkAge (0 adult, 1 child)
+	K.meleeWeaponAnimation = 0x832      -- Player.meleeWeaponAnimation (s8)
+	K.heldItemAction = 0x141            -- Player.heldItemAction (s8)
+	K.bButton = 0x11A638                -- gSaveContext.save.info.equips.buttonItems[0] (gSaveContext 0x8011A5D0 + 0x68)
+	K.stickAmmo = 0x11A65C              -- gSaveContext.save.info.inventory.ammo[SLOT_DEKU_STICK] (+ 0x8C)
 else
 	K.play = 0x3E6B20
 	K.gameplayFrames = 0x18840
@@ -160,6 +191,12 @@ else
 	K.rideActor = 0x390
 	K.actorSpeed = 0x70
 	K.transformation = 0x14B            -- Player.transformation (PlayerTransformation)
+	K.meleeWeaponAnimation = 0xADA      -- Player.meleeWeaponAnimation (s8)
+	K.heldItemAction = 0x147            -- Player.heldItemAction (s8)
+	K.saveContext = 0x1EF670            -- gSaveContext (MM US retail)
+	K.bButton = 0x1EF670 + 0x4C         -- save.saveInfo.equips.buttonItems[0][EQUIP_SLOT_B] (Human: CUR_FORM 0)
+	K.stickAmmo = 0x1EF670 + 0xA8       -- save.saveInfo.inventory.ammo[SLOT_DEKU_STICK]
+	K.playerForm = 0x1EF670 + 0x20      -- save.playerForm (checked against Player.transformation)
 end
 -- Player_UpdateCommon (both games) sets prevPos from home.pos at the start of
 -- the frame (and home.pos = world.pos at its end), so home.pos is Link's real
@@ -404,7 +441,8 @@ local function testsFromJson(path)
 		-- or "low" from files older than the per-pair categories
 		local kind = c.kind
 		if kind ~= "low" and (c.drop or 0) > 0 then kind = "low-" .. kind end
-		local gk = table.concat({ form or "", c.pusher, c.crossed, c.cross and "cross" or "stand", kind }, ":")
+		-- (action clips: a group per action too)
+		local gk = table.concat({ form or "", c.pusher, c.crossed, c.cross and "cross" or "stand", kind, c.actionKey or "" }, ":")
 		if not groupOf[gk] then nGroups = nGroups + 1; groupOf[gk] = nGroups end
 		local prev, nxt
 		if c.cross or c.speed then
@@ -415,7 +453,7 @@ local function testsFromJson(path)
 			nxt = vec(c.from)
 			prev = { c.from[1], c.floorY or c.from[2], c.from[3] }
 		end
-		local k = (form or "") .. key3(prev) .. key3(nxt)
+		local k = (form or "") .. key3(prev) .. key3(nxt) .. (c.actionKey and (c.actionKey .. c.facing) or "")
 		if not seen[k] then
 			seen[k] = true
 			T.tests[#T.tests + 1] = {
@@ -423,6 +461,7 @@ local function testsFromJson(path)
 				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt, from = vec(c.from),
 				yaw = c.speed and c.yaw or nil, speed = c.speed, speed2 = c.speed2, vy = c.vy, expect = vec(c["end"]),
 				reachSpeed = type(c.reach) == "table" and c.reach.speed or nil,
+				action = c.action, actionKey = c.actionKey, facing = c.facing, actionFrames = c.frames and #c.frames or nil,
 			}
 			T.walls[c.pusher] = true
 			T.walls[c.crossed] = true
@@ -708,6 +747,18 @@ if X_RANGE or Y_RANGE or Z_RANGE then
 	if #tests == 0 then error("no clip points in the X_RANGE / Y_RANGE / Z_RANGE area") end
 end
 
+-- ACTION_KEYS: only those actions' tests (the other tests are kept)
+if ACTION_KEYS then
+	local want, kept = {}, {}
+	for _, k in ipairs(ACTION_KEYS) do want[k] = true end
+	for _, t in ipairs(tests) do
+		if not t.actionKey or want[t.actionKey] then kept[#kept + 1] = t end
+	end
+	print(string.format("ACTION_KEYS: %d of %d tests", #kept, #tests))
+	tests = kept
+	if #tests == 0 then error("no tests left after ACTION_KEYS") end
+end
+
 -- Falling crossings whose drop makes checkHeight + dy < 5 can't work: the
 -- game's wall line test then runs from Link's feet with floors included and
 -- stops him on the floor he starts from (tested in game: OoT Kakariko child,
@@ -799,11 +850,28 @@ for _, gi in ipairs(order) do
 	end
 end
 
+-- Action tests put their weapon on B: the save context has to be where K says
+if SET_WEAPON and K.playerForm then
+	local anyAction = false
+	for _, t in ipairs(queue) do if t.action then anyAction = true end end
+	if anyAction and mainmemory.read_u8(K.playerForm) ~= mainmemory.read_u8(K.player + K.transformation) then
+		error(string.format("gSaveContext isn't at 0x80%06X in this game (save.playerForm %d, Link's form %d): fix K.saveContext, or set SET_WEAPON = false",
+			K.saveContext, mainmemory.read_u8(K.playerForm), mainmemory.read_u8(K.player + K.transformation)))
+	end
+end
+
 print(string.format("Wall clip tester: %s, %s, %s - %d tests (%d points exported)",
 	GAME, T.map, runForm, #queue, #tests))
 
 local base = memorysavestate.savecorestate()
 print("Saved the starting state")
+
+-- BizHawk keeps an analog override after the script stops (the stick stays
+-- where it was last set): a value that isn't a number clears it. Buttons are
+-- only ever pressed (true), never forced up (false), and last one frame.
+local function releaseStick()
+	joypad.setanalog({ ["X Axis"] = "", ["Y Axis"] = "" }, 1)
+end
 
 -- Put things back however the script ends (finished, error, or stopped).
 local cleanedUp = false
@@ -812,6 +880,7 @@ local function cleanUp()
 	cleanedUp = true
 	pending = nil
 	unhook()
+	releaseStick()
 	if FAST and client.invisibleemulation then client.invisibleemulation(false) end
 	memorysavestate.loadcorestate(base)
 	memorysavestate.removestate(base)
@@ -835,10 +904,140 @@ local function yawTo(dx, dz)
 	return ((a + 0x8000) % 0x10000) - 0x8000
 end
 
+-- The attack clipfinder's action keys are (PLAYER_MWA_*, both games)
+-- (the Deku stick is two-handed and always does the forward slash)
+local ACTION_MWA = { ["1h-slash"] = 0, ["2h-slash"] = 1, ["1h-stab"] = 12, ["2h-stab"] = 13, ["stick-slash"] = 1 }
+-- The Player item action (heldItemAction) each B item gives (PLAYER_IA_*), to check he's holding it
+local WEAPON_IA = GAME == "OOT" and { [0x3C] = 3, [0x3B] = 4, [0x3D] = 5, [0x55] = 5, [0x00] = 6 }
+	or { [0x4D] = 3, [0x4E] = 4, [0x4F] = 5, [0x10] = 6, [0x08] = 7 }
+
+-- The B item for an action test in the form Link is in (nil: none set up)
+local function actionWeapon(t)
+	local byForm = ACTION_WEAPONS[GAME] and ACTION_WEAPONS[GAME][currentForm()]
+	-- ("1h-slash" -> "1h", "stick-slash" -> "stick")
+	return byForm and byForm[t.actionKey:match("^[^-]+")]
+end
+
+-- An action clip: the game does the lunge. Link is held at `prev` facing
+-- `facing` (Z held: the camera goes behind him, so stick up is forward), then
+-- B with the stick forward for a game frame (a stab: Z still held). His
+-- meleeWeaponAnimation is set to -1 first: afterwards it says which attack he
+-- did, if any (and the combo counter starts over).
+local function runActionTest(t, r)
+	local facing = t.facing
+	if facing >= 0x8000 then facing = facing - 0x10000 end
+	local stab = t.actionKey:find("stab") ~= nil
+	local function holdAt(z)
+		if z then joypad.set({ Z = true }, 1) end
+		writeVec(K.player + K.pos, t.prev)
+		writeVec(K.player + K.prevPos, t.prev)
+		writeVec(K.player + K.home, t.prev)
+		writefloat(K.player + K.speedXZ, 0)
+		writefloat(K.player + K.actorSpeed, 0)
+		mainmemory.write_s16_be(K.player + K.yaw, facing)
+		mainmemory.write_s16_be(K.player + K.rotY, facing)
+		mainmemory.write_s16_be(K.player + K.shapeRotY, facing)
+	end
+	-- The weapon on B (SET_WEAPON), and B pressed early on so he draws it;
+	-- Z held from half way (the camera behind him), a slash lets go of it 4
+	-- game frames before the test
+	local weapon = SET_WEAPON and actionWeapon(t)
+	if weapon then
+		mainmemory.write_u8(K.bButton, weapon)
+		-- (sticks to swing)
+		if t.actionKey:match("^stick") and mainmemory.read_u8(K.stickAmmo) == 0 then mainmemory.write_u8(K.stickAmmo, 10) end
+	end
+	for i = 1, ACTION_HOLD do
+		if weapon and i >= 6 and i < 9 then joypad.set({ B = true }, 1) end
+		holdAt(i > ACTION_HOLD / 2 and (stab or i <= ACTION_HOLD - 12))
+		emu.frameadvance()
+	end
+	-- standing there on his own until a game frame has just run
+	local frames = read_u32(K.play + K.gameplayFrames)
+	for _ = 1, 6 do
+		if stab then joypad.set({ Z = true }, 1) end
+		emu.frameadvance()
+		if read_u32(K.play + K.gameplayFrames) ~= frames then break end
+	end
+	r.start = readVec(K.player + K.pos)
+	r.yaw = facing
+	mainmemory.write_s16_be(K.player + K.yaw, facing)
+	mainmemory.write_s16_be(K.player + K.shapeRotY, facing)
+	mainmemory.write_s8(K.player + K.meleeWeaponAnimation, -1)
+	local held = mainmemory.read_s8(K.player + K.heldItemAction)
+	if weapon and WEAPON_IA[weapon] and held ~= WEAPON_IA[weapon] then
+		r.log = { string.format("Link is holding item action %d, not the B weapon's %d (B item 0x%02X): he didn't draw it - is B usable here?", held, WEAPON_IA[weapon], weapon) }
+		r.status = "no weapon"
+		r.after, r.final = readVec(K.player + K.pos), readVec(K.player + K.pos)
+		return r
+	end
+	r.log = {}
+	local frames0 = read_u32(K.play + K.gameplayFrames)
+	local function logLine(tag)
+		r.log[#r.log + 1] = string.format(
+			"%s gf+%d pos %s speedXZ %.3f velY %.3f yaw %04X shapeYaw %04X action %08X attack %d animMove %02X wall %s floor %s bgFlags %04X",
+			tag, read_u32(K.play + K.gameplayFrames) - frames0, fmt(readVec(K.player + K.pos)),
+			readfloat(K.player + K.speedXZ), readfloat(K.player + K.velocity + 4),
+			mainmemory.read_u16_be(K.player + K.yaw), mainmemory.read_u16_be(K.player + K.shapeRotY),
+			read_u32(K.player + K.actionFunc), mainmemory.read_s8(K.player + K.meleeWeaponAnimation),
+			mainmemory.read_u8(K.player + K.skelAnime + 0x35),
+			polyName(read_u32(K.player + K.wallPoly), mainmemory.read_u8(K.player + K.wallBgId)),
+			polyName(read_u32(K.player + K.floorPoly), mainmemory.read_u8(K.player + K.wallBgId + 1)), read_u16(K.player + K.bgCheckFlags))
+	end
+	logLine(string.format("B (held item action %d)", held))
+	-- B and the stick forward for a game frame (3 emulated frames)
+	for _ = 1, 3 do
+		joypad.set(stab and { B = true, Z = true } or { B = true }, 1)
+		joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = STICK_FORWARD }, 1)
+		emu.frameadvance()
+	end
+	releaseStick()
+	-- then nothing held; each game frame of the action logged. `after` is
+	-- where it leaves him (its frames, and one more)
+	local n = (t.actionFrames or 3) + 2
+	local gf = read_u32(K.play + K.gameplayFrames)
+	for _ = 1, n * 3 + 6 do
+		if stab then joypad.set({ Z = true }, 1) end
+		emu.frameadvance()
+		local g = read_u32(K.play + K.gameplayFrames)
+		if g ~= gf then
+			gf = g
+			logLine("lunge")
+		end
+		if g - frames0 >= n then break end
+	end
+	r.after = readVec(K.player + K.pos)
+	local mwa = mainmemory.read_s8(K.player + K.meleeWeaponAnimation)
+	for i = 1, SETTLE_FRAMES do
+		emu.frameadvance()
+		if i % 3 == 0 and i <= 18 then logLine("settle") end
+	end
+	r.final = readVec(K.player + K.pos)
+	if RECORD then for _ = 1, RECORD_BUFFER do emu.frameadvance() end end
+	if mwa == -1 then
+		r.status = "no attack"
+		r.log[#r.log + 1] = "B didn't start an attack: the savestate needs Link on foot, weapon out, no menus or text"
+		return r
+	end
+	if mwa ~= ACTION_MWA[t.actionKey] then
+		r.status = "wrong attack"
+		r.log[#r.log + 1] = string.format("the game did attack %d, the test is %s (%d): a 1h / 2h weapon mismatch, or the stick wasn't forward (STICK_FORWARD, the camera) - or for a stab, Z-targeting", mwa, t.actionKey, ACTION_MWA[t.actionKey])
+		return r
+	end
+	if dist3(r.start, t.prev) > 1 then
+		r.status = "setup"
+		table.insert(r.log, 1, "start (should be prev) " .. fmt(r.start))
+		return r
+	end
+	r.status = judge(t, r.after, r.final)
+	return r
+end
+
 -- One test: sets up the frame, lets it run, and says where Link ended up.
 local function runTest(t, mode)
 	memorysavestate.loadcorestate(base)
 	local r = { test = t }
+	if t.action then return runActionTest(t, r) end
 	-- Slope clips (kind "slope", clipfinder slope.h) are always "move": the
 	-- clip is the game's own floor check lifting Link after the move, and can
 	-- take a second frame's move (speed2). (A hook set for the other tests
@@ -1037,11 +1236,17 @@ end
 -- that start, yaw and speed, which is what the grid is about)
 local mode = T.csvGrids and "move" or MODE
 local first
--- (the mode is tried on the first test that isn't a slope or ground clip:
--- those always run in "move" mode, so they'd pass any hook; all of them: "move")
+-- (the mode is tried on the first test that isn't a slope or ground clip or
+-- an action clip: those don't use the hooks, so they'd pass any; all of them: "move")
 local probe = 1
-while queue[probe] and (queue[probe].kind == "slope" or queue[probe].kind == "ground") do probe = probe + 1 end
-if not queue[probe] then probe = 1; mode = "move" end
+while queue[probe] and (queue[probe].kind == "slope" or queue[probe].kind == "ground" or queue[probe].action) do probe = probe + 1 end
+if not queue[probe] then
+	probe = 1
+	-- (only action tests: they run their own way)
+	local allAction = true
+	for _, t in ipairs(queue) do if not t.action then allAction = false end end
+	mode = allAction and "action" or "move"
+end
 if mode == "auto" then
 	for _, m in ipairs({ "exec", "read", "move" }) do
 		if (m == "exec" and not a1Reg) or (m == "read" and not pcReg) then
@@ -1088,13 +1293,17 @@ for i, t in ipairs(queue) do
 			print(string.format("  %d / %d: %s x %s z %s speed %s (expect %s): %s", i, #queue, t.kind,
 				t.csv.header[t.xi], t.csv.rows[t.zi].label, t.speed, t.expectClip and "Yes" or "No", status))
 		else
-			print(string.format("  %d / %d: %s %s TRI %d -> %d: %s", i, #queue, t.kind, t.type, t.pusher, t.crossed, r.status))
+			print(string.format("  %d / %d: %s%s %s TRI %d -> %d: %s", i, #queue, t.action and (t.action .. ", ") or "", t.kind, t.type, t.pusher, t.crossed, r.status))
 			-- the test's move: where Link starts, angle, speedXZ and the frame's y
 			-- velocity (after gravity: ground clips' vy, else from the drop)
 			local yaw, speed = r.yaw or t.yaw, r.speed or t.speed
 			local vy = t.vy or (t.next[2] - t.prev[2]) / 1.5
+			if t.action then
+				print(string.format("      start %s  facing 0x%04X  %s", fmt(t.prev), t.facing, t.action))
+			else
 			print(string.format("      start %s  angle %s  linear %s  y vel %.9g", fmt(t.prev),
 				yaw and string.format("0x%04X", yaw % 0x10000) or "-", speed and string.format("%.9g", speed) or "-", vy))
+			end
 		end
 		if worked(r.status) then pairDone[pairKey] = true end
 	end
@@ -1137,6 +1346,10 @@ end
 -- start, yaw and speed (the move the viewer found).
 local function setupStr(r)
 	local t = r.test
+	if t.action then
+		return string.format("start %s  facing 0x%04X  %s (B, stick forward%s)", fmt(r.start or t.prev), t.facing, t.action,
+			t.actionKey:find("stab") and ", Z held" or "")
+	end
 	local yaw, speed = r.yaw or t.yaw, r.speed or t.speed
 	if not yaw then
 		local dx, dz = t.next[1] - t.prev[1], t.next[3] - t.prev[3]
@@ -1230,8 +1443,8 @@ else
 			local t = groups[gi].first
 			groupsWorked = groupsWorked + 1
 			totalWorked = totalWorked + b.worked
-			line(string.format("  %s %s: TRI %d through TRI %d - %d of %d tried (%d points in the group)",
-				t.kind, t.type, t.pusher, t.crossed, b.worked, b.tried, #groups[gi].tests))
+			line(string.format("  %s%s %s: TRI %d through TRI %d - %d of %d tried (%d points in the group)",
+				t.action and (t.action .. ", ") or "", t.kind, t.type, t.pusher, t.crossed, b.worked, b.tried, #groups[gi].tests))
 			for _, r in ipairs(b.hits) do
 				line(string.format("    [%s] prev %s -> next %s  => after %s, final %s",
 					r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final)))
@@ -1257,12 +1470,13 @@ else
 			local t = groups[gi].first
 			local st = {}
 			for k, v in pairs(b.statuses) do st[#st + 1] = k .. " " .. v end
-			line(string.format("  %s %s: TRI %d through TRI %d - 0 of %d (%s)",
-				t.kind, t.type, t.pusher, t.crossed, b.tried, table.concat(st, ", ")))
+			line(string.format("  %s%s %s: TRI %d through TRI %d - 0 of %d (%s)",
+				t.action and (t.action .. ", ") or "", t.kind, t.type, t.pusher, t.crossed, b.tried, table.concat(st, ", ")))
 			for _, r in ipairs(results) do
 				if r.test.group == gi and r.after then
 					line(string.format("    [%s] prev %s -> next %s  => after %s, final %s (expected %s)",
 						r.status, fmt(r.test.prev), fmt(r.test.next), fmt(r.after), fmt(r.final), fmt(r.test.expect)))
+					if r.test.action then line("        " .. setupStr(r)) end
 					for _, l in ipairs(r.log or {}) do line("        " .. l) end
 				end
 			end

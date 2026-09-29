@@ -33,6 +33,7 @@ void Model::build(const vector<Tri>& tris, int numPolygons) {
 		polys[t.id].loadOrVoid = exitIndex != 0 || floorProp == 5 || floorProp == 12 || floorProp == 13;
 		polys[t.id].exitIndex = (int)exitIndex;
 		polys[t.id].floorProp = (int)floorProp;
+		polys[t.id].slide = (t.surf1 >> 4 & 3) == 1;
 	}
 	pairWalls = colCtx.subWalls;
 	auto sorted = [&](const vector<int>& ids, bool walls) {
@@ -504,4 +505,43 @@ bool Model::isInBounds(Scratch& s, const V3& pos, bool floorsBlock) const {
 		return false;
 	}
 	return true;
+}
+
+static const double WALK_STEP = 10, WALK_RADIUS = 600;
+
+bool Model::walkUnreachable(Scratch& s, const V3& end, const V3& from) const {
+	auto q5 = [](double v) { return (uint64_t)(int64_t)std::floor(v / 5) & 0xFFFF; };
+	const uint64_t key = q5(end.x) | q5(end.y) << 16 | q5(end.z) << 32 | (q5(from.x) ^ q5(from.z) * 31) << 48;
+	auto it = s.unreachable.find(key);
+	if (it != s.unreachable.end()) return it->second;
+	if (s.unreachable.size() > 200000) s.unreachable.clear();
+	// A flood fill from `from`: a step to a neighbouring grid point is walkable
+	// if no wall (either face, dynapolys too) is in the way 50 above the floor
+	// and there's a floor there at most 50 up (small steps) or any way down
+	// (drops, up to 300)
+	struct Node { int i, j; double y; };
+	std::set<std::tuple<int, int, int>> seen;
+	vector<Node> todo = { { 0, 0, from.y } };
+	seen.insert({ 0, 0, (int)std::floor(from.y / 30) });
+	const int R = (int)(WALK_RADIUS / WALK_STEP);
+	bool reached = false;
+	for (size_t k = 0; k < todo.size() && !reached; k++) {
+		const Node p = todo[k];
+		const double px = from.x + p.i * WALK_STEP, pz = from.z + p.j * WALK_STEP;
+		if (std::hypot(px - end.x, pz - end.z) <= WALK_STEP && std::fabs(p.y - end.y) < 30) { reached = true; break; }
+		if (p.i * p.i + p.j * p.j >= R * R) continue;
+		for (int di = -1; di <= 1; di++) for (int dj = -1; dj <= 1; dj++) {
+			if (!di && !dj) continue;
+			const int qi = p.i + di, qj = p.j + dj;
+			const double qx = from.x + qi * WALK_STEP, qz = from.z + qj * WALK_STEP;
+			const double h = F(p.y + 50);
+			if (lineHit(s, { px, h, pz }, { qx, h, qz }, LOOSE, false, false, true)) continue;
+			auto fy = floorCheck(qx, qz, h);
+			if (!fy || *fy < p.y - 300) continue;
+			if (!seen.insert({ qi, qj, (int)std::floor(*fy / 30) }).second) continue;
+			todo.push_back({ qi, qj, *fy });
+		}
+	}
+	s.unreachable.emplace(key, !reached);
+	return !reached;
 }

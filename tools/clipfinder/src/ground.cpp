@@ -70,7 +70,7 @@ std::optional<Clip> groundFrame(const Model& m, Scratch& s, const V3& start, int
 		if (m.polys[crossed].bg < 0 && m.crossedWall(s, { start.x, s2.y, start.z }, s2, true) >= 0) return std::nullopt;
 		c.res = { res.x, y1, res.z };
 		c.end = { s2.x, y1, s2.z };
-		if (!m.endCounts(s, crossed, c.end)) return std::nullopt;
+		if (!m.endCounts(s, crossed, c.end, &start)) return std::nullopt;
 	} else {
 		// in the air under the ground (or nothing below at all): falls
 		crossed = m.crossedWall(s, { start.x, res.y, start.z }, res);

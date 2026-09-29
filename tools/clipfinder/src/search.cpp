@@ -413,7 +413,7 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 				auto end = landing(m, s, f->res, cp.floorY, noFloor, clip->crossed);
 				if (!end) continue;
 				clip->end = *end;
-			} else if (!m.endCounts(s, clip->crossed, clip->end)) {
+			} else if (!m.endCounts(s, clip->crossed, clip->end, &prev)) {
 				continue;
 			}
 			found = CrossFound{ *clip, prev, next, f->res, { f->hit.x, next.y, f->hit.z }, noFloor, yaw, speed };
@@ -452,7 +452,7 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 	auto clip = clipFromFrame(m, s, p, res, trace, LOOSE, floorPt.y);
 	if (!m.isInBounds(s, floorPt, true)) return std::nullopt;
 	if (clip) {
-		if (!m.endCounts(s, clip->crossed, clip->end)) return std::nullopt;
+		if (!m.endCounts(s, clip->crossed, clip->end, &floorPt)) return std::nullopt;
 	} else {
 		// Not through standing still afterwards: maybe with the stick held one
 		// more frame, which needs the move (below). Only if he went through a
@@ -477,7 +477,7 @@ static std::optional<Clip> standingClip(const Model& m, Scratch& s, const V3& fl
 			V3 wres = m.sphereStep(next, LOOSE, &tr, &prev);
 			const Move mv{ yaw, speed };
 			auto wclip = clipFromFrame(m, s, prev, wres, tr, LOOSE, prev.y, &mv);
-			if (!wclip || !m.endCounts(s, wclip->crossed, wclip->end) || !m.isInBounds(s, prev, true)) continue;
+			if (!wclip || !m.endCounts(s, wclip->crossed, wclip->end, &prev) || !m.isInBounds(s, prev, true)) continue;
 			PushList st;
 			V3 sres = m.sphereStep(next, STRICT, &st, &prev);
 			// acute: it clips without the extended planes, and the push starts
@@ -883,6 +883,12 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		if (!c.cross && !keep.insert(k).second) continue;
 		out.push_back(c);
 	}
+	// Where it ends in bounds (the JSON's "inBounds")
+	{
+		Scratch s;
+		s.stamp.assign(m.polys.size(), 0);
+		for (Clip& c : out) c.inBounds = !c.endNoFloor && m.isInBounds(s, c.end);
+	}
 	// One category per wall pair: acute if any of its points is
 	std::set<std::pair<int, int>> acute;
 	for (const Clip& c : out) if (c.acutePoint && c.kind < 2) acute.insert({ c.pusher, c.crossed });
@@ -899,10 +905,10 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 
 size_t thinClips(vector<Clip>& clips, int n) {
 	if (n <= 0) return 0;
-	std::map<std::tuple<int, int, int, bool, bool>, vector<size_t>> groups;
+	std::map<std::tuple<int, int, int, bool, bool, int>, vector<size_t>> groups;
 	for (size_t i = 0; i < clips.size(); i++) {
 		const Clip& c = clips[i];
-		groups[{ c.pusher, c.crossed, c.kind, c.cross, c.drop > 0 }].push_back(i);
+		groups[{ c.pusher, c.crossed, c.kind, c.cross, c.drop > 0, c.action }].push_back(i);
 	}
 	vector<bool> keep(clips.size(), false);
 	for (auto& [k, idx] : groups) {

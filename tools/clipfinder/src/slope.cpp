@@ -46,7 +46,7 @@ std::optional<Clip> slopeFrame(const Model& m, Scratch& s, const V3& start, int 
 		// through a dynapoly that's what the clip is for (clipFromFrame)
 		if (m.polys[crossed].bg < 0 && m.crossedWall(s, { start.x, s2.y, start.z }, s2, true) >= 0) return false;
 		end = { s2.x, landY, s2.z };
-		return m.endCounts(s, crossed, end);
+		return m.endCounts(s, crossed, end, &start);
 	};
 	Clip c;
 	c.kind = 2;

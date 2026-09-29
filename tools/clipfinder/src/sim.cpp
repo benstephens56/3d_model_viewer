@@ -1,4 +1,5 @@
 #include "sim.h"
+#include "action.h"
 
 static const char* P(const V3& v) {
 	static char b[4][96];
@@ -11,14 +12,24 @@ static const char* P(const V3& v) {
 // SPEED as "15/7": a frame of walking per speed (the same yaw), each ending
 // with the floor check, then two frames standing still. For slope clips
 // (slope.h), where the frame after the one through the wall can matter.
-static int runSimFrames(const Model& m, const V3& start, int yaw, const vector<double>& speeds) {
+// moves: each frame's posNext from where Link is (a walking frame at a yaw and speed, or an action frame)
+// swing (action frames): off the ground on such a frame, Link is put back at
+// the frame's start and noSpeed set (action.h ActionFrame::swing)
+static int runSimFrames(const Model& m, const V3& start, const vector<std::function<V3(const V3&)>>& moves,
+	const vector<bool>& swing = {}, bool* noSpeed = nullptr) {
 	Scratch s;
 	s.stamp.assign(m.polys.size(), 0);
-	printf("start %s  yaw 0x%04X, in bounds: %s\n", P(start), yaw, m.isInBounds(s, start, true) ? "yes" : "NO");
+	printf("start %s, in bounds: %s\n", P(start), m.isInBounds(s, start, true) ? "yes" : "NO");
+	{
+		int fp = -1;
+		auto fy = m.floorCheck(start.x, start.z, F(start.y + 1), &fp);
+		if (fy && fp >= 0 && m.polys[fp].slide)
+			printf("  on %s, a slide floor (floor effect 1): Link slides off it, or is pushed down it - not a start the scan uses\n", m.polyName(fp).c_str());
+	}
 	V3 cur = start;
-	for (size_t i = 0; i < speeds.size(); i++) {
-		V3 next = moveStep(cur, yaw, F(speeds[i]));
-		printf("frame %zu: speed %.9g, posNext %s\n", i + 1, F(speeds[i]), P(next));
+	for (size_t i = 0; i < moves.size(); i++) {
+		V3 next = moves[i](cur);
+		printf("frame %zu: move (%.9g, %.9g), posNext %s\n", i + 1, F(next.x - cur.x), F(next.z - cur.z), P(next));
 		PushList trace;
 		V3 res;
 		if (auto f = lineFrame(m, s, cur, next, LOOSE)) {
@@ -29,6 +40,11 @@ static int runSimFrames(const Model& m, const V3& start, int yaw, const vector<d
 		for (const Push& t : trace) if (!t.line) printf("  %s pushes %s -> %s\n", m.polyName(t.poly).c_str(), P(t.from), P(t.to));
 		int floorPoly = -1;
 		auto fy = m.floorCheck(res.x, res.z, F(cur.y + 50), &floorPoly);
+		if ((!fy || F(*fy - res.y) < -11) && i < swing.size() && swing[i]) {
+			printf("  off the ground with the sword swing active: put back at %s, speedXZ zeroed\n", P(cur));
+			if (noSpeed) *noSpeed = true;
+			continue;
+		}
 		if (!fy) { printf("  no floor under %s at all: falls out\n", P(res)); return 0; }
 		if (F(*fy - res.y) < -11) { printf("  floor %s at y %.9g is more than 11 below: falls (not modelled further)\n", m.polyName(floorPoly).c_str(), *fy); return 0; }
 		cur = { res.x, *fy, res.z };
@@ -79,15 +95,47 @@ static int runSimGround(const Model& m, Scratch& s, const V3& start, int yaw, do
 	return 0;
 }
 
-int runSim(const Model& m, const string& simArg) {
+int runSim(const Model& m, const string& simArg, const string& game, const string& formUpper) {
+	{
+		// X,Y,Z,FACING,@ACTION: an action's frames (action.h) from facing FACING
+		char act[64] = {}, yawS[32] = {};
+		double x, y, z;
+		if (sscanf(simArg.c_str(), "%lf,%lf,%lf,%31[^,],@%63s", &x, &y, &z, yawS, act) == 5) {
+			string err;
+			vector<int> ai = parseActions(game, act, err);
+			// (the one for this form: OoT adult and child share keys)
+			ai.erase(std::remove_if(ai.begin(), ai.end(), [&](int i) { return !actionForForm(ACTIONS[i], formUpper); }), ai.end());
+			if (ai.size() != 1) { fprintf(stderr, "--sim: %s\n", err.empty() ? "one action, e.g. @1h-slash" : err.c_str()); return 2; }
+			const Action& a = ACTIONS[ai[0]];
+			const int facing = (int)strtol(yawS, nullptr, 0) & 0xFFFF;
+			const V3 start = { F(x), F(y), F(z) };
+			printf("%s, facing 0x%04X\n", a.name.c_str(), facing);
+			vector<std::function<V3(const V3&)>> moves;
+			vector<bool> swing;
+			bool noSpeed = false;
+			for (const ActionFrame& f : a.frames) {
+				moves.push_back([&a, f, facing, &noSpeed](const V3& p) { return actionStep(a, f, p, facing, noSpeed); });
+				swing.push_back(f.swing);
+			}
+			runSimFrames(m, start, moves, swing, &noSpeed);
+			Scratch s;
+			s.stamp.assign(m.polys.size(), 0);
+			auto c = actionClip(m, s, start, facing, ai[0]);
+			if (!c) printf("no clip\n");
+			else printf("CLIP: %s %s through %s (%s), ends %s\n", m.polyName(c->pusher).c_str(), c->kind == 2 ? "(the floor check) lifts Link" : "pushes Link",
+				m.polyName(c->crossed).c_str(), c->kind == 2 ? "slope" : c->acutePoint ? "acute point" : "needs the extended planes", P(c->end));
+			return 0;
+		}
+	}
 	{
 		// SPEED/SPEED/...: several frames
 		char speeds[256] = {}, yawS[32] = {};
 		double x, y, z;
 		if (sscanf(simArg.c_str(), "%lf,%lf,%lf,%31[^,],%255[^,]", &x, &y, &z, yawS, speeds) == 5 && strchr(speeds, '/')) {
-			vector<double> sp;
-			for (char* t = strtok(speeds, "/"); t; t = strtok(nullptr, "/")) sp.push_back(atof(t));
-			return runSimFrames(m, { F(x), F(y), F(z) }, (int)strtol(yawS, nullptr, 0) & 0xFFFF, sp);
+			vector<std::function<V3(const V3&)>> sp;
+			const int yaw = (int)strtol(yawS, nullptr, 0) & 0xFFFF;
+			for (char* t = strtok(speeds, "/"); t; t = strtok(nullptr, "/")) { const double v = atof(t); sp.push_back([yaw, v](const V3& p) { return moveStep(p, yaw, F(v)); }); }
+			return runSimFrames(m, { F(x), F(y), F(z) }, sp);
 		}
 	}
 	double sx, sy, sz, speed, drop = 0;
@@ -118,6 +166,7 @@ int runSim(const Model& m, const string& simArg) {
 		auto fy = m.floorCheck(start.x, start.z, F(start.y + 1), &fp);
 		if (fy && fp >= 0) printf("start's floor: %s at y %.9g, exit %d, floor property %d%s\n", m.polyName(fp).c_str(), *fy,
 			m.polys[fp].exitIndex, m.polys[fp].floorProp, m.polys[fp].loadOrVoid ? " (a loading zone / void plane: the scan leaves out clips starting here)" : "");
+		if (fy && fp >= 0 && m.polys[fp].slide) printf("  a slide floor (floor effect 1): Link slides off it, or is pushed down it - not a start the scan uses\n");
 	}
 	if (F(m.checkHeight + F(next.y - start.y)) < 5) printf("checkHeight + dy < 5: the game's line test runs at the feet, floors included (not modelled)\n");
 	V3 res;
@@ -187,9 +236,10 @@ int printTris(const Model& m, const string& ids) {
 		a = b + 1;
 		if (id < 0 || id >= (int)m.polys.size() || !m.polys[id].exists) { printf("%s: no such poly\n", m.polyName(id).c_str()); continue; }
 		const Poly& q = m.polys[id];
-		printf("%s: %s  (%g, %g, %g) (%g, %g, %g) (%g, %g, %g)  normal (%.4f, %.4f, %.4f)  dist %g  exit %d  floor property %d%s\n", m.polyName(id).c_str(),
+		printf("%s: %s  (%g, %g, %g) (%g, %g, %g) (%g, %g, %g)  normal (%.4f, %.4f, %.4f)  dist %g  exit %d  floor property %d%s%s\n", m.polyName(id).c_str(),
 			q.isWall ? "wall" : q.isFloor ? "floor" : "ceiling", q.ax, q.ay, q.az, q.bx, q.by, q.bz, q.cx, q.cy, q.cz,
-			q.nx / q.nMag, q.ny / q.nMag, q.nz / q.nMag, q.dist, q.exitIndex, q.floorProp, q.loadOrVoid ? "  (loading zone / void)" : "");
+			q.nx / q.nMag, q.ny / q.nMag, q.nz / q.nMag, q.dist, q.exitIndex, q.floorProp, q.loadOrVoid ? "  (loading zone / void)" : "",
+			q.slide ? "  (slide floor)" : "");
 	}
 	return 0;
 }

@@ -15,6 +15,7 @@ struct Clip {
 	bool acutePoint = false;
 	bool cross = false;
 	bool hold = false;    // only with the stick held one more frame (ClipResult::hold)
+	bool inBounds = false; // ends in bounds (past a dynapoly, or somewhere he couldn't walk to: Model::endCounts)
 	int drop = 0;         // falling: posNext this far below the floor (0 walking)
 	int pusher = -1, crossed = -1;
 	V3 from, prev, next, res, end;
@@ -26,6 +27,12 @@ struct Clip {
 	double speed = 0;
 	double speed2 = 0;    // slope clips: a second frame's speed (same yaw) before standing still, 0 none
 	double vy = 0;        // ground clips: velocity.y for the frame (posNext.y = prev.y + vy x 1.5)
+	// action clips (action.h): the action (ACTIONS index, -1 none), the way
+	// Link faces at the start, and where each of its frames leaves him (after
+	// the floor check). yaw / speed are then the clip frame's move.
+	int action = -1;
+	int facing = 0;
+	vector<V3> frames;
 	// --min-speed: the slowest move from a standable start that does it
 	// (reachability below); reachDone and no reach = none found
 	bool reachDone = false, hasReach = false;

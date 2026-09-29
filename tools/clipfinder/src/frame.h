@@ -47,7 +47,8 @@ std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3& prev, 
 // crossed: the wall clipped through; a dynapoly one counts wherever he lands (Model::endCounts)
 std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor, int crossed = -1);
 
-// wall_push_clips.js standSpot: where Link can stand still near (x, z).
+// wall_push_clips.js standSpot: where Link can stand still near (x, z). Not on
+// a slide floor (Poly::slide).
 std::optional<V3> standSpot(const Model& m, double x, double z, double floorY);
 
 // standSpot through the thread's cache (Scratch::standSpots).

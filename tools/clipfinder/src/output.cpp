@@ -1,4 +1,5 @@
 #include "output.h"
+#include "action.h"
 
 ////////////////////////////////////////
 // Output
@@ -57,6 +58,8 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 		if (c.endNoFloor) o << ",\"endNoFloor\":true";
 		// only with the stick held one more frame (the same yaw and speed)
 		if (c.hold) o << ",\"hold\":true";
+		// ends in bounds: past a dynapoly, or somewhere he couldn't walk to
+		if (c.inBounds) o << ",\"inBounds\":true";
 		if (c.hasFloorY) o << ",\"floorY\":" << num(c.floorY);
 		if (c.cross) {
 			o << ",\"yaws\":[";
@@ -68,6 +71,20 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 		if (c.speed2 > 0) o << ",\"speed2\":" << num(c.speed2);
 		// ground clips: velocity.y for the frame
 		if (c.kind == 3) o << ",\"vy\":" << num(c.vy);
+		// action clips: the action, Link's facing at the start, and where each of its frames leaves him
+		if (c.action >= 0) {
+			o << ",\"action\":" << jsonStr(ACTIONS[c.action].name) << ",\"actionKey\":" << jsonStr(ACTIONS[c.action].key) << ",\"facing\":" << c.facing << ",\"actionFrames\":[";
+			const Action& a = ACTIONS[c.action];
+			for (size_t k = 0; k < a.frames.size(); k++) {
+				double sp;
+				int ang;
+				actionFrameMove(a, a.frames[k], sp, ang);
+				o << (k ? "," : "") << "[" << num(F(sp)) << "," << (int16_t)ang << "]";
+			}
+			o << "],\"frames\":[";
+			for (size_t k = 0; k < c.frames.size(); k++) o << (k ? "," : "") << vec(c.frames[k]);
+			o << "]";
+		}
 		// --min-speed: the slowest move that does it, or null for none
 		if (c.reachDone) {
 			if (c.hasReach) o << ",\"reach\":{\"speed\":" << num(c.reachSpeed) << ",\"yaw\":" << c.reachYaw << ",\"start\":" << vec(c.reachStart) << "}";

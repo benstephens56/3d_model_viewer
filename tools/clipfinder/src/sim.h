@@ -9,7 +9,8 @@
 // whether it's a wall push clip or a slope clip. SPEED as "15/7": a frame per
 // speed (same yaw), each with its floor check, then two standing still.
 // Returns the exit code (2 for a bad --sim value).
-int runSim(const Model& m, const string& simArg);
+// X,Y,Z,FACING,@ACTION: that action (action.h) from a standing start, e.g. @1h-slash (the form's own).
+int runSim(const Model& m, const string& simArg, const string& game, const string& formUpper);
 
 // --tri: each poly's vertices, normal, plane distance and type (dynapolys by their scan ids).
 int printTris(const Model& m, const string& ids);

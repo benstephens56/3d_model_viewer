@@ -51,6 +51,7 @@ bool parseScene(const vector<uint8_t>& buf, const string& game, ColHeader& ch, v
 		t.d = bes16(buf, p + 14);
 		const uint16_t type = be16(buf, p);
 		if (surfList >= 0 && (size_t)surfList + (size_t)type * 8 + 4 <= buf.size()) t.surf0 = be32(buf, (size_t)surfList + (size_t)type * 8);
+		if (surfList >= 0 && (size_t)surfList + (size_t)type * 8 + 8 <= buf.size()) t.surf1 = be32(buf, (size_t)surfList + (size_t)type * 8 + 4);
 		tris.push_back(t);
 	}
 	return true;

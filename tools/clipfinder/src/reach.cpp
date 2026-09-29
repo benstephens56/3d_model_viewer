@@ -44,7 +44,7 @@ void reachability(const Model& m, Scratch& s, Clip& c) {
 				auto clip = clipFromFrame(m, s, start, f->res, f->trace, LOOSE, c.drop > 0 ? NAN : start.y, &mv);
 				if (!clip || clip->crossed != c.crossed) continue;
 				bool noFloor;
-				if (c.drop > 0 ? !landing(m, s, f->res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end)) continue;
+				if (c.drop > 0 ? !landing(m, s, f->res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end, &start)) continue;
 			} else {
 				// nothing in the way, then the frame's pushes clip through the same wall
 				if (lineFrame(m, s, start, next, LOOSE)) continue;
@@ -54,7 +54,7 @@ void reachability(const Model& m, Scratch& s, Clip& c) {
 				auto clip = clipFromFrame(m, s, start, res, tr, LOOSE, c.drop > 0 ? NAN : start.y, &mv);
 				if (!clip || clip->crossed != c.crossed) continue;
 				bool noFloor;
-				if (c.drop > 0 ? !landing(m, s, res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end)) continue;
+				if (c.drop > 0 ? !landing(m, s, res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end, &start)) continue;
 			}
 			if (!m.isInBounds(s, start, true)) continue;
 			have = true;
@@ -153,7 +153,7 @@ static std::optional<V3> walkFrameClips(const Model& m, Scratch& s, const V3& st
 		bool noFloor;
 		return landing(m, s, res, start.y, noFloor, clip->crossed);
 	}
-	if (!m.endCounts(s, clip->crossed, clip->end)) return std::nullopt;
+	if (!m.endCounts(s, clip->crossed, clip->end, &start)) return std::nullopt;
 	return clip->end;
 }
 

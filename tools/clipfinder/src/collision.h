@@ -24,6 +24,11 @@ struct Poly {
 	// respawn, 12 void out, MM 13 too); dynapolys: never (the export has no surface types)
 	bool loadOrVoid = false;
 	int exitIndex = 0, floorProp = 0; // (the static polys' SurfaceType fields)
+	// a slide floor: SurfaceType_GetFloorEffect (data[1] >> 4 & 3) == FLOOR_EFFECT_1.
+	// Player_HandleSlopes (OoT and MM): on one, Link slides down it (Player_Action_SlideOnSlope),
+	// or facing up it, gets pushed down it (pushedSpeed) - he can't stand still there.
+	// Dynapolys: never (the export has no surface types)
+	bool slide = false;
 };
 
 // One dynapoly actor's collision as DynaPoly_ExpandSRT leaves it (dyna.cpp
@@ -141,6 +146,8 @@ struct Scratch {
 		}
 	};
 	std::unordered_map<SpotKey, std::optional<V3>, SpotHash> standSpots;
+	// Model::walkUnreachable results, keyed on the end and start spots (5 units)
+	std::unordered_map<uint64_t, bool> unreachable;
 
 	vector<uint32_t> stamp;
 	uint32_t curStamp = 0;
@@ -227,10 +234,22 @@ struct Model {
 	// check height, on its back side and within the triangle's span (so not
 	// landed on top of it: two touching crates, pushed from one into the other
 	// while falling, he just lands on the other's top).
-	bool endCounts(Scratch& s, int crossed, const V3& end) const {
+	// from (the frame's start, when known): also counts if he ends in bounds
+	// but somewhere he couldn't walk to from where he started
+	// (walkUnreachable): another room, a ledge, or past a dynapoly (MM Stone
+	// Tower Temple: past a sun block into the alcove behind it).
+	bool endCounts(Scratch& s, int crossed, const V3& end, const V3* from = nullptr) const {
 		if (crossed >= 0 && polys[crossed].bg >= 0 && behindPoly(polys[crossed], end)) return true;
-		return !isInBounds(s, end);
+		if (!isInBounds(s, end)) return true;
+		return from && walkUnreachable(s, end, *from);
 	}
+	// Whether Link couldn't walk from `from` to `end`: a flood fill from
+	// `from` on a WALK_STEP (10) grid out to WALK_RADIUS (600) - steps up to
+	// 50, drops up to 300, walls (either face, dynapolys too) more than 50 tall
+	// block - never gets within a step of it. Climbing, jumping, hookshots,
+	// ... aren't modelled, and a way round further than 600 counts as none.
+	// Cached per spot (Scratch::unreachable).
+	bool walkUnreachable(Scratch& s, const V3& end, const V3& from) const;
 	bool behindPoly(const Poly& p, const V3& pos) const;
 
 	bool dynaPairsOnly = false; // --dyna-only: wall pairs with a dynapoly wall in them

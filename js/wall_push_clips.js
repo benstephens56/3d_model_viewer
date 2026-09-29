@@ -65,6 +65,9 @@ const LOW_EXTENDED_COLOR = 0x30e0ff;
 const LOW_COLOR = 0x30c8ff; // falling clips from older files, not split by category
 const SLOPE_COLOR = 0xff90d0; // slope clips (clipfinder slope.h)
 const GROUND_COLOR = 0xd4a017; // ground clips (clipfinder ground.h)
+const ACTION_1H_COLOR = 0x40e0ff; // action clips: a sword lunge's own move (clipfinder action.h), one-handed
+const ACTION_2H_COLOR = 0xb070ff; // and two-handed (OoT Biggoron / Giant's Knife, MM Great Fairy's Sword)
+const ACTION_STICK_COLOR = 0xc8a060; // and the Deku stick
 const PUSHER_COLOR = 0xffd000;
 
 const SNORMAL_FLOOR = Math.trunc(0.5 * 32767);   // COLPOLY_SNORMAL(0.5f)
@@ -942,6 +945,7 @@ const hex4 = n => "0x" + (n & 0xFFFF).toString(16).toUpperCase().padStart(4, "0"
 const slopeReach = c => ({ speed: Math.max(c.speed, c.speed2 ?? 0), yaw: c.yaw, start: c.prev });
 
 function describeReach(c) {
+    if (c.action) return `  reachable: the lunge is the move (no stick speed needed)`;
     if (c.reach === undefined) return `  reachability: tick "Reachable only" to work it out`;
     if (!c.reach) return `  not reachable from a standable start (at up to speed ${REACH_DIST / SPEED_RATE})`;
     const r = c.reach;
@@ -951,18 +955,20 @@ function describeReach(c) {
 function describeClip(g, c, checkHeight) {
     const form = g.form ? `  form: ${g.form} (radius ${g.model.radius}, check height ${+checkHeight.toPrecision(7)})\n` : "";
     const lines = describeClipLines(g, c, checkHeight).split("\n");
-    return [lines[0], form + lines.slice(1).join("\n")].join("\n") + "\n" + describeReach(c);
+    // (clipfinder Model::endCounts: past a dynapoly, or somewhere he couldn't walk to from the start)
+    const inBounds = c.inBounds ? "\n  ends in bounds, somewhere Link couldn't walk to from his start (past a dynapoly, onto a ledge, into another room)" : "";
+    return [lines[0], form + lines.slice(1).join("\n")].join("\n") + inBounds + "\n" + describeReach(c);
 }
 
 const CAT_TITLES = {
     acute: "acute angle", extended: "extended plane only",
     "low-acute": "falling, acute angle", "low-extended": "falling, extended plane only", low: "falling",
-    slope: "slope", ground: "ground",
+    slope: "slope", ground: "ground", "action-1h": "action, one-handed", "action-2h": "action, two-handed", "action-stick": "action, Deku stick",
 };
 
 // What the wall pair's category means (none for older files' falling clips).
 function pairLine(g) {
-    if (g.cat === "low" || g.cat === "slope" || g.cat === "ground") return [];
+    if (g.cat === "low" || g.cat === "slope" || g.cat === "ground" || g.cat.startsWith("action")) return [];
     return [g.cat.endsWith("acute")
         ? `  wall pair: acute angle (at least one of its points clips with the extended planes removed)`
         : `  wall pair: extended plane only (every point needs ${polyLabel(g.pusher)}'s extended plane: its 1 unit tolerance, or Link beside it, past its edge)`];
@@ -992,6 +998,21 @@ function describeClipLinesBase(g, c, checkHeight) {
             `  the floor check puts him at ${fmt(c.res)}, behind ${polyLabel(g.crossed)}`,
             ...(c.speed2 !== undefined ? [`  standing still, ${polyLabel(g.crossed)} pushes him back out: move again the next frame (same yaw), ` +
                 `e.g. at speed ${speed(c.speed2)}, the slowest that does (it pushes him out while he's at most 4 behind it)`] : []),
+            c.end.noFloor ? `  then no floor under him: falls out of bounds` : `  ends at: ${fmt(c.end)} (out of bounds)`,
+        ].join("\n");
+    }
+    if (g.cat.startsWith("action")) {
+        // (clipfinder action.h: each frame of the lunge is a walking frame of
+        // the root motion, at facing + angle; then standing still)
+        const num = v => f32Str(v).split(" ")[0];
+        const how = c.kind === "slope" ? `the floor check lifts Link onto ${polyLabel(g.pusher)}, behind ${polyLabel(g.crossed)}`
+            : `${polyLabel(g.pusher)} pushes Link through ${polyLabel(g.crossed)} (${CAT_TITLES[c.kind] ?? c.kind})`;
+        return [
+            `ACTION CLIP (${c.action}): ${how}`,
+            `  stand still at ${fmt(c.prev)} (feet), facing ${hex4(c.facing)}, and do the ${c.action}`,
+            `  its frames (speed, angle from facing): ${(c.actionFrames ?? []).map(([v, a]) => `${num(v)} at ${a < 0 ? "-" : "+"}${hex4(Math.abs(a))}`).join(", then ")}`,
+            ...(c.frames ?? []).map((p, i) => `  after frame ${i + 1}: ${fmt(p)}`),
+            `  the clip frame moves at yaw ${hex4(c.yaw)}, speed ${num(c.speed)}: posNext ${fmt(c.next)}`,
             c.end.noFloor ? `  then no floor under him: falls out of bounds` : `  ends at: ${fmt(c.end)} (out of bounds)`,
         ].join("\n");
     }
@@ -1145,10 +1166,12 @@ const MODEL_NAMES = {
     acute: "Acute Angle Clips", extended: "Extended Plane Clips",
     "low-acute": "Low Wall Clips (falling, acute)", "low-extended": "Low Wall Clips (falling, extended)",
     low: "Low Wall Clips (falling)", slope: "Slope Clips", ground: "Ground Clips",
+    "action-1h": "Action Clips (1h lunges)", "action-2h": "Action Clips (2h lunges)", "action-stick": "Action Clips (Deku stick lunges)",
 };
 const CAT_COLORS = {
     acute: ACUTE_COLOR, extended: EXTENDED_COLOR,
     "low-acute": LOW_ACUTE_COLOR, "low-extended": LOW_EXTENDED_COLOR, low: LOW_COLOR, slope: SLOPE_COLOR, ground: GROUND_COLOR,
+    "action-1h": ACTION_1H_COLOR, "action-2h": ACTION_2H_COLOR, "action-stick": ACTION_STICK_COLOR,
 };
 
 // The marker rows added (one per kind, or per kind and form for imported
@@ -1193,11 +1216,16 @@ function exportJson(groups, info) {
             f.push(`"res":${vec(c.res)}`, `"end":${vec(c.end)}`);
             if (c.end.noFloor) f.push(`"endNoFloor":true`);
             if (c.hold) f.push(`"hold":true`);
+            if (c.inBounds) f.push(`"inBounds":true`);
             if (c.floorY !== undefined) f.push(`"floorY":${num(c.floorY)}`);
             if (c.yaws) f.push(`"yaws":[${c.yaws.join(",")}]`);
             if (c.speed !== undefined) f.push(`"yaw":${c.yaw & 0xFFFF}`, `"speed":${num(c.speed)}`);
             if (c.speed2 !== undefined) f.push(`"speed2":${num(c.speed2)}`);
             if (c.vy !== undefined) f.push(`"vy":${num(c.vy)}`);
+            if (c.action) {
+                f.push(`"action":${JSON.stringify(c.action)}`, `"actionKey":${JSON.stringify(c.actionKey)}`, `"facing":${c.facing & 0xFFFF}`,
+                    `"actionFrames":[${c.actionFrames.map(([v, a]) => `[${num(v)},${a}]`).join(",")}]`, `"frames":[${c.frames.map(vec).join(",")}]`);
+            }
             if (c.reach === null) f.push(`"reach":null`);
             else if (c.reach) f.push(`"reach":{"speed":${num(c.reach.speed)},"yaw":${c.reach.yaw & 0xFFFF},"start":${vec(c.reach.start)}}`);
             clips.push(`    {${f.join(",")}}`);
@@ -1422,7 +1450,9 @@ export function setupWallPushClipUI(scene) {
         const low = points("low-acute") + points("low-extended") + points("low");
         status.textContent = `${points("acute")} acute, ${points("extended")} extended-plane, ${low} low (falling` +
             (points("low") ? "" : `: ${points("low-acute")} acute, ${points("low-extended")} extended`) + `)` +
-            (points("slope") ? `, ${points("slope")} slope` : "") + (points("ground") ? `, ${points("ground")} ground` : "") + ` ` +
+            (points("slope") ? `, ${points("slope")} slope` : "") + (points("ground") ? `, ${points("ground")} ground` : "") +
+            (points("action-1h") ? `, ${points("action-1h")} 1h lunge` : "") + (points("action-2h") ? `, ${points("action-2h")} 2h lunge` : "") +
+            (points("action-stick") ? `, ${points("action-stick")} Deku stick lunge` : "") + ` ` +
             `clip points${byReach ? ` reachable at speed ${maxSpeed}` : ""}${byVy ? ` at |y velocity| ${maxVy} or less` : ""} (${last.note})`;
         window.wallPushClips = shown;
     };
@@ -1592,7 +1622,7 @@ export function setupWallPushClipUI(scene) {
                 const pusher = f.model.polys.get(c.pusher), crossed = f.model.polys.get(c.crossed);
                 if (!pusher || !crossed) continue;
                 // (the same point in two files: a static scan and a dynapoly one)
-                const key = `${f.form}|${c.pusher}|${c.crossed}|${c.cross}|${c.drop}|${c.from}|${c.prev}`;
+                const key = `${f.form}|${c.pusher}|${c.crossed}|${c.cross}|${c.drop}|${c.from}|${c.prev}|${c.action ?? ""}|${c.facing ?? ""}`;
                 if (seen.has(key)) continue;
                 seen.add(key);
                 const end = vec(c.end);
@@ -1604,11 +1634,14 @@ export function setupWallPushClipUI(scene) {
                 };
                 if (c.next) clip.next = vec(c.next);
                 if (c.hold) clip.hold = true;
+                if (c.inBounds) clip.inBounds = true;
                 if (c.floorY !== undefined) clip.floorY = c.floorY;
                 if (c.yaws) clip.yaws = c.yaws;
                 if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
                 if (c.speed2 !== undefined) clip.speed2 = c.speed2;
                 if (c.vy !== undefined) clip.vy = c.vy;
+                // clipfinder --actions: the lunge that does it
+                if (c.action) Object.assign(clip, { action: c.action, actionKey: c.actionKey, facing: c.facing, actionFrames: c.actionFrames, frames: c.frames.map(vec) });
                 // clipfinder --min-speed: the reachability already worked out
                 if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
                 clips.push(clip);
@@ -1618,10 +1651,17 @@ export function setupWallPushClipUI(scene) {
         // pair's points different ones (and "low" for all falling points), so a
         // pair with any acute point is acute; their falling points too, and
         // falling points of other pairs stay "low" (category not known)
-        const acutePairs = new Set(clips.filter(c => c.kind === "acute").map(c => `${c.form}:${c.pusher.id}:${c.crossed.id}`));
+        const acutePairs = new Set(clips.filter(c => c.kind === "acute" && !c.action).map(c => `${c.form}:${c.pusher.id}:${c.crossed.id}`));
         for (const c of clips) {
             // (slope clips have their own row: clipfinder slope.h)
             // (and ground clips: clipfinder ground.h)
+            // (action clips, of any kind: their own row, clipfinder action.h)
+            // (one row per 1h / 2h weapon: the key's "1h-" / "2h-")
+            if (c.action) {
+                const k = c.actionKey ?? "";
+                c.cat = k.startsWith("stick") ? "action-stick" : k.startsWith("2h") ? "action-2h" : "action-1h";
+                continue;
+            }
             if (c.kind === "slope" || c.kind === "ground") { c.cat = c.kind; continue; }
             const acute = acutePairs.has(`${c.form}:${c.pusher.id}:${c.crossed.id}`);
             if (c.kind === "low") { if (acute) c.kind = "acute"; }

@@ -18,6 +18,7 @@
 //   slope.h/.cpp     slope clips: the floor check lifting Link behind a wall
 //   ground.h/.cpp    ground clips: falling fast through the floor, under a wall
 //   reach.h/.cpp     --min-speed, --refine, --angles, --yaw
+//   action.h/.cpp    --actions: sword lunges doing the clip
 //   output.h/.cpp    the results JSON
 //   sim.h/.cpp       --sim
 //   main.cpp         options, forms and the loop over maps
@@ -40,6 +41,7 @@
 // the current dir if it has models/), --threads N, --radius R (overrides --form).
 // Every option is explained in README.md next to this file.
 
+#include "action.h"
 #include "dyna.h"
 #include "output.h"
 #include "reach.h"
@@ -107,6 +109,7 @@ int main(int argc, char** argv) {
 	double gridSpeed = 0;     // --speed (with --yaw): the CSV at exactly this speed
 	int clipKind = -1;        // --clip-kind: which of the pair's clips --refine / --yaw / --angles do (-1: auto, FrameSpec::type)
 	double fallDrop = 0;      // --drop: falling clips, posNext this far below the start (0: the pair's smallest that works)
+	string actionsArg;        // --actions all|KEY,...: sword lunge clips (action.h)
 	int threads = (int)std::max(1u, std::thread::hardware_concurrency());
 	for (int i = 1; i < argc; i++) {
 		string a = argv[i];
@@ -170,6 +173,7 @@ int main(int argc, char** argv) {
 			gridSpeed = std::stod(val());
 			if (!(gridSpeed > 0)) { fprintf(stderr, "--speed wants a speed > 0\n"); return 2; }
 		}
+		else if (a == "--actions") actionsArg = val();
 		else if (a == "--sim") simArg = val();
 		else if (a == "--tri") triArg = val();
 		else if (a == "--dyna") dynaPath = val();
@@ -230,6 +234,17 @@ int main(int argc, char** argv) {
 	if (angleSweep && (onlyPusher < 0 || maxSpeed <= 0)) { fprintf(stderr, "--angles needs --pair PUSHER,CROSSED and --max-speed S\n"); return 2; }
 	if (angleSweep && (atYaw >= 0 || minSpeed)) { fprintf(stderr, "--angles can't be used with --yaw / --min-speed / --refine\n"); return 2; }
 	for (auto& ch : game) ch = (char)toupper((unsigned char)ch);
+	// --actions: the scan's walking and slope clip points, then the lunges aimed at them
+	vector<int> actions;
+	if (!actionsArg.empty()) {
+		string err;
+		actions = parseActions(game, actionsArg, err);
+		if (actions.empty()) { fprintf(stderr, "--actions: %s\n", err.empty() ? "no actions" : err.c_str()); return 2; }
+		if (falling || minSpeed || atYaw >= 0 || angleSweep || groundOnly || slopeOnly || extendedOnly) {
+			fprintf(stderr, "--actions can't be used with --falling / --min-speed / --refine / --yaw / --angles / --slope-only / --ground-only / --extended-only\n");
+			return 2;
+		}
+	}
 	if ((game != "OOT" && game != "MM") || (mapName.empty() && !all)) {
 		fprintf(stderr,
 			"usage: clipfinder --game OOT|MM (--map \"<name in the viewer's map list>\" | --all)\n"
@@ -249,6 +264,7 @@ int main(int argc, char** argv) {
 			"                  [--no-slope | --slope-only] [--slope-step 1|2|3] [--slope-starts] [--keep-load-void]  (slope clips: the floor check lifting Link behind a wall)\n"
 			"                  [--no-ground | --ground-only] [--ground-step 1|2|3]  (ground clips: falling at velocity.y -20 from the floor, through it and under a wall)\n"
 			"                  [--max-per-pair N]  (at most N points per wall pair, spread out evenly: smaller files)\n"
+			"                  [--actions all|1h-slash,1h-stab,2h-slash,2h-stab,stick-slash]  (sword lunge clips: the lunge's own move from standing starts; MM Human, OoT Adult)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -452,7 +468,7 @@ int main(int argc, char** argv) {
 			string path = out;
 			if (path.empty() || all) {
 				string dir = outDir.empty() ? "." : outDir;
-				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + (firstPerPair ? "_first" : "") + (slopeOnly ? "_slope" : groundOnly ? "_ground" : "") + setupTag + (dyna.raw.empty() ? "" : "_dyna") +
+				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + (firstPerPair ? "_first" : "") + (slopeOnly ? "_slope" : groundOnly ? "_ground" : "") + (actions.empty() ? "" : "_actions") + setupTag + (dyna.raw.empty() ? "" : "_dyna") +
 					// (--pair: its own file, not over the whole map's scan)
 					(onlyPusher >= 0 ? "_pair" + std::to_string(onlyPusher) + "-" + std::to_string(onlyCrossed) : "") + ".json";
 			}
@@ -478,6 +494,14 @@ int main(int argc, char** argv) {
 			vector<string> csvPaths;  // --yaw: the CSV written per yaw
 			for (const Variant* vp : job.forms) {
 				const Variant& v = *vp;
+				// --actions: the ones this form does (none: skipped, before sharing
+				// a scan - Deku has Human's radius but no sword)
+				vector<int> formActions;
+				for (int ai : actions) if (actionForForm(ACTIONS[ai], upper(v.form))) formActions.push_back(ai);
+				if (!actions.empty() && formActions.empty()) {
+					fprintf(stderr, "%s - %s (%s): none of the --actions are for this form, skipped\n", game.c_str(), e.name.c_str(), v.form.c_str());
+					continue;
+				}
 				auto same = std::find_if(results.begin(), results.end(),
 					[&](const FormResult& r) { return r.radius == v.radius && r.checkHeight == v.checkHeight; });
 				if (same != results.end()) {
@@ -500,7 +524,7 @@ int main(int argc, char** argv) {
 				m.slope = !noSlope;
 				m.slopeOnly = slopeOnly;
 				m.slopeStarts = slopeStarts;
-				m.ground = !noGround;
+				m.ground = !noGround && actions.empty();
 				m.groundOnly = groundOnly;
 				m.groundStepMax = groundStepMax;
 				m.slopeStepMax = slopeStepMax;
@@ -514,9 +538,11 @@ int main(int argc, char** argv) {
 					m.focusA = onlyPusher;
 					m.focusB = onlyCrossed;
 				}
-				if (!simArg.empty()) return runSim(m, simArg);
+				if (!simArg.empty()) return runSim(m, simArg, game, upper(v.form));
 				if (!triArg.empty()) return printTris(m, triArg);
 				vector<Clip> found = scan(m, threads, firstPerPair);
+				// --actions: the lunges aimed at the scan's walking and slope clip points
+				if (!formActions.empty()) found = actionScan(m, found, formActions, threads);
 				// --pair: just the clips of that wall pair
 				if (onlyPusher >= 0) {
 					found.erase(std::remove_if(found.begin(), found.end(),

@@ -56,11 +56,16 @@ std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const V3& pr
 		V3 s2 = m.sphereStep(s1, tol, nullptr);
 		const V3 from2 = { prev.x, at0.y, prev.z };
 		int held = m.crossedWall(s, from2, s2);
-		if (landed0 ? held < 0 : held != crossed) return false;
+		bool ok = landed0 ? held >= 0 : held == crossed;
 		// out the other side of a thin wall: through it, not out of bounds - but
 		// through a dynapoly (a gate, a fence) that's what the clip is for
-		if (m.polys[crossed].bg < 0 && m.crossedWall(s, from2, s2, true) >= 0) return false;
-		endOut = landed0 ? V3{ s2.x, landY0, s2.z } : s2;
+		if (ok && m.polys[crossed].bg < 0 && m.crossedWall(s, from2, s2, true) >= 0) ok = false;
+		const V3 end0 = landed0 ? V3{ s2.x, landY0, s2.z } : s2;
+		// pushed back out in front (or out the other side of a thin wall), but
+		// somewhere he couldn't walk to (Model::walkUnreachable: MM Stone Tower
+		// Temple, the alcove behind a sun block)
+		if (!ok && (!m.isInBounds(s, end0) ? true : !m.walkUnreachable(s, end0, prev))) return false;
+		endOut = end0;
 		return true;
 	};
 	V3 end;
@@ -144,8 +149,11 @@ std::optional<V3> standSpot(const Model& m, double x, double z, double floorY) {
 		auto ry = standFloor(m, rest->x, rest->z, floorY);
 		if (!ry) return std::nullopt;
 		if (rest->x == x && rest->z == z && *ry == cy) {
-			auto fy = m.floorCheck(rest->x, rest->z, F(rest->y + 50));
+			int floorPoly = -1;
+			auto fy = m.floorCheck(rest->x, rest->z, F(rest->y + 50), &floorPoly);
 			if (fy && *fy > rest->y) return std::nullopt;
+			// a slide floor (Poly::slide): he slides off it, or is pushed down it
+			if (floorPoly >= 0 && m.polys[floorPoly].slide) return std::nullopt;
 			return rest;
 		}
 		x = rest->x; z = rest->z; cy = *ry;
