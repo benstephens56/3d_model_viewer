@@ -68,6 +68,9 @@ const GROUND_COLOR = 0xd4a017; // ground clips (clipfinder ground.h)
 const ACTION_1H_COLOR = 0x40e0ff; // action clips: a sword lunge's own move (clipfinder action.h), one-handed
 const ACTION_2H_COLOR = 0xb070ff; // and two-handed (OoT Biggoron / Giant's Knife, MM Great Fairy's Sword)
 const ACTION_STICK_COLOR = 0xc8a060; // and the Deku stick
+const JUMP_1H_COLOR = 0x40ff90; // the jumpslash (clipfinder action.h Action::jump), one-handed
+const JUMP_2H_COLOR = 0xff8040; // two-handed
+const JUMP_STICK_COLOR = 0xa8d040; // the Deku stick
 const PUSHER_COLOR = 0xffd000;
 
 const SNORMAL_FLOOR = Math.trunc(0.5 * 32767);   // COLPOLY_SNORMAL(0.5f)
@@ -945,7 +948,7 @@ const hex4 = n => "0x" + (n & 0xFFFF).toString(16).toUpperCase().padStart(4, "0"
 const slopeReach = c => ({ speed: Math.max(c.speed, c.speed2 ?? 0), yaw: c.yaw, start: c.prev });
 
 function describeReach(c) {
-    if (c.action) return `  reachable: the lunge is the move (no stick speed needed)`;
+    if (c.action) return `  reachable: the ${c.actionKey?.includes("jumpslash") ? "jumpslash" : "lunge"} is the move (no stick speed needed)`;
     if (c.reach === undefined) return `  reachability: tick "Reachable only" to work it out`;
     if (!c.reach) return `  not reachable from a standable start (at up to speed ${REACH_DIST / SPEED_RATE})`;
     const r = c.reach;
@@ -960,15 +963,19 @@ function describeClip(g, c, checkHeight) {
     return [lines[0], form + lines.slice(1).join("\n")].join("\n") + inBounds + "\n" + describeReach(c);
 }
 
+// (clipfinder action clips' rows: the lunges' action-*, the jumpslash's jump-*)
+const isActionCat = cat => cat.startsWith("action") || cat.startsWith("jump");
+
 const CAT_TITLES = {
     acute: "acute angle", extended: "extended plane only",
     "low-acute": "falling, acute angle", "low-extended": "falling, extended plane only", low: "falling",
     slope: "slope", ground: "ground", "action-1h": "action, one-handed", "action-2h": "action, two-handed", "action-stick": "action, Deku stick",
+    "jump-1h": "jumpslash, one-handed", "jump-2h": "jumpslash, two-handed", "jump-stick": "jumpslash, Deku stick",
 };
 
 // What the wall pair's category means (none for older files' falling clips).
 function pairLine(g) {
-    if (g.cat === "low" || g.cat === "slope" || g.cat === "ground" || g.cat.startsWith("action")) return [];
+    if (g.cat === "low" || g.cat === "slope" || g.cat === "ground" || isActionCat(g.cat)) return [];
     return [g.cat.endsWith("acute")
         ? `  wall pair: acute angle (at least one of its points clips with the extended planes removed)`
         : `  wall pair: extended plane only (every point needs ${polyLabel(g.pusher)}'s extended plane: its 1 unit tolerance, or Link beside it, past its edge)`];
@@ -1001,15 +1008,19 @@ function describeClipLinesBase(g, c, checkHeight) {
             c.end.noFloor ? `  then no floor under him: falls out of bounds` : `  ends at: ${fmt(c.end)} (out of bounds)`,
         ].join("\n");
     }
-    if (g.cat.startsWith("action")) {
+    if (isActionCat(g.cat)) {
         // (clipfinder action.h: each frame of the lunge is a walking frame of
-        // the root motion, at facing + angle; then standing still)
+        // the root motion, at facing + angle; then standing still. The
+        // jumpslash: its air frames first, then the landing slash)
         const num = v => f32Str(v).split(" ")[0];
         const how = c.kind === "slope" ? `the floor check lifts Link onto ${polyLabel(g.pusher)}, behind ${polyLabel(g.crossed)}`
             : `${polyLabel(g.pusher)} pushes Link through ${polyLabel(g.crossed)} (${CAT_TITLES[c.kind] ?? c.kind})`;
         return [
             `ACTION CLIP (${c.action}): ${how}`,
-            `  stand still at ${fmt(c.prev)} (feet), facing ${hex4(c.facing)}, and do the ${c.action}`,
+            `  stand still at ${fmt(c.prev)} (feet), facing ${hex4(c.facing)}, and do the ${c.action}` +
+                (!c.actionKey?.includes("jumpslash") ? "" : c.actionKey.endsWith("-fwd")
+                    ? ` (Z + A, the stick and Z held forward for ${c.airFrames ?? "its"} frames in the air, then R held)`
+                    : ` (Z + A, the stick left alone, R held: shield stops the step back)`),
             `  its frames (speed, angle from facing): ${(c.actionFrames ?? []).map(([v, a]) => `${num(v)} at ${a < 0 ? "-" : "+"}${hex4(Math.abs(a))}`).join(", then ")}`,
             ...(c.frames ?? []).map((p, i) => `  after frame ${i + 1}: ${fmt(p)}`),
             `  the clip frame moves at yaw ${hex4(c.yaw)}, speed ${num(c.speed)}: posNext ${fmt(c.next)}`,
@@ -1167,11 +1178,13 @@ const MODEL_NAMES = {
     "low-acute": "Low Wall Clips (falling, acute)", "low-extended": "Low Wall Clips (falling, extended)",
     low: "Low Wall Clips (falling)", slope: "Slope Clips", ground: "Ground Clips",
     "action-1h": "Action Clips (1h lunges)", "action-2h": "Action Clips (2h lunges)", "action-stick": "Action Clips (Deku stick lunges)",
+    "jump-1h": "Action Clips (1h jumpslash)", "jump-2h": "Action Clips (2h jumpslash)", "jump-stick": "Action Clips (Deku stick jumpslash)",
 };
 const CAT_COLORS = {
     acute: ACUTE_COLOR, extended: EXTENDED_COLOR,
     "low-acute": LOW_ACUTE_COLOR, "low-extended": LOW_EXTENDED_COLOR, low: LOW_COLOR, slope: SLOPE_COLOR, ground: GROUND_COLOR,
     "action-1h": ACTION_1H_COLOR, "action-2h": ACTION_2H_COLOR, "action-stick": ACTION_STICK_COLOR,
+    "jump-1h": JUMP_1H_COLOR, "jump-2h": JUMP_2H_COLOR, "jump-stick": JUMP_STICK_COLOR,
 };
 
 // The marker rows added (one per kind, or per kind and form for imported
@@ -1225,6 +1238,7 @@ function exportJson(groups, info) {
             if (c.action) {
                 f.push(`"action":${JSON.stringify(c.action)}`, `"actionKey":${JSON.stringify(c.actionKey)}`, `"facing":${c.facing & 0xFFFF}`,
                     `"actionFrames":[${c.actionFrames.map(([v, a]) => `[${num(v)},${a}]`).join(",")}]`, `"frames":[${c.frames.map(vec).join(",")}]`);
+                if (c.airFrames) f.push(`"airFrames":${c.airFrames}`);
             }
             if (c.reach === null) f.push(`"reach":null`);
             else if (c.reach) f.push(`"reach":{"speed":${num(c.reach.speed)},"yaw":${c.reach.yaw & 0xFFFF},"start":${vec(c.reach.start)}}`);
@@ -1452,7 +1466,9 @@ export function setupWallPushClipUI(scene) {
             (points("low") ? "" : `: ${points("low-acute")} acute, ${points("low-extended")} extended`) + `)` +
             (points("slope") ? `, ${points("slope")} slope` : "") + (points("ground") ? `, ${points("ground")} ground` : "") +
             (points("action-1h") ? `, ${points("action-1h")} 1h lunge` : "") + (points("action-2h") ? `, ${points("action-2h")} 2h lunge` : "") +
-            (points("action-stick") ? `, ${points("action-stick")} Deku stick lunge` : "") + ` ` +
+            (points("action-stick") ? `, ${points("action-stick")} Deku stick lunge` : "") +
+            (points("jump-1h") ? `, ${points("jump-1h")} 1h jumpslash` : "") + (points("jump-2h") ? `, ${points("jump-2h")} 2h jumpslash` : "") +
+            (points("jump-stick") ? `, ${points("jump-stick")} Deku stick jumpslash` : "") + ` ` +
             `clip points${byReach ? ` reachable at speed ${maxSpeed}` : ""}${byVy ? ` at |y velocity| ${maxVy} or less` : ""} (${last.note})`;
         window.wallPushClips = shown;
     };
@@ -1641,7 +1657,7 @@ export function setupWallPushClipUI(scene) {
                 if (c.speed2 !== undefined) clip.speed2 = c.speed2;
                 if (c.vy !== undefined) clip.vy = c.vy;
                 // clipfinder --type actions: the lunge that does it
-                if (c.action) Object.assign(clip, { action: c.action, actionKey: c.actionKey, facing: c.facing, actionFrames: c.actionFrames, frames: c.frames.map(vec) });
+                if (c.action) Object.assign(clip, { action: c.action, actionKey: c.actionKey, facing: c.facing, actionFrames: c.actionFrames, airFrames: c.airFrames, frames: c.frames.map(vec) });
                 // clipfinder --min-speed: the reachability already worked out
                 if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
                 clips.push(clip);
@@ -1656,10 +1672,11 @@ export function setupWallPushClipUI(scene) {
             // (slope clips have their own row: clipfinder slope.h)
             // (and ground clips: clipfinder ground.h)
             // (action clips, of any kind: their own row, clipfinder action.h)
-            // (one row per 1h / 2h weapon: the key's "1h-" / "2h-")
+            // (one row per 1h / 2h weapon: the key's "1h-" / "2h-"; the jumpslash its own)
             if (c.action) {
                 const k = c.actionKey ?? "";
-                c.cat = k.startsWith("stick") ? "action-stick" : k.startsWith("2h") ? "action-2h" : "action-1h";
+                const pre = k.includes("jumpslash") ? "jump" : "action";
+                c.cat = `${pre}-${k.startsWith("stick") ? "stick" : k.startsWith("2h") ? "2h" : "1h"}`;
                 continue;
             }
             if (c.kind === "slope" || c.kind === "ground") { c.cat = c.kind; continue; }
@@ -1755,10 +1772,24 @@ export function setupWallPushClipUI(scene) {
         const main = loadedModels.find(m => m.name === "Main Model");
         if (!colCtx || !main?.mesh?.userData.triangles) return;
         const dir = autoDir.value.trim() || "tools/clipfinder/results";
+        // (how long each part takes, in the console: a slow server shows up
+        // in the listing and the reads)
+        const t0 = performance.now();
+        status.textContent = `Auto-import: looking for ${map} results in ${dir}…`;
         let list = null;
         try {
             list = await listResultFiles(dir, safeName(`${game}_${map}`) + "_");
         } catch { /* reported below */ }
+        const tList = performance.now();
+        // (another setup's dynapoly scan, by its name: clipfinder writes the
+        // setups it's for as _setup<N>[-<N>...]_dyna - not read at all)
+        const skippedByName = [];
+        if (list) list = list.filter(({ name }) => {
+            const m = name.match(/_setup([\d-]+)_dyna/);
+            if (!m || m[1].split("-").map(Number).includes(setup)) return true;
+            skippedByName.push(name);
+            return false;
+        });
         if (token !== autoToken) return;
         if (!list) {
             status.textContent = `Auto-import: can't list ${dir} (the server has to show folder pages, like python -m http.server)`;
@@ -1766,17 +1797,24 @@ export function setupWallPushClipUI(scene) {
         }
         status.textContent = list.length ? `Auto-import: reading ${list.length} files…` : "";
         const files = [];
-        const otherSetups = [];
-        for (const [i, { name, url }] of list.entries()) {
-            status.textContent = `Auto-import: reading file ${i + 1} of ${list.length}…`;
-            let data;
+        const otherSetups = [...skippedByName];
+        // (all at once: one at a time, each waited on the server in turn)
+        let bytes = 0;
+        const read = await Promise.all(list.map(async ({ name, url }) => {
             try {
-                data = await (await fetch(url, { cache: "no-store" })).json();
+                const text = await (await fetch(url, { cache: "no-store" })).text();
+                bytes += text.length;
+                return { name, data: JSON.parse(text) };
             } catch (err) {
                 console.warn(`Auto-import: ${name}: ${err.message}`);
-                continue;
+                return null;
             }
-            if (token !== autoToken) return;
+        }));
+        if (token !== autoToken) return;
+        const tRead = performance.now();
+        for (const r of read) {
+            if (!r) continue;
+            const { name, data } = r;
             if (data.format !== "wall-push-clips-1" && data.format !== "wall-push-clips-2") continue;
             if (data.game !== game || data.map !== map || data.numPolygons !== colCtx.colHeader.numPolygons) continue;
             const setups = resultSetups(data);
@@ -1814,7 +1852,11 @@ export function setupWallPushClipUI(scene) {
             return;
         }
         console.log(`Auto-import (${map}, setup ${setup}): ${files.map(f => f.name).join(", ")}`);
-        importResults(files, `auto-imported (setup ${setup}${formNote})`);
+        const tImport = performance.now();
+        await importResults(files, `auto-imported (setup ${setup}${formNote})`);
+        const ms = (a, b) => `${Math.round(b - a)} ms`;
+        console.log(`Auto-import timing: listing ${dir} ${ms(t0, tList)}, reading ${list.length} files (${(bytes / 1e6).toFixed(2)} MB) ${ms(tList, tRead)}, ` +
+            `building and drawing ${ms(tImport, performance.now())}`);
     };
     document.addEventListener("zeldamaploaded", e => {
         loaded = e.detail;

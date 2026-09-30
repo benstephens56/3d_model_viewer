@@ -461,7 +461,7 @@ local function testsFromJson(path)
 				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt, from = vec(c.from),
 				yaw = c.speed and c.yaw or nil, speed = c.speed, speed2 = c.speed2, vy = c.vy, expect = vec(c["end"]),
 				reachSpeed = type(c.reach) == "table" and c.reach.speed or nil,
-				action = c.action, actionKey = c.actionKey, facing = c.facing, actionFrames = c.frames and #c.frames or nil,
+				action = c.action, actionKey = c.actionKey, facing = c.facing, actionFrames = c.frames and #c.frames or nil, airFrames = c.airFrames,
 			}
 			T.walls[c.pusher] = true
 			T.walls[c.crossed] = true
@@ -907,6 +907,11 @@ end
 -- The attack clipfinder's action keys are (PLAYER_MWA_*, both games)
 -- (the Deku stick is two-handed and always does the forward slash)
 local ACTION_MWA = { ["1h-slash"] = 0, ["2h-slash"] = 1, ["1h-stab"] = 12, ["2h-stab"] = 13, ["stick-slash"] = 1 }
+-- the jumpslash ends as PLAYER_MWA_JUMPSLASH_FINISH (MM's list has the Zora jump kick before it)
+for _, k in ipairs({ "1h-jumpslash", "2h-jumpslash", "stick-jumpslash" }) do
+	ACTION_MWA[k] = GAME == "OOT" and 19 or 20
+	ACTION_MWA[k .. "-fwd"] = ACTION_MWA[k]
+end
 -- The Player item action (heldItemAction) each B item gives (PLAYER_IA_*), to check he's holding it
 local WEAPON_IA = GAME == "OOT" and { [0x3C] = 3, [0x3B] = 4, [0x3D] = 5, [0x55] = 5, [0x00] = 6 }
 	or { [0x4D] = 3, [0x4E] = 4, [0x4F] = 5, [0x10] = 6, [0x08] = 7 }
@@ -923,10 +928,18 @@ end
 -- B with the stick forward for a game frame (a stab: Z still held). His
 -- meleeWeaponAnimation is set to -1 first: afterwards it says which attack he
 -- did, if any (and the combo counter starts over).
+-- The jumpslash: Z held, then A with Z for a game frame and the stick left
+-- alone, then nothing (clipfinder's air frames: no stick, so speedXZ steps
+-- down 0.1 a frame and the yaw stays the facing) - or, the -fwd keys, Z and
+-- the stick forward while he's in the air (t.airFrames game frames). R
+-- (shield) is held from the A press on: when the landing slash ends, it
+-- interrupts the step back, which would otherwise move him about 27 back.
 local function runActionTest(t, r)
 	local facing = t.facing
 	if facing >= 0x8000 then facing = facing - 0x10000 end
-	local stab = t.actionKey:find("stab") ~= nil
+	local jump = t.actionKey:find("jumpslash") ~= nil
+	local jumpFwd = jump and t.actionKey:find("%-fwd$") ~= nil
+	local stab = jump or t.actionKey:find("stab") ~= nil
 	local function holdAt(z)
 		if z then joypad.set({ Z = true }, 1) end
 		writeVec(K.player + K.pos, t.prev)
@@ -984,11 +997,17 @@ local function runActionTest(t, r)
 			polyName(read_u32(K.player + K.wallPoly), mainmemory.read_u8(K.player + K.wallBgId)),
 			polyName(read_u32(K.player + K.floorPoly), mainmemory.read_u8(K.player + K.wallBgId + 1)), read_u16(K.player + K.bgCheckFlags))
 	end
-	logLine(string.format("B (held item action %d)", held))
-	-- B and the stick forward for a game frame (3 emulated frames)
+	logLine(string.format("%s (held item action %d)", jump and "Z + A" or "B", held))
+	-- B and the stick forward for a game frame (3 emulated frames); the
+	-- jumpslash: A and Z, the stick left alone
 	for _ = 1, 3 do
-		joypad.set(stab and { B = true, Z = true } or { B = true }, 1)
-		joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = STICK_FORWARD }, 1)
+		if jump then
+			joypad.set({ A = true, Z = true, R = true }, 1)
+			joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = jumpFwd and STICK_FORWARD or 0 }, 1)
+		else
+			joypad.set(stab and { B = true, Z = true } or { B = true }, 1)
+			joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = STICK_FORWARD }, 1)
+		end
 		emu.frameadvance()
 	end
 	releaseStick()
@@ -997,7 +1016,13 @@ local function runActionTest(t, r)
 	local n = (t.actionFrames or 3) + 2
 	local gf = read_u32(K.play + K.gameplayFrames)
 	for _ = 1, n * 3 + 6 do
-		if stab then joypad.set({ Z = true }, 1) end
+		if stab and not jump then joypad.set({ Z = true }, 1) end
+		if jump then
+			-- (-fwd: Z and the stick forward until he lands, then shield alone)
+			local inAir = jumpFwd and read_u32(K.play + K.gameplayFrames) - frames0 < (t.airFrames or 0)
+			joypad.set(inAir and { R = true, Z = true } or { R = true }, 1)
+			joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = inAir and STICK_FORWARD or 0 }, 1)
+		end
 		emu.frameadvance()
 		local g = read_u32(K.play + K.gameplayFrames)
 		if g ~= gf then
@@ -1016,12 +1041,15 @@ local function runActionTest(t, r)
 	if RECORD then for _ = 1, RECORD_BUFFER do emu.frameadvance() end end
 	if mwa == -1 then
 		r.status = "no attack"
-		r.log[#r.log + 1] = "B didn't start an attack: the savestate needs Link on foot, weapon out, no menus or text"
+		r.log[#r.log + 1] = (jump and "Z + A" or "B") .. " didn't start an attack: the savestate needs Link on foot, weapon out, no menus or text"
+			.. (jump and " (and a room that isn't indoors: there Z + A rolls)" or "")
 		return r
 	end
 	if mwa ~= ACTION_MWA[t.actionKey] then
 		r.status = "wrong attack"
-		r.log[#r.log + 1] = string.format("the game did attack %d, the test is %s (%d): a 1h / 2h weapon mismatch, or the stick wasn't forward (STICK_FORWARD, the camera) - or for a stab, Z-targeting", mwa, t.actionKey, ACTION_MWA[t.actionKey])
+		r.log[#r.log + 1] = string.format("the game did attack %d, the test is %s (%d): %s", mwa, t.actionKey, ACTION_MWA[t.actionKey],
+			jump and "the jumpslash didn't land (attack 17, its start: still in the air after its frames), or wasn't a jumpslash"
+			or "a 1h / 2h weapon mismatch, or the stick wasn't forward (STICK_FORWARD, the camera) - or for a stab, Z-targeting")
 		return r
 	end
 	if dist3(r.start, t.prev) > 1 then
@@ -1347,6 +1375,10 @@ end
 local function setupStr(r)
 	local t = r.test
 	if t.action then
+		if t.actionKey:find("jumpslash") then
+			return string.format("start %s  facing 0x%04X  %s (Z + A, %s, R held from then on)", fmt(r.start or t.prev), t.facing, t.action,
+				t.actionKey:find("%-fwd$") and string.format("Z and the stick forward for %d frames in the air", t.airFrames or 0) or "stick left alone")
+		end
 		return string.format("start %s  facing 0x%04X  %s (B, stick forward%s)", fmt(r.start or t.prev), t.facing, t.action,
 			t.actionKey:find("stab") and ", Z held" or "")
 	end

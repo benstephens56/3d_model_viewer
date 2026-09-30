@@ -74,14 +74,11 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 		// action clips: the action, Link's facing at the start, and where each of its frames leaves him
 		if (c.action >= 0) {
 			o << ",\"action\":" << jsonStr(ACTIONS[c.action].name) << ",\"actionKey\":" << jsonStr(ACTIONS[c.action].key) << ",\"facing\":" << c.facing << ",\"actionFrames\":[";
-			const Action& a = ACTIONS[c.action];
-			for (size_t k = 0; k < a.frames.size(); k++) {
-				double sp;
-				int ang;
-				actionFrameMove(a, a.frames[k], sp, ang);
-				o << (k ? "," : "") << "[" << num(F(sp)) << "," << (int16_t)ang << "]";
-			}
-			o << "],\"frames\":[";
+			for (size_t k = 0; k < c.frameMoves.size(); k++)
+				o << (k ? "," : "") << "[" << num(F(c.frameMoves[k].first)) << "," << c.frameMoves[k].second << "]";
+			o << "]";
+			if (c.airFrames) o << ",\"airFrames\":" << c.airFrames;
+			o << ",\"frames\":[";
 			for (size_t k = 0; k < c.frames.size(); k++) o << (k ? "," : "") << vec(c.frames[k]);
 			o << "]";
 		}

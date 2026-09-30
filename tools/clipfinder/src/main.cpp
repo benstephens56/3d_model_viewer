@@ -81,6 +81,36 @@ static bool readFile(const string& path, vector<uint8_t>& out) {
 
 static bool exists(const string& p) { std::ifstream f(p); return (bool)f; }
 
+// The type of each of a scene's rooms (SCENE_CMD_ROOM_BEHAVIOR's first byte;
+// 2 = ROOM_TYPE_INDOORS, where Z + A rolls instead of jumpslashing), from the
+// room files next to the scene's (the viewer's zeldaRoomFileName); -1 for a
+// room whose file isn't there.
+static vector<int> roomTypes(const string& root, const string& game, const string& sceneFile, const vector<uint8_t>& scene) {
+	vector<int> out;
+	int numRooms = 0;
+	for (size_t o = 0; o + 8 <= scene.size() && scene[o] != 0x14; o += 8)
+		if (scene[o] == 0x04) { numRooms = scene[o + 1]; break; }
+	for (int i = 0; i < numRooms; i++) {
+		string name = sceneFile;
+		if (game == "MM") {
+			char b[8];
+			snprintf(b, sizeof b, "%02d", i);
+			name += string("_room_") + b;
+		} else {
+			if (name.size() > 6 && name.compare(name.size() - 6, 6, "_scene") == 0) name.resize(name.size() - 6);
+			name += "_room_" + std::to_string(i);
+		}
+		vector<uint8_t> r;
+		int t = -1;
+		if (readFile(root + "/models/" + game + "/" + name, r))
+			for (size_t o = 0; o + 8 <= r.size() && r[o] != 0x14; o += 8)
+				if (r[o] == 0x08) { t = r[o + 1]; break; }
+		out.push_back(t);
+	}
+	return out;
+}
+static const int ROOM_TYPE_INDOORS = 2;
+
 static string safeName(const string& s) {
 	string o;
 	for (char c : s) o += (isalnum((unsigned char)c) || c == '-' || c == '_') ? c : '_';
@@ -94,6 +124,7 @@ int main(int argc, char** argv) {
 	bool dynaOnly = false, slopeStarts = false, keepLoadVoid = false;
 	string typeArg;  // --type acute,extended,slope,ground,falling,actions (TYPE_*)
 	int onlySetup = -1;  // --setup N: just the dynapolys of that setup
+	bool night = false;  // --night: OoT's night setups (1, 3) too
 	int maxPerPair = 0;  // --max-per-pair N: at most N points a wall pair, spread out (thinClips)
 	double radius = 0;
 	bool all = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
@@ -179,6 +210,7 @@ int main(int argc, char** argv) {
 		else if (a == "--tri") triArg = val();
 		else if (a == "--dyna") dynaPath = val();
 		else if (a == "--dyna-only") dynaOnly = true;
+		else if (a == "--night") night = true;
 		else if (a == "--slope-starts") slopeStarts = true;
 		else if (a == "--slope-step") {
 			slopeStepMax = std::stoi(val());
@@ -281,11 +313,11 @@ int main(int argc, char** argv) {
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP | ,vVY]]  (one frame from a standing start, printed step by step; SPEED as 15/7: a frame per speed)\n"
 			"                  [--tri ID[,ID...]]  (print those polys: vertices, normal, type)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
-			"                  [--dyna FILE|none [--dyna-only] [--setup N]]  (the viewer's dynapoly export; default tools/clipfinder/<GAME>_dyna_all.json)\n"
+			"                  [--dyna FILE|none [--dyna-only] [--setup N] [--night]]  (the viewer's dynapoly export; default tools/clipfinder/<GAME>_dyna_all.json)\n"
 			"                  [--slope-step 1|2|3] [--wall-step S] [--slope-starts] [--keep-load-void] [--ground-step 1|2|3]\n"
 			"                  [--max-per-pair N]  (at most N points per wall pair, spread out evenly: smaller files)\n"
 			"                  [--action-keys 1h-slash,1h-stab,2h-slash,2h-stab,stick-slash]  (with --type actions: which lunges, default all)\n"
-			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
+			"                  [-o out.json | --out-dir dir (default tools/clipfinder/results)] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
 	// ageProperties->wallCheckRadius (z_player.c)
@@ -382,12 +414,6 @@ int main(int argc, char** argv) {
 				return std::find(d.setups.begin(), d.setups.end(), onlySetup) == d.setups.end();
 			}), dynas.end());
 		}
-		size_t n = 0, acts = 0;
-		for (const DynaFile& d : dynas) {
-			acts += d.actors.size();
-			for (const DynaActorIn& a : d.actors) n += a.polys.size();
-		}
-		fprintf(stderr, "dynapolys: %zu exports, %zu actors, %zu polys from %s\n", dynas.size(), acts, n, dynaPath.c_str());
 		if (!all && std::none_of(dynas.begin(), dynas.end(), [&](const DynaFile& d) { return d.map.empty() || d.map == mapName; })) {
 			// (not an error: the scan goes on without dynapolys - with
 			// --dyna-only there's nothing to scan, and the map is skipped)
@@ -419,8 +445,9 @@ int main(int argc, char** argv) {
 		auto has = [&](int l) { return l < (int)present.size() && present[l]; };
 		const string fu = upper(v.form);
 		vector<int> want;
-		if (fu == "CHILD" || fu == "CRAWLSPACE" || fu == "CRAWL") want = { 0, 1 };
-		else if (fu == "ADULT") want = { 2, 3 };
+		// (the night setups 1 / 3 only with --night)
+		if (fu == "CHILD" || fu == "CRAWLSPACE" || fu == "CRAWL") want = night ? vector<int>{ 0, 1 } : vector<int>{ 0 };
+		else if (fu == "ADULT") want = night ? vector<int>{ 2, 3 } : vector<int>{ 2 };
 		else return out;
 		for (int l : want) {
 			int r = l == 0 || has(l) ? l : l == 3 && has(2) ? 2 : 0;
@@ -438,6 +465,17 @@ int main(int argc, char** argv) {
 		try {
 			if (!parseScene(buf, game, ch, tris)) { fprintf(stderr, "%s - %s: no collision header\n", game.c_str(), e.name.c_str()); failures++; continue; }
 		} catch (const std::exception& ex) { fprintf(stderr, "%s - %s: bad scene file: %s\n", game.c_str(), e.name.c_str(), ex.what()); failures++; continue; }
+		// The jumpslash: not where every room is indoors (Z + A rolls there,
+		// Player_ActionHandler_10; the room Link is in isn't known, so a scene
+		// with some indoor rooms keeps it)
+		bool noJump = false;
+		if (anyJump(actions)) {
+			const vector<int> rt = roomTypes(root, game, e.file, buf);
+			const size_t indoors = std::count(rt.begin(), rt.end(), ROOM_TYPE_INDOORS);
+			noJump = !rt.empty() && indoors == rt.size();
+			if (noJump) fprintf(stderr, "%s - %s: every room is indoors (Z + A rolls): no jumpslash\n", game.c_str(), e.name.c_str());
+			else if (indoors) fprintf(stderr, "%s - %s: %zu of %zu rooms are indoors, where the jumpslash is a roll instead\n", game.c_str(), e.name.c_str(), indoors, rt.size());
+		}
 		// this map's dynapoly exports, each with the forms that play in its
 		// setups (OoT: formSetups), and the forms none of them is for without
 		// dynapolys (the static scan; not with --dyna-only)
@@ -452,7 +490,7 @@ int main(int argc, char** argv) {
 				line += (line.empty() ? "" : ", ") + v.form + " setup" + (ls.size() > 1 ? "s " : " ");
 				for (size_t k = 0; k < ls.size(); k++) line += (k ? "/" : "") + std::to_string(ls[k]);
 			}
-			if (!line.empty()) fprintf(stderr, "%s - %s: %s (--setup N for another)\n", game.c_str(), e.name.c_str(), line.c_str());
+			(void)line;  // (each form's line says its setup)
 		}
 		for (const DynaFile& d : dynas) {
 			if (!d.map.empty() && d.map != e.name) continue;
@@ -487,15 +525,17 @@ int main(int argc, char** argv) {
 			// the setups these dynapolys are for: "_setup0-2" in file names
 			string setupTag;
 			for (size_t k = 0; k < dyna.setups.size(); k++) setupTag += (k ? "-" : "_setup") + std::to_string(dyna.setups[k]);
+			// (on each form's line)
+			string dynaNote;
 			if (!dyna.setups.empty())
-				fprintf(stderr, "%s - %s: setup%s %s: %zu dynapoly actors\n", game.c_str(), e.name.c_str(), dyna.setups.size() > 1 ? "s" : "",
-					setupTag.substr(6).c_str(), dyna.actors.size());
+				dynaNote = string(" setup") + (dyna.setups.size() > 1 ? "s " : " ") + setupTag.substr(6) + ": " + std::to_string(dyna.actors.size()) + " dynapoly actors";
 			// The output file is opened before the scan, so a path that can't be
 			// written (e.g. a missing directory) stops the run straight away
 			// instead of after the scan, and a write that fails stops it too.
 			string path = out;
 			if (path.empty() || all) {
-				string dir = outDir.empty() ? "." : outDir;
+				// (default: the viewer's results folder, where its auto-import looks)
+				string dir = outDir.empty() ? root + "/tools/clipfinder/results" : outDir;
 				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + typeTag(types) + (firstPerPair ? "_first" : "") + setupTag + (dyna.raw.empty() ? "" : "_dyna") +
 					// (--pair: its own file, not over the whole map's scan)
 					(onlyPusher >= 0 ? "_pair" + std::to_string(onlyPusher) + "-" + std::to_string(onlyCrossed) : "") + ".json";
@@ -520,14 +560,17 @@ int main(int argc, char** argv) {
 			// scan, listed once as "Human/Deku".
 			vector<FormResult> results;
 			vector<string> csvPaths;  // --yaw: the CSV written per yaw
+			size_t actionPoints = 0;  // --type actions: the attacks' clip points, before the file's thinning
+			double actionSecs = 0;
 			for (const Variant* vp : job.forms) {
 				const Variant& v = *vp;
 				// --type actions: the ones this form does (none: skipped, before sharing
 				// a scan - Deku has Human's radius but no sword)
 				vector<int> formActions;
-				for (int ai : actions) if (actionForForm(ACTIONS[ai], upper(v.form))) formActions.push_back(ai);
+				for (int ai : actions) if (actionForForm(ACTIONS[ai], upper(v.form)) && !(noJump && ACTIONS[ai].jump)) formActions.push_back(ai);
 				if (!actions.empty() && formActions.empty()) {
-					fprintf(stderr, "%s - %s (%s): none of the --action-keys are for this form, skipped\n", game.c_str(), e.name.c_str(), v.form.c_str());
+					fprintf(stderr, "%s - %s (%s): none of the --action-keys are for this form%s, skipped\n", game.c_str(), e.name.c_str(), v.form.c_str(),
+						noJump ? " (or here)" : "");
 					continue;
 				}
 				auto same = std::find_if(results.begin(), results.end(),
@@ -538,13 +581,14 @@ int main(int argc, char** argv) {
 					same->form += "/" + v.form;
 					continue;
 				}
-				fprintf(stderr, "%s - %s (%s, radius %g%s)\n", game.c_str(), e.name.c_str(), v.form.c_str(), v.radius, falling ? ", falling" : "");
+				fprintf(stderr, "%s - %s: (%s, radius %g%s)%s\n", game.c_str(), e.name.c_str(), v.form.c_str(), v.radius, falling ? ", falling" : "", dynaNote.c_str());
 				Model m;
 				initColCtx(m.colCtx, game, e.name, ch);
 				initializeSubdivisions(m.colCtx, tris);
 				m.radius = F(v.radius);
 				m.checkHeight = F(v.checkHeight);
-				m.lowDrop = falling ? 30 : 0;
+				// (a jumpslash also aims at the scan's falling clip points)
+				m.lowDrop = falling || anyJump(formActions) ? 30 : 0;
 				m.extendedOnly = extendedOnly;
 				m.build(tris, ch.numPolygons);
 				addDynaActors(m, dyna);
@@ -570,11 +614,15 @@ int main(int argc, char** argv) {
 				if (!simArg.empty()) return runSim(m, simArg, game, upper(v.form));
 				if (!triArg.empty()) return printTris(m, triArg);
 				vector<Clip> found = scan(m, threads, firstPerPair);
-				keepTypes(found, types);
+				keepTypes(found, types | (anyJump(formActions) ? TYPE_FALLING : 0));
 				// --type actions: the lunges aimed at the scan's walking and slope clip points
+				// (a jumpslash: the falling ones too)
 				if (!formActions.empty()) {
+					const auto ta = std::chrono::steady_clock::now();
 					found = actionScan(m, found, formActions, threads);
 					keepTypes(found, types);
+					actionPoints += found.size();
+					actionSecs += std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count();
 				}
 				// --pair: just the clips of that wall pair
 				if (onlyPusher >= 0) {
@@ -857,8 +905,14 @@ int main(int argc, char** argv) {
 				const int cap = thinCapForBudget(sets, ACTION_MAX_PER_PAIR, ACTION_MIN_PER_PAIR, ACTION_POINT_BUDGET);
 				size_t before = 0, after = 0;
 				for (FormResult& r : results) { before += r.clips.size(); thinClips(r.clips, cap); after += r.clips.size(); }
-				if (after < before) fprintf(stderr, "  actions: kept %zu of %zu clip points (at most %d per wall pair and action; --max-per-pair N sets it)\n", after, before, cap);
 				MAX_PER_PAIR = after < before ? cap : 0;
+			}
+			if (!actions.empty() && !results.empty()) {
+				size_t kept = 0;
+				for (const FormResult& r : results) kept += r.clips.size();
+				fprintf(stderr, "  = %zu action clip points (%.1fs)", actionPoints, actionSecs);
+				if (kept < actionPoints) fprintf(stderr, " (reduced to %zu for the file)", kept);
+				fprintf(stderr, "\n");
 			}
 			f << toJson(game, e.name, ch.numPolygons, falling, extendedOnly, results, dyna.raw, dyna.setups);
 			f.close();

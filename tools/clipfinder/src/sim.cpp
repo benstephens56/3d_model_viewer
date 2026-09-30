@@ -110,14 +110,17 @@ int runSim(const Model& m, const string& simArg, const string& game, const strin
 			const int facing = (int)strtol(yawS, nullptr, 0) & 0xFFFF;
 			const V3 start = { F(x), F(y), F(z) };
 			printf("%s, facing 0x%04X\n", a.name.c_str(), facing);
-			vector<std::function<V3(const V3&)>> moves;
-			vector<bool> swing;
-			bool noSpeed = false;
-			for (const ActionFrame& f : a.frames) {
-				moves.push_back([&a, f, facing, &noSpeed](const V3& p) { return actionStep(a, f, p, facing, noSpeed); });
-				swing.push_back(f.swing);
+			if (a.jump) printActionFrames(m, start, facing, ai[0]);  // (the jumpslash: in the air, then the landing slash)
+			else {
+				vector<std::function<V3(const V3&)>> moves;
+				vector<bool> swing;
+				bool noSpeed = false;
+				for (const ActionFrame& f : a.frames) {
+					moves.push_back([&a, f, facing, &noSpeed](const V3& p) { return actionStep(a, f, p, facing, noSpeed); });
+					swing.push_back(f.swing);
+				}
+				runSimFrames(m, start, moves, swing, &noSpeed);
 			}
-			runSimFrames(m, start, moves, swing, &noSpeed);
 			Scratch s;
 			s.stamp.assign(m.polys.size(), 0);
 			auto c = actionClip(m, s, start, facing, ai[0]);

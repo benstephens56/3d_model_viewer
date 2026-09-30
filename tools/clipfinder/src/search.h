@@ -33,6 +33,9 @@ struct Clip {
 	int action = -1;
 	int facing = 0;
 	vector<V3> frames;
+	// each frame's move, as a speed (move / 1.5) and angle from the facing (the JSON's actionFrames)
+	vector<std::pair<double, int>> frameMoves;
+	int airFrames = 0;    // a jumpslash: how many of the frames are in the air (the last one lands)
 	// --min-speed: the slowest move from a standable start that does it
 	// (reachability below); reachDone and no reach = none found
 	bool reachDone = false, hasReach = false;

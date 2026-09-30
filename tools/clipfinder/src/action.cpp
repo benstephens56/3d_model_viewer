@@ -18,7 +18,7 @@
 //   floor within 10 in front of prevPos (func_808381F8, a ledge check).
 //  Not modelled: the sword hitting a wall from animation frame 2 on
 //  (func_80842DF4 / func_808401F4): speedXZ -14, a recoil back.
-// Only grounded lunges: the jumpslash needs y velocity. The Deku stick (OoT
+// The jumpslash's air part isn't a table: see Action::jump and airFrames. The Deku stick (OoT
 // child, MM Human) has its own key, stick-slash: it counts as two-handed
 // (OoT Player_HoldsTwoHandedWeapon, MM Player_IsHoldingTwoHandedWeapon) and
 // always does the forward slash, so it's the 2h slash's frames. OoT child has
@@ -36,12 +36,24 @@ const vector<Action> ACTIONS = {
 	{ "2h-slash", "lunge 2h slash", "MM", { "HUMAN" }, { { -217, -392, -175, -545, 10, true }, { -261, -244, -217, -392, 5, true }, { -299, -122, -261, -244, 0, true }, { -331, -103, -299, -122, 0, true }, { -337, -150, -331, -103, 0, false }, { -297, -133, -337, -150, 0, false }, { -206, -83, -297, -133, 0, false }, { -167, -61, -206, -83, 0, false }, { -87, -15, -167, -61, 0, false }, { -63, -1, -87, -15, 0, false }, { -57, 2, -63, -1, 0, false } } },
 	{ "2h-stab", "lunge 2h stab", "MM", { "HUMAN" }, { { 76, 1964, -35, 1134, 10, true }, { 123, 2463, 76, 1964, 5, true }, { 123, 2463, 123, 2463, 0, false }, { 104, 2301, 123, 2463, 0, false }, { 21, 1766, 104, 2301, 0, false }, { -7, 1377, 21, 1766, 0, false }, { -39, 475, -7, 1377, 0, false }, { -48, 194, -39, 475, 0, false }, { -57, 2, -48, 194, 0, false } } },
 	{ "stick-slash", "lunge Deku stick slash", "MM", { "HUMAN" }, { { -217, -392, -175, -545, 10, true }, { -261, -244, -217, -392, 5, true }, { -299, -122, -261, -244, 0, true }, { -331, -103, -299, -122, 0, true }, { -337, -150, -331, -103, 0, false }, { -297, -133, -337, -150, 0, false }, { -206, -83, -297, -133, 0, false }, { -167, -61, -206, -83, 0, false }, { -87, -15, -167, -61, 0, false }, { -63, -1, -87, -15, 0, false }, { -57, 2, -63, -1, 0, false } } },
+	// The jumpslash (Action::jump): the landing slash's rows, from
+	// gen_jumpslash_frames.py (Lpower_jump_kiru_hit, then the first frame of its _end,
+	// the step back, which shield held cuts short). Row 0 moves at the landing's speed
+	// (-1 here). The -fwd keys hold the stick forward in the air (Action::stickForward).
+	// One-handed only: the two-handed weapons and the Deku stick jump the same way (only
+	// the step back, cut short, differs).
+	{ "1h-jumpslash", "adult jumpslash 1h", "OOT", { "ADULT" }, { { -26, 2728, -57, 0, -1, true }, { -26, 2686, -26, 2728, 0, true }, { -25, 2633, -26, 2686, 0, true }, { -25, 2636, -25, 2633, 0, true }, { -25, 2670, -25, 2636, 0, false }, { -25, 2699, -25, 2670, 0, false }, { -25, 2699, -25, 2699, 0, false }, { -24, 2699, -25, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false } }, true, false },
+	{ "1h-jumpslash-fwd", "adult jumpslash 1h, stick forward", "OOT", { "ADULT" }, { { -26, 2728, -57, 0, -1, true }, { -26, 2686, -26, 2728, 0, true }, { -25, 2633, -26, 2686, 0, true }, { -25, 2636, -25, 2633, 0, true }, { -25, 2670, -25, 2636, 0, false }, { -25, 2699, -25, 2670, 0, false }, { -25, 2699, -25, 2699, 0, false }, { -24, 2699, -25, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false } }, true, true },
+	{ "1h-jumpslash", "child jumpslash 1h", "OOT", { "CHILD" }, { { -26, 2728, -36, 0, -1, true }, { -26, 2686, -26, 2728, 0, true }, { -25, 2633, -26, 2686, 0, true }, { -25, 2636, -25, 2633, 0, true }, { -25, 2670, -25, 2636, 0, false }, { -25, 2699, -25, 2670, 0, false }, { -25, 2699, -25, 2699, 0, false }, { -24, 2699, -25, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false } }, true, false },
+	{ "1h-jumpslash-fwd", "child jumpslash 1h, stick forward", "OOT", { "CHILD" }, { { -26, 2728, -36, 0, -1, true }, { -26, 2686, -26, 2728, 0, true }, { -25, 2633, -26, 2686, 0, true }, { -25, 2636, -25, 2633, 0, true }, { -25, 2670, -25, 2636, 0, false }, { -25, 2699, -25, 2670, 0, false }, { -25, 2699, -25, 2699, 0, false }, { -24, 2699, -25, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false } }, true, true },
+	{ "1h-jumpslash", "jumpslash 1h", "MM", { "HUMAN" }, { { -26, 2728, -26, 2728, -1, false }, { -26, 2686, -26, 2728, 0, true }, { -25, 2633, -26, 2686, 0, true }, { -25, 2636, -25, 2633, 0, true }, { -25, 2670, -25, 2636, 0, false }, { -25, 2699, -25, 2670, 0, false }, { -25, 2699, -25, 2699, 0, false }, { -24, 2699, -25, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false } }, true, false },
+	{ "1h-jumpslash-fwd", "jumpslash 1h, stick forward", "MM", { "HUMAN" }, { { -26, 2728, -26, 2728, -1, false }, { -26, 2686, -26, 2728, 0, true }, { -25, 2633, -26, 2686, 0, true }, { -25, 2636, -25, 2633, 0, true }, { -25, 2670, -25, 2636, 0, false }, { -25, 2699, -25, 2670, 0, false }, { -25, 2699, -25, 2699, 0, false }, { -24, 2699, -25, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false }, { -24, 2699, -24, 2699, 0, false } }, true, true },
 };
 
 static const double ACTION_SCALE = F(0.01);
 static const double MM_HUMAN_SCALE = F(11.0 / 17.0);  // MM Human's ageProperties->unk_08 (the diffScale)
 
-V3 actionStep(const Action& a, const ActionFrame& f, const V3& pos, int facing, bool noSpeed) {
+V3 actionStep(const Action& a, const ActionFrame& f, const V3& pos, int facing, bool noSpeed, double speed) {
 	const double sn = sinS(facing), cs = cosS(facing);
 	double dx, dz;
 	if (a.game == "MM") {
@@ -57,7 +69,68 @@ V3 actionStep(const Action& a, const ActionFrame& f, const V3& pos, int facing, 
 		dz = F(dz * ACTION_SCALE);
 	}
 	V3 p = { F(pos.x + dx), pos.y, F(pos.z + dz) };
-	return noSpeed ? V3{ p.x, F(p.y - GROUND_DROP), p.z } : moveStep(p, facing, F(f.speed));
+	return noSpeed ? V3{ p.x, F(p.y - GROUND_DROP), p.z } : moveStep(p, facing, F(std::isnan(speed) ? std::max(f.speed, 0.0) : speed));
+}
+
+bool anyJump(const vector<int>& actions) {
+	return std::any_of(actions.begin(), actions.end(), [](int i) { return ACTIONS[i].jump; });
+}
+
+// The jumpslash in the air (Action::jump)
+static const double JUMP_SPEED = 5, JUMP_VY = 5;
+static const double JUMP_GRAVITY0 = F(-100 / 100.0);  // REG(68) / 100.0f, the Kokiri boots' (MM: Human's)
+static const double JUMP_GRAVITY = F(-1.2);
+static const double JUMP_AIR_DECEL = F(0.1);  // Math_AsymStepToF(&speedXZ, target, 0.05, 0.1): the stick left alone (target 0)
+static const double JUMP_AIR_ACCEL = F(0.05); // ... held forward (a target above 5)
+static const double MIN_VELOCITY_Y = -20;     // actor.minVelocityY
+static const int JUMP_MAX_AIR = 60;           // frames in the air before giving up (falling out)
+
+// One air frame's physics (Actor_UpdateVelocityXZGravity, Actor_UpdatePos):
+// velocity.y takes the gravity first, then posNext = pos + velocity x 1.5
+static double airVy(double vy, double g) { vy = F(vy + g); return vy < MIN_VELOCITY_Y ? MIN_VELOCITY_Y : vy; }
+// The air action's speedXZ step (func_8083DFE0 / MM func_8083CBC4)
+static double airSpeed(const Action& a, double speed) {
+	if (!a.stickForward) return std::max(0.0, (double)F(speed - JUMP_AIR_DECEL));
+	// full stick: 60 x 0.8 x 0.14, capped at the run speed limit in the air
+	const double target = std::min((double)F(F(60 * F(0.8)) * F(0.14)), a.game == "MM" ? 10.0 : 6.0);
+	return std::min(target, (double)F(speed + JUMP_AIR_ACCEL));
+}
+static V3 airNext(const V3& pos, int facing, double speed, double vy) {
+	const V3 n = moveStep(pos, facing, speed);
+	return { n.x, F(pos.y + F(vy * SPEED_RATE)), n.z };
+}
+
+// The action's frames unobstructed on flat ground (y 0) from (0, 0, 0): each
+// frame's posNext. For aiming (actionScan).
+static vector<V3> nominalFrames(const Action& a, int facing) {
+	vector<V3> out;
+	V3 pos = { 0, 0, 0 };
+	double landSpeed = 0, firstY = -GROUND_DROP;
+	if (a.jump) {
+		double vy = JUMP_VY, g = JUMP_GRAVITY0, speed = JUMP_SPEED;
+		for (int k = 0; k < JUMP_MAX_AIR; k++) {
+			vy = airVy(vy, g);
+			const V3 n = airNext(pos, facing, speed, vy);
+			out.push_back(n);
+			if (n.y <= 0 && vy <= 0) {
+				landSpeed = std::max(0.0, (double)F(speed - 1));
+				firstY = F(F(airVy(vy, JUMP_GRAVITY)) * SPEED_RATE);
+				pos = { n.x, 0, n.z };
+				break;
+			}
+			pos = n;
+			g = JUMP_GRAVITY;
+			speed = airSpeed(a, speed);
+		}
+	}
+	for (size_t i = 0; i < a.frames.size(); i++) {
+		const ActionFrame& f = a.frames[i];
+		V3 n = actionStep(a, f, pos, facing, false, f.speed < 0 ? landSpeed : NAN);
+		if (a.jump && i == 0) n.y = firstY;
+		out.push_back(n);
+		pos = { n.x, 0, n.z };
+	}
+	return out;
 }
 
 void actionFrameMove(const Action& a, const ActionFrame& f, double& speed, int& angle) {
@@ -102,7 +175,48 @@ struct FrameOut {
 	double landY = 0;
 	int floorPoly = -1;
 	bool reverted = false;  // off the ground during the swing: put back at prev
+	bool air = false;       // a jumpslash frame in the air (landed: the one he lands on)
+	double vy = 0;          // (air) velocity.y for the frame
 };
+
+// The jumpslash's frames in the air (Action::jump), from `start` until the
+// floor check puts him on a floor falling (velocity.y <= 0): the move at the
+// frame's speedXZ and velocity.y, the line test or pushes at posNext, the
+// floor check from prevPos.y + 50, which also lifts him onto a floor he's
+// under while rising, without landing (func_8002E2AC). False if he never
+// lands (JUMP_MAX_AIR frames). Else pos is where he lands, landSpeed the
+// landing slash's first speedXZ and firstY that frame's posNext.y.
+static bool airFrames(const Model& m, Scratch& s, const Action& a, const V3& start, int facing, const Tol& tol, vector<FrameOut>& out,
+	V3& pos, double& landSpeed, double& firstY) {
+	double vy = JUMP_VY, g = JUMP_GRAVITY0, speed = JUMP_SPEED;
+	pos = start;
+	for (int k = 0; k < JUMP_MAX_AIR; k++) {
+		vy = airVy(vy, g);
+		FrameOut& o = out.emplace_back();
+		o.air = true;
+		o.vy = vy;
+		o.prev = pos;
+		o.next = airNext(pos, facing, speed, vy);
+		if (auto lf = lineFrame(m, s, pos, o.next, tol)) { o.res = lf->res; o.trace = lf->trace; }
+		else o.res = m.sphereStep(o.next, tol, &o.trace, &pos);
+		auto fy = m.floorCheck(o.res.x, o.res.z, F(pos.y + 50), &o.floorPoly);
+		if (fy && F(*fy - o.res.y) >= 0) {
+			o.res.y = *fy;
+			if (vy <= 0) {
+				o.landed = true;
+				o.landY = *fy;
+				pos = { o.res.x, *fy, o.res.z };
+				landSpeed = std::max(0.0, (double)F(speed - 1));
+				firstY = F(pos.y + F(airVy(vy, JUMP_GRAVITY) * SPEED_RATE));
+				return true;
+			}
+		}
+		pos = o.res;
+		g = JUMP_GRAVITY;
+		speed = airSpeed(a, speed);
+	}
+	return false;
+}
 
 // The action's frames from `start`, each a walking frame: the move, the
 // line test (or the pushes), then the floor check from prevPos.y + 50. Stops
@@ -110,11 +224,16 @@ struct FrameOut {
 void runFrames(const Model& m, Scratch& s, const V3& start, int facing, const Action& a, const Tol& tol, vector<FrameOut>& out) {
 	out.clear();
 	V3 pos = start;
+	double landSpeed = 0, firstY = NAN;
+	// (the jumpslash: in the air first; never landing, those frames are all)
+	if (a.jump && !airFrames(m, s, a, start, facing, tol, out, pos, landSpeed, firstY)) return;
 	bool noSpeed = false;  // (a swing frame put him back: speedXZ zeroed)
-	for (const ActionFrame& af : a.frames) {
+	for (size_t i = 0; i < a.frames.size(); i++) {
+		const ActionFrame& af = a.frames[i];
 		FrameOut& o = out.emplace_back();
 		o.prev = pos;
-		o.next = actionStep(a, af, pos, facing, noSpeed);
+		o.next = actionStep(a, af, pos, facing, noSpeed, af.speed < 0 ? landSpeed : NAN);
+		if (a.jump && i == 0) o.next.y = firstY;
 		if (auto lf = lineFrame(m, s, pos, o.next, tol)) { o.res = lf->res; o.trace = lf->trace; }
 		else o.res = m.sphereStep(o.next, tol, &o.trace, &pos);
 		auto fy = m.floorCheck(o.res.x, o.res.z, F(pos.y + 50), &o.floorPoly);
@@ -157,7 +276,10 @@ std::optional<Verdict> judge(const Model& m, Scratch& s, const V3& start, const 
 				if (t.poly == cw) continue;
 				if (planeDist(C, t.from.x, sphY, t.from.z) >= 0 && planeDist(C, t.to.x, sphY, t.to.z) < 0) { p = &t; break; }
 			}
-			if (!p) for (int i = (int)o.trace.size() - 1; i >= 0; i--) if (o.trace[i].poly != cw) { p = &o.trace[i]; break; }
+			// (in the air, only a push that took him across it: jumping off a
+			// ledge, the line from the start at his new height can go through
+			// the cliff under it, with no push to do with it)
+			if (!p && !o.air) for (int i = (int)o.trace.size() - 1; i >= 0; i--) if (o.trace[i].poly != cw) { p = &o.trace[i]; break; }
 			if (!p) return std::nullopt;  // (no push did it)
 			v.crossed = cw;
 			v.pusher = p->poly;
@@ -217,7 +339,6 @@ std::optional<Clip> actionClip(const Model& m, Scratch& s, const V3& start, int 
 		c.acutePoint = sv && sv->kind < 2 && sv->crossed == v->crossed && sv->pusher == v->pusher && sv->onFace;
 	}
 	const FrameOut& o = fr[v->frame];
-	const ActionFrame& af = a.frames[std::min((size_t)v->frame, a.frames.size() - 1)];
 	c.cross = v->cross;
 	c.pusher = v->pusher;
 	c.crossed = v->crossed;
@@ -233,7 +354,12 @@ std::optional<Clip> actionClip(const Model& m, Scratch& s, const V3& start, int 
 	if (c.cross) c.yaws = { c.yaw };
 	c.action = action;
 	c.facing = facing & 0xFFFF;
-	for (const FrameOut& f : fr) c.frames.push_back(f.landed ? V3{ f.res.x, f.landY, f.res.z } : f.res);
+	for (const FrameOut& f : fr) {
+		if (f.air) c.airFrames++;
+		c.frames.push_back(f.landed ? V3{ f.res.x, f.landY, f.res.z } : f.res);
+		const double dx = F(f.next.x - f.prev.x), dz = F(f.next.z - f.prev.z), sp = std::hypot(dx, dz) / SPEED_RATE;
+		c.frameMoves.push_back({ sp, sp > 0 ? (int16_t)(yawOf(dx, dz) - facing) : 0 });
+	}
 	// no stick speed to reach it with: the action is the move
 	c.reachDone = c.hasReach = true;
 	c.reachSpeed = 0;
@@ -242,12 +368,38 @@ std::optional<Clip> actionClip(const Model& m, Scratch& s, const V3& start, int 
 	return c;
 }
 
+void printActionFrames(const Model& m, const V3& start, int facing, int action) {
+	const Action& a = ACTIONS[action];
+	Scratch s;
+	s.stamp.assign(m.polys.size(), 0);
+	vector<FrameOut> fr;
+	runFrames(m, s, start, facing, a, LOOSE, fr);
+	auto P = [](const V3& v) { char b[96]; snprintf(b, sizeof b, "(%.9g, %.9g, %.9g)", v.x, v.y, v.z); return string(b); };
+	printf("start %s, in bounds: %s\n", P(start).c_str(), m.isInBounds(s, start, true) ? "yes" : "NO");
+	for (size_t i = 0; i < fr.size(); i++) {
+		const FrameOut& o = fr[i];
+		printf("frame %zu%s: move (%.9g, %.9g)%s, posNext %s\n", i + 1, o.air ? " (air)" : "", F(o.next.x - o.prev.x), F(o.next.z - o.prev.z),
+			o.air ? (", velocity.y " + std::to_string(o.vy)).c_str() : "", P(o.next).c_str());
+		for (const Push& t : o.trace)
+			printf("  %s %s %s -> %s\n", m.polyName(t.poly).c_str(), t.line ? "line test snaps" : "pushes", P(t.from).c_str(), P(t.to).c_str());
+		if (o.reverted) printf("  off the ground with the sword swing active: put back at %s, speedXZ zeroed\n", P(o.prev).c_str());
+		else if (o.landed) printf("  %s %s at y %.9g: %s\n", o.air ? "lands on" : "on", m.polyName(o.floorPoly).c_str(), o.landY,
+			m.isInBounds(s, { o.res.x, o.landY, o.res.z }) ? "in bounds" : "OUT OF BOUNDS");
+		else printf("  in the air at %s\n", P(o.res).c_str());
+	}
+	if (!fr.empty() && !fr.back().landed) printf("(never lands, or off the ground: the frames stop there)\n");
+}
+
 vector<Clip> actionScan(const Model& m, const vector<Clip>& targets, const vector<int>& actions, int threads) {
 	auto t0 = std::chrono::steady_clock::now();
 	// the scan's walking and slope clip points (not falling or ground: those
-	// need y velocity)
+	// need y velocity; the jumpslash has it, so its falling ones too)
+	const bool jump = anyJump(actions);
 	vector<const Clip*> todo;
-	for (const Clip& c : targets) if (c.hasNext && c.drop == 0 && (c.kind < 2 || c.kind == 2)) todo.push_back(&c);
+	for (const Clip& c : targets) if (c.hasNext && (c.drop == 0 || jump) && (c.kind < 2 || c.kind == 2)) todo.push_back(&c);
+	// each action's frames unobstructed at facing 0: the moves to aim
+	std::map<int, vector<V3>> nominal0;
+	for (int ai : actions) nominal0[ai] = nominalFrames(ACTIONS[ai], 0);
 	// Directions the clip frame's move is tried in: the target's own move and
 	// the crossing yaws that worked, each turned by these.
 	static const int FAN[] = { 0, -0x80, 0x80, -0x100, 0x100, -0x200, 0x200, -0x400, 0x400, -0x800, 0x800, -0x1000, 0x1000 };
@@ -273,31 +425,39 @@ vector<Clip> actionScan(const Model& m, const vector<Clip>& targets, const vecto
 			for (int y : t.yaws) addDir(y);
 			for (int ai : actions) {
 				const Action& a = ACTIONS[ai];
+				// (a falling target: the jumpslash's falling frames only)
+				if (t.drop > 0 && !a.jump) continue;
+				const vector<V3>& N0 = nominal0[ai];
 				bool found = false;
-				for (size_t k = 0; k < a.frames.size() && !found; k++) {
+				for (size_t k = 0; k < N0.size() && !found; k++) {
 					// (only the frames that move Link a fair way can take him through)
-					double kSpeed;
-					int kAngle;
-					actionFrameMove(a, a.frames[k], kSpeed, kAngle);
-					if (kSpeed < 2) continue;
+					const double mx = F(N0[k].x - (k ? N0[k - 1].x : 0)), mz = F(N0[k].z - (k ? N0[k - 1].z : 0));
+					if (std::hypot(mx, mz) / SPEED_RATE < 2) continue;
+					const int kAngle = yawOf(mx, mz);
 					for (int d : dirs) {
 						if (found) break;
 						// facing so that frame k moves along d
 						const int facing = (d - kAngle) & 0xFFFF;
 						// frames 0..k's moves, unobstructed
-						V3 D = { 0, 0, 0 };
-						for (size_t j = 0; j <= k; j++) D = actionStep(a, a.frames[j], D, facing);
+						const V3 D = nominalFrames(a, facing)[k];
 						const V3 u = moveStep({ 0, 0, 0 }, d, 1 / SPEED_RATE);
-						for (double al : ALONG) {
-							auto st = standSpotCached(m, s, F(P.x - D.x + al * u.x), F(P.z - D.z + al * u.z), floorRef);
-							if (!st) continue;
-							if (!tried.insert({ st->x, st->z, (double)facing, (double)ai }).second) continue;
-							if (!m.keepLoadVoid && m.startOnLoadVoid(*st)) continue;
-							auto c = actionClip(m, s, *st, facing, ai);
-							if (!c || !m.isInBounds(s, *st, true)) continue;
-							local.push_back(*c);
-							found = true;
-							break;
+						// the floor to start from: the target's own, and (in the
+						// air) the one that puts frame k's posNext at its height
+						vector<double> refs = { floorRef };
+						if (a.jump && std::fabs(P.y - D.y - floorRef) > 1) refs.push_back(F(P.y - D.y));
+						for (double ref : refs) {
+							if (found) break;
+							for (double al : ALONG) {
+								auto st = standSpotCached(m, s, F(P.x - D.x + al * u.x), F(P.z - D.z + al * u.z), ref);
+								if (!st) continue;
+								if (!tried.insert({ st->x, st->z, (double)facing, (double)ai }).second) continue;
+								if (!m.keepLoadVoid && m.startOnLoadVoid(*st)) continue;
+								auto c = actionClip(m, s, *st, facing, ai);
+								if (!c || !m.isInBounds(s, *st, true)) continue;
+								local.push_back(*c);
+								found = true;
+								break;
+							}
 						}
 					}
 				}
@@ -310,18 +470,19 @@ vector<Clip> actionScan(const Model& m, const vector<Clip>& targets, const vecto
 			auto now = std::chrono::steady_clock::now();
 			if (std::chrono::duration<double>(now - last).count() >= 0.5 || n == todo.size()) {
 				last = now;
-				fprintf(stderr, "\r  action targets %zu / %zu (%.0fs)   ", n, todo.size(), std::chrono::duration<double>(now - t0).count());
+				fprintf(stderr, "\r     %zu / %zu targets (%.0fs)   ", n, todo.size(), std::chrono::duration<double>(now - t0).count());
 			}
 		}
 		std::lock_guard<std::mutex> g(outMu);
 		clips.insert(clips.end(), local.begin(), local.end());
 	};
+	fprintf(stderr, "  Actions: each attack aimed at %zu of the clip points above\n", todo.size());
 	{
 		vector<std::thread> ts;
 		for (int i = 0; i < threads; i++) ts.emplace_back(worker);
 		for (auto& t : ts) t.join();
 	}
-	fprintf(stderr, "\n");
+	fprintf(stderr, "\r%60s\r", "");
 	// Deterministic order, and one clip per start and action
 	std::sort(clips.begin(), clips.end(), [](const Clip& a, const Clip& b) {
 		if (a.action != b.action) return a.action < b.action;
@@ -348,9 +509,8 @@ vector<Clip> actionScan(const Model& m, const vector<Clip>& targets, const vecto
 		std::set<std::pair<int, int>> pairs;
 		size_t n = 0;
 		for (const Clip& c : clips) if (c.action == ai) { pairs.insert({ c.pusher, c.crossed }); n++; }
-		fprintf(stderr, "  %s: %zu wall pairs, %zu points\n", ACTIONS[ai].name.c_str(), pairs.size(), n);
+		fprintf(stderr, "     %s: %zu wall pairs, %zu points\n", ACTIONS[ai].name.c_str(), pairs.size(), n);
 	}
-	fprintf(stderr, "  action clips: %zu points from %zu targets in %.1fs\n", clips.size(), todo.size(),
-		std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+	// (the total: main, after the file's thinning)
 	return clips;
 }

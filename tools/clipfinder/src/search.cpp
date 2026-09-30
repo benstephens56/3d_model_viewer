@@ -618,14 +618,29 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		acutePairs.insert({ a, b });
 	};
 
-	auto progress = [&](const char* phase, size_t done, size_t total) {
+	// The terminal: each step a numbered heading saying what it does, a
+	// progress count under it, then how many clip points it found
+	// (what each step does: the README's "The terminal")
+	int stepNo = 0;
+	auto stepT0 = t0;
+	string stepTitle;
+	auto stepStart = [&](const string& title) {
+		stepTitle = std::to_string(++stepNo) + ". " + title;
+		fprintf(stderr, "  %s", stepTitle.c_str());
+		stepT0 = std::chrono::steady_clock::now();
+	};
+	auto stepDone = [&](size_t points, const string& more = "") {
+		fprintf(stderr, "\r  %s -> %zu clip points (%.1fs)%s                    \n", stepTitle.c_str(), points,
+			std::chrono::duration<double>(std::chrono::steady_clock::now() - stepT0).count(), more.c_str());
+	};
+	auto progress = [&](const char* unit, size_t done, size_t total) {
 		static std::mutex pm;
 		static auto last = std::chrono::steady_clock::now();
 		std::lock_guard<std::mutex> g(pm);
 		auto now = std::chrono::steady_clock::now();
 		if (std::chrono::duration<double>(now - last).count() < 0.5 && done != total) return;
 		last = now;
-		fprintf(stderr, "\r  %s %zu / %zu (%.0fs)   ", phase, done, total, std::chrono::duration<double>(now - t0).count());
+		fprintf(stderr, "\r  %s: %zu / %zu %s (%.0fs)   ", stepTitle.c_str(), done, total, unit, std::chrono::duration<double>(now - stepT0).count());
 	};
 
 	// fine: --wall-step's pass (see fineFound)
@@ -633,7 +648,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		Scratch s;
 		s.stamp.assign(m.polys.size(), 0);
 		vector<Clip> local;
-		const char* phase = fine ? "fine wall pairs" : "wall pairs";
+		const char* phase = "wall pairs";
 		SharedSet& seenP = fine ? seenFine : seen;
 		for (;;) {
 			size_t pi = nextPair++;
@@ -686,7 +701,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		Scratch s;
 		s.stamp.assign(m.polys.size(), 0);
 		vector<Clip> local;
-		const char* phase = fine ? "fine crossing walls" : "crossing walls";
+		const char* phase = "pushing walls";
 		for (;;) {
 			size_t ai = nextPusher++;
 			if (ai >= pushers.size()) break;
@@ -780,7 +795,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		clips.insert(clips.end(), local.begin(), local.end());
 	};
 
-	fprintf(stderr, "  %zu wall pairs, %zu pushing walls, %d threads\n", pairs.size(), pushers.size(), threads);
+	fprintf(stderr, "  %zu wall pairs, %zu walls that push\n", pairs.size(), pushers.size());
 	if (!m.bgActors.empty()) {
 		size_t one = 0, both = 0;
 		for (const Pair& p : pairs) {
@@ -788,22 +803,26 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 			if (n == 1) one++;
 			else if (n == 2) both++;
 		}
-		fprintf(stderr, "  (dynapoly: %zu pairs with one dynapoly wall, %zu dynapoly with dynapoly)\n", one, both);
+		fprintf(stderr, "  (dynapolys: %zu of the pairs have one dynapoly wall, %zu two)\n", one, both);
 	}
 	// (--type: the wall push scan only if a wall push type is picked)
 	if (m.wallPushes) {
 		{
+			stepStart("Wall pushes from a standing start");
+			const size_t before = clips.size();
 			vector<std::thread> ts;
 			for (int i = 0; i < threads; i++) ts.emplace_back(worker1, false);
 			for (auto& t : ts) t.join();
+			stepDone(clips.size() - before);
 		}
-		fprintf(stderr, "\n  standing points: %.1fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 		{
+			stepStart("Wall pushes through a wall's face");
+			const size_t before = clips.size();
 			vector<std::thread> ts;
 			for (int i = 0; i < threads; i++) ts.emplace_back(worker2, false);
 			for (auto& t : ts) t.join();
+			stepDone(clips.size() - before);
 		}
-		fprintf(stderr, "\n");
 	}
 	// Slope clips (slope.h): every wall, along its bottom edge
 	vector<int> slopeWalls;
@@ -829,18 +848,18 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 			slopeClipsForWall(m, s, m.polys[slopeWalls[wi]], pairFound, [&](const Clip& c) {
 				if (claimPair(c.pusher, c.crossed)) local.push_back(c);
 			});
-			progress("slope walls", ++slopesDone, slopeWalls.size());
+			progress("walls", ++slopesDone, slopeWalls.size());
 		}
 		std::lock_guard<std::mutex> g(outMu);
 		slopeFound += local.size();
 		clips.insert(clips.end(), local.begin(), local.end());
 	};
 	if (!slopeWalls.empty()) {
-		auto ts0 = std::chrono::steady_clock::now();
+		stepStart("Slope clips");
 		vector<std::thread> ts;
 		for (int i = 0; i < threads; i++) ts.emplace_back(worker3);
 		for (auto& t : ts) t.join();
-		fprintf(stderr, "\n  slope clips: %zu points (%.1fs)\n", slopeFound, std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count());
+		stepDone(slopeFound);
 	}
 	// Ground clips (ground.h): every wall rising out of a floor, along its bottom edge
 	vector<int> groundWalls;
@@ -868,18 +887,18 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 			groundClipsForWall(m, s, m.polys[groundWalls[wi]], pairFound, [&](const Clip& c) {
 				if (claimPair(c.pusher, c.crossed)) local.push_back(c);
 			});
-			progress("ground walls", ++groundsDone, groundWalls.size());
+			progress("walls", ++groundsDone, groundWalls.size());
 		}
 		std::lock_guard<std::mutex> g(outMu);
 		groundFound += local.size();
 		clips.insert(clips.end(), local.begin(), local.end());
 	};
 	if (!groundWalls.empty()) {
-		auto tg0 = std::chrono::steady_clock::now();
+		stepStart("Ground clips");
 		vector<std::thread> ts;
 		for (int i = 0; i < threads; i++) ts.emplace_back(worker4);
 		for (auto& t : ts) t.join();
-		fprintf(stderr, "\n  ground clips: %zu points (%.1fs)\n", groundFound, std::chrono::duration<double>(std::chrono::steady_clock::now() - tg0).count());
+		stepDone(groundFound);
 	}
 	// --wall-step: the wall push passes again, finer and uncapped, on the wall
 	// pairs without a clip yet, one clip each (a pair is known to clip then;
@@ -890,15 +909,16 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		for (const auto& pr : acutePairs) fineFound.insert(pr);
 		const size_t before = clips.size(), knownPairs = fineFound.size();
 		nextPair = 0; pairsDone = 0; nextPusher = 0; pushersDone = 0;
+		char title[64];
+		snprintf(title, sizeof title, "Finer pass (--wall-step %g)", m.wallStep);
+		stepStart(title);
 		for (auto worker : { std::function<void(bool)>(worker1), std::function<void(bool)>(worker2) }) {
 			vector<std::thread> ts;
 			for (int i = 0; i < threads; i++) ts.emplace_back(worker, true);
 			for (auto& t : ts) t.join();
-			fprintf(stderr, "\n");
 		}
-		fprintf(stderr, "  --wall-step %g: %zu more wall pairs (%zu points; %zu pairs already had clips) in %.1fs\n",
-			m.wallStep, fineFound.size() - knownPairs, clips.size() - before, knownPairs,
-			std::chrono::duration<double>(std::chrono::steady_clock::now() - tf0).count());
+		stepDone(clips.size() - before, ", " + std::to_string(fineFound.size() - knownPairs) + " new wall pairs");
+		(void)tf0;
 	}
 	// Deterministic order: standing points first, then crossings, by position.
 	std::sort(clips.begin(), clips.end(), [](const Clip& a, const Clip& b) {
@@ -939,9 +959,8 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	for (const Clip& c : out) if (c.acutePoint && c.kind < 2) acute.insert({ c.pusher, c.crossed });
 	for (Clip& c : out) if (c.kind < 2) c.kind = acute.count({ c.pusher, c.crossed }) ? 0 : 1;
 	double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-	fprintf(stderr, "  %zu clip points in %.1fs\n", out.size(), secs);
-	if (loadVoidDropped)
-		fprintf(stderr, "  (left out %zu clip points starting on a loading zone or void plane; --keep-load-void keeps them)\n", loadVoidDropped);
+	fprintf(stderr, "  = %zu clip points in all (%.1fs)\n", out.size(), secs);
+	(void)loadVoidDropped;
 	if (m.extendedOnly && !acutePairs.empty())
 		fprintf(stderr, "  (extended only: left out %zu acute wall pairs, and their %zu points that aren't acute on their own)\n",
 			acutePairs.size(), acuteDropped);

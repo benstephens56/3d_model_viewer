@@ -30,19 +30,38 @@
 // != 0): if Link leaves the ground, func_8083AA10 (MM func_8083827C) puts him
 // back at prevPos and zeroes speedXZ - no lunging off a ledge.
 struct ActionFrame { int jx, jz, px, pz; double speed; bool swing; };
+// jump: the jumpslash (Z-targeting + A: func_8083BA90 / MM func_808395F0).
+// Link leaves the ground at speedXZ 5, velocity.y 5, and moves as any actor
+// in the air (Player_Action_80844AF4 / MM Player_Action_29): no root motion,
+// gravity the boots' -1.0 for the first frame (it's set before the action
+// that starts the jump runs) then -1.2. The stick left alone, speedXZ steps
+// down 0.1 a frame (Math_AsymStepToF to 0); stickForward: the stick held
+// forward (Z held, the camera behind him), up 0.05 a frame towards the
+// stick's speed, full stick x 0.8 x 0.14 = 6.72, at most the run speed limit
+// (OoT 6, MM 10; on flat ground: a floor pitch lowers it). The yaw stays the
+// facing either way. Where the floor check first puts him on a floor with
+// velocity.y <= 0 he lands: speedXZ - 1 (func_80843E64), and the landing
+// slash starts - `frames`, the root motion as for the lunges, row 0 moving at
+// that speed. That first frame's posNext is velocity.y (not yet reset to the
+// ground's -4: the landing frame doesn't) - 1.2 below the floor, x 1.5. The
+// rows stop one frame into the step back after it: shield held (the tester
+// holds R) interrupts it.
 struct Action {
-	string key;       // --actions name, e.g. "1h-slash"
+	string key;       // --action-keys name, e.g. "1h-slash"
 	string name;      // e.g. "lunge 1h slash"
 	string game;      // "OOT" / "MM"
 	vector<string> forms;  // upper case, the forms it's for
 	vector<ActionFrame> frames;
+	bool jump = false;
+	bool stickForward = false;  // (jump) the stick held forward in the air
 };
 extern const vector<Action> ACTIONS;
 
 // Where frame f of action a moves Link from pos (posNext's x / z; y is
 // pos.y - GROUND_DROP), facing `facing`.
 // noSpeed: speedXZ was zeroed (a swing frame put Link back): root motion only.
-V3 actionStep(const Action& a, const ActionFrame& f, const V3& pos, int facing, bool noSpeed = false);
+// speed: the frame's speedXZ instead of f.speed (the jumpslash's landing row).
+V3 actionStep(const Action& a, const ActionFrame& f, const V3& pos, int facing, bool noSpeed = false, double speed = NAN);
 // Frame f's move as a speed (move / 1.5) and angle from the facing, for
 // display; the angle is the s16 yaw at facing 0.
 void actionFrameMove(const Action& a, const ActionFrame& f, double& speed, int& angle);
@@ -59,9 +78,16 @@ bool actionForForm(const Action& a, const string& formUpper);
 // lifted him behind the wall, as slope.h), or none.
 std::optional<Clip> actionClip(const Model& m, Scratch& s, const V3& start, int facing, int action);
 
+// --sim @KEY: each frame of the action from `start` (the move, the pushes,
+// where the floor check leaves him), as actionClip runs them
+void printActionFrames(const Model& m, const V3& start, int facing, int action);
+
+// Whether any of `actions` is a jumpslash (its targets include falling clip points)
+bool anyJump(const vector<int>& actions);
+
 // Every action in `actions` aimed at every walking and slope clip point of
-// `targets` (the ordinary scan's): from many facings, the start the lunge
-// takes to that point's posNext (for each of its frames), where Link rests
-// there. At most one clip per target point and action. Wall pairs get one
+// `targets` (the ordinary scan's; a jumpslash: the falling ones too): from
+// many facings, the start the action takes to that point's posNext (for each
+// of its frames, unobstructed on flat ground), where Link rests there. At most one clip per target point and action. Wall pairs get one
 // category per action, as the scan's.
 vector<Clip> actionScan(const Model& m, const vector<Clip>& targets, const vector<int>& actions, int threads);
