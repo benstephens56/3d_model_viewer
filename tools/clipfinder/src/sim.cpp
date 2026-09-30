@@ -214,8 +214,16 @@ int runSim(const Model& m, const string& simArg, const string& game, const strin
 			printf("  TRI %d: (%g, %g, %g) (%g, %g, %g) (%g, %g, %g)  normal (%.4f, %.4f, %.4f)\n", id,
 				q.ax, q.ay, q.az, q.bx, q.by, q.bz, q.cx, q.cy, q.cz, q.nx / q.nMag, q.ny / q.nMag, q.nz / q.nMag);
 		}
+		// (the line test first, as the scan's crossingClip does: a sloped
+		// floor pusher only snaps him through it)
 		PushList st;
-		V3 sres = m.sphereStep(next, STRICT, &st, &start);
+		V3 sres;
+		auto sf = lineFrame(m, s, start, next, STRICT);
+		if (sf) {
+			printf("  without the extended planes: the line test hits TRI %d, snapped to %s\n", sf->hit.poly, P(sf->trace[0].to));
+			sres = sf->res;
+			st = sf->trace;
+		} else sres = m.sphereStep(next, STRICT, &st, &start);
 		for (const Push& t : st) if (!t.line) printf("  without the extended planes: TRI %d pushes %s -> %s\n", t.poly, P(t.from), P(t.to));
 		auto sclip = clipFromFrame(m, s, start, sres, st, STRICT, drop > 0 ? NAN : start.y, &mv);
 		printf("without the extended planes: %s\n", !sclip ? "no clip (extended)"
@@ -223,9 +231,13 @@ int runSim(const Model& m, const string& simArg, const string& game, const strin
 			: "still clips, but pushed from beside the pusher, past its edge (extended)");
 		if (drop > 0) {
 			bool noFloor;
-			auto land = landing(m, s, res, start.y, noFloor, clip->crossed);
+			auto land = landing(m, s, res, start.y, noFloor, clip->crossed, &start);
+			int lp = -1;
+			auto ly = m.floorCheck(res.x, res.z, F(start.y + 50), &lp);
+			if (!land && ly) printf("falling: lands on %s at y %.9g\n", m.polyName(lp).c_str(), *ly);
 			printf("falling: %s\n", !land ? "lands in bounds" : noFloor ? "no floor under him: falls out"
-				: (string(m.isInBounds(s, *land) ? "lands in bounds past the dynapoly (counts) at " : "lands out of bounds at ") + P(*land)).c_str());
+				: (string(!m.isInBounds(s, *land) ? "lands out of bounds at " : m.polys[clip->crossed].bg >= 0 ? "lands in bounds past the dynapoly (counts) at "
+				: "lands in bounds, somewhere he couldn't walk to from the start (counts) at ") + P(*land)).c_str());
 		}
 	}
 	return 0;

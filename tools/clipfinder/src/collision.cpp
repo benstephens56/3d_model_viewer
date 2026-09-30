@@ -515,31 +515,57 @@ bool Model::walkUnreachable(Scratch& s, const V3& end, const V3& from) const {
 	auto it = s.unreachable.find(key);
 	if (it != s.unreachable.end()) return it->second;
 	if (s.unreachable.size() > 200000) s.unreachable.clear();
-	// A flood fill from `from`: a step to a neighbouring grid point is walkable
-	// if no wall (either face, dynapolys too) is in the way 50 above the floor
-	// and there's a floor there at most 50 up (small steps) or any way down
-	// (drops, up to 300)
-	struct Node { int i, j; double y; };
-	std::set<std::tuple<int, int, int>> seen;
-	vector<Node> todo = { { 0, 0, from.y } };
-	seen.insert({ 0, 0, (int)std::floor(from.y / 30) });
-	const int R = (int)(WALK_RADIUS / WALK_STEP);
+	auto cellKey = [](double x, double z) {
+		return (int64_t)std::floor(x / WALK_STEP) << 32 ^ (int64_t)(uint32_t)(int32_t)std::floor(z / WALK_STEP);
+	};
+	// The whole fill from this start spot, done once (Scratch::walkFills)
+	const uint64_t fillKey = q5(from.x) | q5(from.z) << 16 | (uint64_t)((int64_t)std::floor(from.y / 5) & 0xFFFF) << 32;
+	// reached: a filled point within a step of the end (xz) and 30 of its height
+	auto nearEnd = [&](double x, double z, double y) {
+		return std::hypot(x - end.x, z - end.z) <= WALK_STEP && std::fabs(y - end.y) < 30;
+	};
 	bool reached = false;
-	for (size_t k = 0; k < todo.size() && !reached; k++) {
-		const Node p = todo[k];
-		const double px = from.x + p.i * WALK_STEP, pz = from.z + p.j * WALK_STEP;
-		if (std::hypot(px - end.x, pz - end.z) <= WALK_STEP && std::fabs(p.y - end.y) < 30) { reached = true; break; }
-		if (p.i * p.i + p.j * p.j >= R * R) continue;
-		for (int di = -1; di <= 1; di++) for (int dj = -1; dj <= 1; dj++) {
-			if (!di && !dj) continue;
-			const int qi = p.i + di, qj = p.j + dj;
-			const double qx = from.x + qi * WALK_STEP, qz = from.z + qj * WALK_STEP;
-			const double h = F(p.y + 50);
-			if (lineHit(s, { px, h, pz }, { qx, h, qz }, LOOSE, false, false, true)) continue;
-			auto fy = floorCheck(qx, qz, h);
-			if (!fy || *fy < p.y - 300) continue;
-			if (!seen.insert({ qi, qj, (int)std::floor(*fy / 30) }).second) continue;
-			todo.push_back({ qi, qj, *fy });
+	auto fit = s.walkFills.find(fillKey);
+	if (fit != s.walkFills.end()) {
+		const Scratch::WalkFill& fill = *fit->second;
+		for (int di = -1; di <= 1 && !reached; di++) for (int dj = -1; dj <= 1 && !reached; dj++) {
+			auto c = fill.find(cellKey(end.x + di * WALK_STEP, end.z + dj * WALK_STEP));
+			if (c == fill.end()) continue;
+			for (const auto& q : c->second) if (nearEnd(q[0], q[1], q[2])) { reached = true; break; }
+		}
+	} else {
+		// A flood fill from `from`: a step to a neighbouring grid point is walkable
+		// if no wall (either face, dynapolys too) is in the way 50 above the floor
+		// and there's a floor there at most 50 up (small steps) or any way down
+		// (drops, up to 300). It stops at the end; if it never gets there it has
+		// filled everything, which is kept for the next end from this spot.
+		auto fill = std::make_shared<Scratch::WalkFill>();
+		struct Node { int i, j; double y; };
+		std::set<std::tuple<int, int, int>> seen;
+		vector<Node> todo = { { 0, 0, from.y } };
+		seen.insert({ 0, 0, (int)std::floor(from.y / 30) });
+		const int R = (int)(WALK_RADIUS / WALK_STEP);
+		for (size_t k = 0; k < todo.size(); k++) {
+			const Node p = todo[k];
+			const double px = from.x + p.i * WALK_STEP, pz = from.z + p.j * WALK_STEP;
+			if (nearEnd(px, pz, p.y)) { reached = true; break; }
+			(*fill)[cellKey(px, pz)].push_back({ (float)px, (float)pz, (float)p.y });
+			if (p.i * p.i + p.j * p.j >= R * R) continue;
+			for (int di = -1; di <= 1; di++) for (int dj = -1; dj <= 1; dj++) {
+				if (!di && !dj) continue;
+				const int qi = p.i + di, qj = p.j + dj;
+				const double qx = from.x + qi * WALK_STEP, qz = from.z + qj * WALK_STEP;
+				const double h = F(p.y + 50);
+				if (lineHit(s, { px, h, pz }, { qx, h, qz }, LOOSE, false, false, true)) continue;
+				auto fy = floorCheck(qx, qz, h);
+				if (!fy || *fy < p.y - 300) continue;
+				if (!seen.insert({ qi, qj, (int)std::floor(*fy / 30) }).second) continue;
+				todo.push_back({ qi, qj, *fy });
+			}
+		}
+		if (!reached) {
+			if (s.walkFills.size() > 256) s.walkFills.clear();
+			s.walkFills.emplace(fillKey, std::move(fill));
 		}
 	}
 	s.unreachable.emplace(key, !reached);

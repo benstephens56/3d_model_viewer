@@ -306,7 +306,23 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 					if (std::find(out.begin(), out.end(), y) == out.end()) out.push_back(y);
 		return out;
 	};
-	const double seedHeights[3] = { A.minY, (A.minY + A.maxY) / 2, A.maxY };
+	vector<double> seedHeights = { A.minY, (A.minY + A.maxY) / 2, A.maxY };
+	// A sloped floor pusher: every 8 up the slope too. Where the slope
+	// meets a wall, its plane at the bottom / middle / top is out past the
+	// wall, and only the plane at the line test's height has the floor Link
+	// starts on beside it (OoT Shadow Temple: floor TRI 1207 at y -63, 40
+	// units from where the line test at y -44.5 meets slope TRI 1182, by
+	// wall TRI 1160).
+	if (A.isFloor) for (double hs = A.minY + 8; hs < A.maxY; hs += 8) seedHeights.push_back(hs);
+	// Where the floors beside the plane are looked for, below a floor's
+	// y + checkHeight: a wall's plane is the same at every height, but a
+	// slope's moves with it, so for a floor pusher also where the line test
+	// runs - GROUND_DROP lower walking, up to checkHeight - 5 falling.
+	vector<double> lineDrops = { 0 };
+	if (A.isFloor) {
+		lineDrops.push_back(GROUND_DROP);
+		if (m.lowDrop) for (double d : { 14.0, (double)ch - 5 }) if (d > GROUND_DROP && d <= m.lowDrop) lineDrops.push_back(d);
+	}
 	auto floorsFor = [&](double u) {
 		// floorsBeside of a position already looked up in this block (on a
 		// vertical wall the plane is in the same place at every height)
@@ -322,10 +338,12 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 				if (std::find(seeds.begin(), seeds.end(), y) == seeds.end()) seeds.push_back(y);
 		auto same = [&](double y) { for (double v : ys) if (std::fabs(v - y) < 0.5) return true; return false; };
 		for (double y0 : seeds) {
-			for (double y : beside(onPlane(u, y0 + ch))) {
-				double h = y + ch;
-				if (h - std::max((double)m.lowDrop, GROUND_DROP) > A.maxY + 1 || h < A.minY - 1 || same(y)) continue;
-				ys.push_back(y);
+			for (double d : lineDrops) {
+				for (double y : beside(onPlane(u, y0 + ch - d))) {
+					double h = y + ch;
+					if (h - std::max((double)m.lowDrop, GROUND_DROP) > A.maxY + 1 || h < A.minY - 1 || same(y)) continue;
+					ys.push_back(y);
+				}
 			}
 		}
 		return ys;
@@ -413,7 +431,7 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 			if (!clip || !m.isInBounds(s, prev, true)) continue;
 			bool noFloor = false;
 			if (cp.drop > 0) {
-				auto end = landing(m, s, f->res, cp.floorY, noFloor, clip->crossed);
+				auto end = landing(m, s, f->res, cp.floorY, noFloor, clip->crossed, &prev);
 				if (!end) continue;
 				clip->end = *end;
 			} else if (!m.endCounts(s, clip->crossed, clip->end, &prev)) {
@@ -507,7 +525,7 @@ static std::optional<Clip> lowClip(const Model& m, Scratch& s, const V3& p, int 
 	if (!clip) return std::nullopt;
 	if (!m.isInBounds(s, p, true)) return std::nullopt;
 	bool noFloor = false;
-	auto end = landing(m, s, res, p.y, noFloor, clip->crossed);
+	auto end = landing(m, s, res, p.y, noFloor, clip->crossed, &p);
 	if (!end) return std::nullopt;
 	auto prev = reachFrom(m, s, low, p.y);
 	if (!prev) return std::nullopt;
@@ -745,10 +763,13 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 				// adult falling, 294 more points (1.4%, 4 more wall pairs) in
 				// 110 s instead of 38 s.
 				bool anyIn = false;
+				V3 inPt;
 				for (bool fb : { false, true }) {
 					if (anyIn || (fb && !m.slopeStarts)) break;
-					for (double sd : { 3.0, -3.0, 12.0, -12.0 })
-						if (m.isInBounds(s, { cp.p.x + sd * nx, cp.floorY, cp.p.z + sd * nz }, fb)) { anyIn = true; break; }
+					for (double sd : { 3.0, -3.0, 12.0, -12.0 }) {
+						inPt = { cp.p.x + sd * nx, cp.floorY, cp.p.z + sd * nz };
+						if (m.isInBounds(s, inPt, fb)) { anyIn = true; break; }
+					}
 				}
 				if (!anyIn) return;
 				// Falling, he has to land out of bounds: where the snap onto A
@@ -757,7 +778,9 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 				// there and from 2 units around it, don't search for the move.
 				// (About 90% of the falling points; in Kakariko / Kokiri Forest
 				// it lost 1 point of ~7400, one that a 0.01 unit change flips.)
-				// (behind a dynapoly, landing in bounds counts too: Model::endCounts)
+				// (behind a dynapoly, or somewhere he couldn't walk to from the
+				// in-bounds spot beside the point, landing in bounds counts too:
+				// Model::endCounts)
 				if (cp.drop > 0 && !behindDyna) {
 					bool landsOut = false, noFloor;
 					const double offs[5][2] = { { 0, 0 }, { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 } };
@@ -765,6 +788,8 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 						V3 q = { res.x + o[0] * nx - o[1] * nz, res.y, res.z + o[0] * nz + o[1] * nx };
 						if (landing(m, s, q, cp.floorY, noFloor)) { landsOut = true; break; }
 					}
+					// (the flood fill last, and only from the point itself: it's slow)
+					if (!landsOut) landsOut = landing(m, s, res, cp.floorY, noFloor, -1, &inPt).has_value();
 					if (!landsOut) return;
 				}
 				auto r = crossingClip(m, s, A, cp, LOOSE);

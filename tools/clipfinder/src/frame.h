@@ -45,7 +45,11 @@ std::optional<ClipResult> clipFromFrame(const Model& m, Scratch& s, const V3& pr
 std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3& prev, const V3& next, const Tol& tol);
 
 // crossed: the wall clipped through; a dynapoly one counts wherever he lands (Model::endCounts)
-std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor, int crossed = -1);
+// from: where the frame started - landing in bounds counts too if he couldn't
+// walk there from it (Model::walkUnreachable: OoT Shadow Temple, falling
+// through TRI 1160 onto TRI 1023, 1300 below)
+std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor, int crossed = -1,
+	const V3* from = nullptr);
 
 // wall_push_clips.js standSpot: where Link can stand still near (x, z). Not on
 // a slide floor (Poly::slide).

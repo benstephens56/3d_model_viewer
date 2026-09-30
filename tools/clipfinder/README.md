@@ -343,9 +343,13 @@ Two kinds of clip beyond one push from a standing start:
   Well: the slopes TRI 863 and 860 through the walls TRI 876 / 884 / 885.)
   The line only meets a slope where it has risen checkHeight - 7.5 above
   Link's floor, often most of a frame's move away, so for slope pushers the
-  scan looks for his floor and starts out to the full `--max-move`. Many
-  need speeds near or over 30: OoT Shadow Temple TRI 1182 through TRI 1160
-  gives 17 points at the default, 233 with `--max-move 55`.
+  scan looks for his floor and starts out to the full `--max-move`, beside
+  the slope every 8 up it and where the line test runs (7.5 below Link's
+  check height walking, up to checkHeight - 5 falling): where a slope meets
+  a wall, only there is the floor he starts on beside it. Many need speeds
+  near or over 30: OoT Shadow Temple, adult, TRI 1182 through TRI 1160 gives
+  737 walking points, 90 of them from the flat floor TRI 1207 below the
+  slope (before the floor search looked up the slope, 17, all on the slope).
 
 Not modelled: a running start. Every frame starts where Link stands still. A
 clip whose frame has to start where only a previous frame's move could have
@@ -613,6 +617,14 @@ Such clips are marked `"inBounds": true` in the JSON, and the viewer says so
 when you click one. Climbing, jumping and the like aren't modelled, so a
 ledge Link could climb up to still counts, and a way round longer than 600
 counts as none.
+
+Falling and ground clips are judged where Link lands, and landing in bounds
+counts the same way: OoT Shadow Temple, adult, falling through TRI 1160 off
+the slope TRI 1182, Link drops 1300 onto TRI 1023, a floor he can't walk to
+(1050 falling points). This finds many more falling clips on some maps (OoT
+Kakariko Village, child: 9550 → 13655 points, mostly falling), and any of
+them landing somewhere reachable by a longer way round, or by a drop of over
+300, is a false positive.
 
 E.g. MM Stone Tower Temple, setup 0, with its dynapolys: the sun block at
 (-1350, -1220, -870) sits in front of a raised alcove (TRI 1713 / 1714).

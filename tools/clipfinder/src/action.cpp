@@ -314,7 +314,7 @@ std::optional<Verdict> judge(const Model& m, Scratch& s, const V3& start, const 
 		if (!ok && (!m.isInBounds(s, v.end) || !m.walkUnreachable(s, v.end, start))) return std::nullopt;
 		if (!m.endCounts(s, v.crossed, v.end, &start)) return std::nullopt;
 	} else {
-		auto land = landing(m, s, L.res, L.prev.y, v.noFloor, v.crossed);
+		auto land = landing(m, s, L.res, L.prev.y, v.noFloor, v.crossed, &start);
 		if (!land) return std::nullopt;
 		v.end = *land;
 	}

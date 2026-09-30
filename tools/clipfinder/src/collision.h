@@ -148,6 +148,12 @@ struct Scratch {
 	std::unordered_map<SpotKey, std::optional<V3>, SpotHash> standSpots;
 	// Model::walkUnreachable results, keyed on the end and start spots (5 units)
 	std::unordered_map<uint64_t, bool> unreachable;
+	// Model::walkUnreachable's whole flood fill from a start spot (5 units):
+	// the floor heights it reached, per 10 x 10 cell. An end it can't reach
+	// takes the whole fill, and falling / ground clips land at many ends from
+	// the same few starts.
+	using WalkFill = std::unordered_map<int64_t, vector<std::array<float, 3>>>;  // x, z, floor y
+	std::unordered_map<uint64_t, std::shared_ptr<const WalkFill>> walkFills;
 
 	vector<uint32_t> stamp;
 	uint32_t curStamp = 0;

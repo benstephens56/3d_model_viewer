@@ -44,7 +44,7 @@ void reachability(const Model& m, Scratch& s, Clip& c) {
 				auto clip = clipFromFrame(m, s, start, f->res, f->trace, LOOSE, c.drop > 0 ? NAN : start.y, &mv);
 				if (!clip || clip->crossed != c.crossed) continue;
 				bool noFloor;
-				if (c.drop > 0 ? !landing(m, s, f->res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end, &start)) continue;
+				if (c.drop > 0 ? !landing(m, s, f->res, floorRef, noFloor, clip->crossed, &start) : !m.endCounts(s, clip->crossed, clip->end, &start)) continue;
 			} else {
 				// nothing in the way, then the frame's pushes clip through the same wall
 				if (lineFrame(m, s, start, next, LOOSE)) continue;
@@ -54,7 +54,7 @@ void reachability(const Model& m, Scratch& s, Clip& c) {
 				auto clip = clipFromFrame(m, s, start, res, tr, LOOSE, c.drop > 0 ? NAN : start.y, &mv);
 				if (!clip || clip->crossed != c.crossed) continue;
 				bool noFloor;
-				if (c.drop > 0 ? !landing(m, s, res, floorRef, noFloor, clip->crossed) : !m.endCounts(s, clip->crossed, clip->end, &start)) continue;
+				if (c.drop > 0 ? !landing(m, s, res, floorRef, noFloor, clip->crossed, &start) : !m.endCounts(s, clip->crossed, clip->end, &start)) continue;
 			}
 			if (!m.isInBounds(s, start, true)) continue;
 			have = true;
@@ -151,7 +151,7 @@ static std::optional<V3> walkFrameClips(const Model& m, Scratch& s, const V3& st
 	if (!clip || clip->crossed != crossed || clip->pusher != pusher) return std::nullopt;
 	if (falling) {
 		bool noFloor;
-		return landing(m, s, res, start.y, noFloor, clip->crossed);
+		return landing(m, s, res, start.y, noFloor, clip->crossed, &start);
 	}
 	if (!m.endCounts(s, clip->crossed, clip->end, &start)) return std::nullopt;
 	return clip->end;
@@ -480,7 +480,7 @@ std::optional<Clip> refinedClip(const Model& m, const Refined& r, int pusher, in
 		if (falling) {
 			// where he lands, as the scan's falling clips
 			bool noFloor;
-			auto land = landing(m, s, res, r.start.y, noFloor, crossed);
+			auto land = landing(m, s, res, r.start.y, noFloor, crossed, &r.start);
 			if (!land) return std::nullopt;
 			// (the scan's field is whole units; prev / next hold the exact fall)
 			c.drop = std::max(1, (int)std::lround(spec.drop));

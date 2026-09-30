@@ -116,13 +116,13 @@ std::optional<LineFrameR> lineFrame(const Model& m, Scratch& s, const V3& prev, 
 	r.res = m.sphereStep(snapped, tol, &r.trace, &prev, m.polys[hit->poly].bg >= 0);
 	return r;
 }
-std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor, int crossed) {
+std::optional<V3> landing(const Model& m, Scratch& s, const V3& res, double floorY, bool& noFloor, int crossed, const V3* from) {
 	noFloor = false;
 	auto land = m.floorCheck(res.x, res.z, F(floorY + 50));
 	if (!land) { noFloor = true; return res; }
 	V3 st = m.sphereStep(m.sphereStep({ res.x, F(*land - GROUND_DROP), res.z }, LOOSE, nullptr), LOOSE, nullptr);
 	V3 end = { st.x, *land, st.z };
-	if (!m.endCounts(s, crossed, end)) return std::nullopt;
+	if (!m.endCounts(s, crossed, end, from)) return std::nullopt;
 	return end;
 }
 // The highest floor within 10 of ref, then the top one of the floors at most

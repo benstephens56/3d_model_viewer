@@ -82,7 +82,7 @@ std::optional<Clip> groundFrame(const Model& m, Scratch& s, const V3& start, int
 		if (crossed < 0 || (wall >= 0 && crossed != wall)) return std::nullopt;
 		c.res = res;
 		bool noFloor;
-		auto end = landing(m, s, res, start.y, noFloor, crossed);
+		auto end = landing(m, s, res, start.y, noFloor, crossed, &start);
 		if (!end) return std::nullopt;
 		c.end = *end;
 		c.endNoFloor = noFloor;
