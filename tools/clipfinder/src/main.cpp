@@ -18,21 +18,21 @@
 //   slope.h/.cpp     slope clips: the floor check lifting Link behind a wall
 //   ground.h/.cpp    ground clips: falling fast through the floor, under a wall
 //   reach.h/.cpp     --min-speed, --refine, --angles, --yaw
-//   action.h/.cpp    --actions: sword lunges doing the clip
+//   action.h/.cpp    --type actions: sword lunges doing the clip
 //   output.h/.cpp    the results JSON
 //   sim.h/.cpp       --sim
 //   main.cpp         options, forms and the loop over maps
 //
 // Build (MSYS2 mingw64):  see build.sh next to this file.
 // Usage:
-//   clipfinder --game MM --map "Laundry Pool" --form Human [--falling] [--extended-only] [--first-per-pair] [-o out.json]
+//   clipfinder --game MM --map "Laundry Pool" --form Human [--type acute,extended,slope,ground,falling,actions] [--first-per-pair] [-o out.json]
 //     (--first-per-pair: one clip point per wall pair, the first found - much faster)
-//   clipfinder --game OOT --all --form Adult [--falling] --out-dir results/
+//   clipfinder --game OOT --all --form Adult [--type all] --out-dir results/
 //   clipfinder --game OOT --map "Spot 01 - Kakariko Village" --form All -o kak.json
-//   clipfinder --game MM --map "South Clock Town" --form Human --dyna MM_dyna_all.json [--setup N] [--dyna-only] -o sct.json
+//   clipfinder --game MM --map "South Clock Town" --form Human [--setup N] [--dyna-only] -o sct.json
 //     (--dyna: the scene's dynapoly actors too, from the viewer's "Export all dynapolys";
 //      --dyna-only: just the wall pairs with a dynapoly wall in them)
-//   clipfinder --game OOT --all --form All --dyna OOT_dyna_all.json --dyna-only --out-dir results/
+//   clipfinder --game OOT --all --form All --dyna-only --out-dir results/
 //     (the viewer's "Export all dynapolys": each map scanned once per distinct
 //      set of dynapolys its setups load, the output named and marked with the setups)
 //     (--form All: every form's clips in the one JSON, each marked with its form;
@@ -90,11 +90,13 @@ static string safeName(const string& s) {
 int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root, after, dynaPath;
 	int groundStepMax = 3, slopeStepMax = 3;
-	bool dynaOnly = false, noSlope = false, slopeOnly = false, noGround = false, groundOnly = false, slopeStarts = false, keepLoadVoid = false;
+	double wallStep = 0;  // --wall-step S: the fine pass on pairs without a clip (Model::wallStep)
+	bool dynaOnly = false, slopeStarts = false, keepLoadVoid = false;
+	string typeArg;  // --type acute,extended,slope,ground,falling,actions (TYPE_*)
 	int onlySetup = -1;  // --setup N: just the dynapolys of that setup
 	int maxPerPair = 0;  // --max-per-pair N: at most N points a wall pair, spread out (thinClips)
 	double radius = 0;
-	bool falling = false, all = false, extendedOnly = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
+	bool all = false, firstPerPair = false, minSpeed = false, refine = false, angles = false;
 	bool angleSweep = false;  // --angles: every yaw that clips, each from its own start (like --yaw)
 	int angleGap = 16;        // --angle-gap: --angles stops a way after this many yaws in a row that don't clip
 	int onlyPusher = -1, onlyCrossed = -1;
@@ -109,7 +111,7 @@ int main(int argc, char** argv) {
 	double gridSpeed = 0;     // --speed (with --yaw): the CSV at exactly this speed
 	int clipKind = -1;        // --clip-kind: which of the pair's clips --refine / --yaw / --angles do (-1: auto, FrameSpec::type)
 	double fallDrop = 0;      // --drop: falling clips, posNext this far below the start (0: the pair's smallest that works)
-	string actionsArg;        // --actions all|KEY,...: sword lunge clips (action.h)
+	string actionsArg = "all"; // --action-keys KEY,...: which sword lunges --type actions does (action.h)
 	int threads = (int)std::max(1u, std::thread::hardware_concurrency());
 	for (int i = 1; i < argc; i++) {
 		string a = argv[i];
@@ -118,8 +120,7 @@ int main(int argc, char** argv) {
 		else if (a == "--map") mapName = val();
 		else if (a == "--form") form = val();
 		else if (a == "--radius") radius = std::stod(val());
-		else if (a == "--falling") falling = true;
-		else if (a == "--extended-only") extendedOnly = true;
+		else if (a == "--type") typeArg = val();
 		else if (a == "--first-per-pair") firstPerPair = true;
 		else if (a == "--max-per-pair") {
 			maxPerPair = std::stoi(val());
@@ -173,19 +174,19 @@ int main(int argc, char** argv) {
 			gridSpeed = std::stod(val());
 			if (!(gridSpeed > 0)) { fprintf(stderr, "--speed wants a speed > 0\n"); return 2; }
 		}
-		else if (a == "--actions") actionsArg = val();
+		else if (a == "--action-keys") actionsArg = val();
 		else if (a == "--sim") simArg = val();
 		else if (a == "--tri") triArg = val();
 		else if (a == "--dyna") dynaPath = val();
 		else if (a == "--dyna-only") dynaOnly = true;
-		else if (a == "--no-slope") noSlope = true;
-		else if (a == "--slope-only") slopeOnly = true;
 		else if (a == "--slope-starts") slopeStarts = true;
-		else if (a == "--no-ground") noGround = true;
-		else if (a == "--ground-only") groundOnly = true;
 		else if (a == "--slope-step") {
 			slopeStepMax = std::stoi(val());
 			if (slopeStepMax < 1 || slopeStepMax > 3) { fprintf(stderr, "--slope-step wants 1, 2 or 3\n"); return 2; }
+		}
+		else if (a == "--wall-step") {
+			wallStep = std::stod(val());
+			if (!(wallStep > 0 && wallStep < 0.5)) { fprintf(stderr, "--wall-step wants a step below the normal 0.5, e.g. 0.25 or 0.1\n"); return 2; }
 		}
 		else if (a == "--ground-step") {
 			groundStepMax = std::stoi(val());
@@ -218,11 +219,30 @@ int main(int argc, char** argv) {
 			setMaxMove(n);
 		}
 		else if (a == "--threads") threads = std::max(1, std::stoi(val()));
+		else if (a == "--falling" || a == "--extended-only" || a == "--no-slope" || a == "--slope-only" || a == "--ground-clips" ||
+			a == "--ground-only" || a == "--no-ground" || a == "--actions") {
+			fprintf(stderr, "%s is gone: --type picks the clips, e.g. --type acute,extended,slope,falling (see --type in the README)%s\n", a.c_str(),
+				a == "--actions" ? "; --type actions [--action-keys KEY,...] for the lunges" : "");
+			return 2;
+		}
 		else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
 	}
-	if (noSlope && slopeOnly) { fprintf(stderr, "--no-slope and --slope-only can't go together\n"); return 2; }
-	if (noGround && groundOnly) { fprintf(stderr, "--no-ground and --ground-only can't go together\n"); return 2; }
-	if (slopeOnly && groundOnly) { fprintf(stderr, "--slope-only and --ground-only can't go together\n"); return 2; }
+	// --type: which clips. Default acute, extended and slope; --clip-kind
+	// falling / slope / ground adds its own (its pair's clips of that kind
+	// come from the scan)
+	int types = 0;
+	if (typeArg.empty()) types = TYPE_ACUTE | TYPE_EXTENDED | TYPE_SLOPE;
+	else {
+		string err;
+		types = parseTypes(typeArg, err);
+		if (!types) { fprintf(stderr, "--type: %s\n", err.c_str()); return 2; }
+	}
+	if (clipKind == 1) types |= TYPE_FALLING;
+	if (clipKind == 2) types |= TYPE_SLOPE;
+	if (clipKind == 3) types |= TYPE_GROUND;
+	const bool falling = types & TYPE_FALLING;
+	// extended and not acute: the old --extended-only (Model::extendedOnly)
+	const bool extendedOnly = (types & TYPE_EXTENDED) && !(types & TYPE_ACUTE);
 	if (exact && atYaw < 0) { fprintf(stderr, "--exact needs --yaw\n"); return 2; }
 	if (gridSpeed > 0 && atYaw < 0 && !angleSweep) { fprintf(stderr, "--speed needs --yaw or --angles\n"); return 2; }
 	// (--speed without --max-speed: the search for starts goes up to that speed)
@@ -234,21 +254,22 @@ int main(int argc, char** argv) {
 	if (angleSweep && (onlyPusher < 0 || maxSpeed <= 0)) { fprintf(stderr, "--angles needs --pair PUSHER,CROSSED and --max-speed S\n"); return 2; }
 	if (angleSweep && (atYaw >= 0 || minSpeed)) { fprintf(stderr, "--angles can't be used with --yaw / --min-speed / --refine\n"); return 2; }
 	for (auto& ch : game) ch = (char)toupper((unsigned char)ch);
-	// --actions: the scan's walking and slope clip points, then the lunges aimed at them
+	// --type actions: the scan's walking and slope clip points, then the lunges aimed at them
 	vector<int> actions;
-	if (!actionsArg.empty()) {
+	if (types & TYPE_ACTIONS) {
 		string err;
 		actions = parseActions(game, actionsArg, err);
-		if (actions.empty()) { fprintf(stderr, "--actions: %s\n", err.empty() ? "no actions" : err.c_str()); return 2; }
-		if (falling || minSpeed || atYaw >= 0 || angleSweep || groundOnly || slopeOnly || extendedOnly) {
-			fprintf(stderr, "--actions can't be used with --falling / --min-speed / --refine / --yaw / --angles / --slope-only / --ground-only / --extended-only\n");
+		if (actions.empty()) { fprintf(stderr, "--action-keys: %s\n", err.empty() ? "no actions" : err.c_str()); return 2; }
+		if ((types & (TYPE_FALLING | TYPE_GROUND)) || minSpeed || atYaw >= 0 || angleSweep) {
+			fprintf(stderr, "--type actions can't be used with falling / ground types, --min-speed / --refine / --yaw / --angles\n");
 			return 2;
 		}
 	}
 	if ((game != "OOT" && game != "MM") || (mapName.empty() && !all)) {
 		fprintf(stderr,
 			"usage: clipfinder --game OOT|MM (--map \"<name in the viewer's map list>\" | --all)\n"
-			"                  [--form Adult|Child|Crawlspace|Human|Deku|Zora|Goron|FierceDeity|All, or a list: Adult,Child] [--radius R] [--falling] [--extended-only] [--first-per-pair]\n"
+			"                  [--form Adult|Child|Crawlspace|Human|Deku|Zora|Goron|FierceDeity|All, or a list: Adult,Child] [--radius R] [--first-per-pair]\n"
+			"                  [--type acute,extended,slope,ground,falling,actions | all]  (which clips; default acute,extended,slope; all: every one but actions)\n"
 			"                  [--min-speed] [--pair PUSHER,CROSSED] [--refine (with --pair: the exact lowest walking speed)]\n"
 			"                  [--angles (with --pair: also every yaw that works from the refined start)]\n"
 			"                  [--from X,Y,Z[,SPEED] (--angles from this start instead, and at this speed)]\n"
@@ -260,11 +281,10 @@ int main(int argc, char** argv) {
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP | ,vVY]]  (one frame from a standing start, printed step by step; SPEED as 15/7: a frame per speed)\n"
 			"                  [--tri ID[,ID...]]  (print those polys: vertices, normal, type)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
-			"                  [--dyna FILE [--dyna-only] [--setup N]]  (the viewer's dynapoly export, one map's or every map's: the actors' collision too)\n"
-			"                  [--no-slope | --slope-only] [--slope-step 1|2|3] [--slope-starts] [--keep-load-void]  (slope clips: the floor check lifting Link behind a wall)\n"
-			"                  [--no-ground | --ground-only] [--ground-step 1|2|3]  (ground clips: falling at velocity.y -20 from the floor, through it and under a wall)\n"
+			"                  [--dyna FILE|none [--dyna-only] [--setup N]]  (the viewer's dynapoly export; default tools/clipfinder/<GAME>_dyna_all.json)\n"
+			"                  [--slope-step 1|2|3] [--wall-step S] [--slope-starts] [--keep-load-void] [--ground-step 1|2|3]\n"
 			"                  [--max-per-pair N]  (at most N points per wall pair, spread out evenly: smaller files)\n"
-			"                  [--actions all|1h-slash,1h-stab,2h-slash,2h-stab,stick-slash]  (sword lunge clips: the lunge's own move from standing starts; MM Human, OoT Adult)\n"
+			"                  [--action-keys 1h-slash,1h-stab,2h-slash,2h-stab,stick-slash]  (with --type actions: which lunges, default all)\n"
 			"                  [-o out.json | --out-dir dir] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -337,8 +357,16 @@ int main(int argc, char** argv) {
 	// dynapolys); a map without one once without dynapolys (not at all with
 	// --dyna-only).
 	vector<DynaFile> dynas;
-	if (dynaOnly && dynaPath.empty()) { fprintf(stderr, "--dyna-only needs --dyna FILE\n"); return 2; }
-	if (onlySetup >= 0 && dynaPath.empty()) { fprintf(stderr, "--setup needs --dyna FILE\n"); return 2; }
+	// (default: the viewer's Export all dynapolys for this game, tools/clipfinder/<GAME>_dyna_all.json;
+	// --dyna none scans without dynapolys)
+	if (dynaPath.empty()) {
+		const string def = root + "/tools/clipfinder/" + game + "_dyna_all.json";
+		if (exists(def)) dynaPath = def;
+		else fprintf(stderr, "warning: no %s (the viewer's Export all dynapolys) - scanning without dynapolys\n", def.c_str());
+	}
+	else if (dynaPath == "none") dynaPath.clear();
+	if (dynaOnly && dynaPath.empty()) { fprintf(stderr, "--dyna-only needs dynapolys (a --dyna FILE, or the default one)\n"); return 2; }
+	if (onlySetup >= 0 && dynaPath.empty()) { fprintf(stderr, "--setup needs dynapolys (a --dyna FILE, or the default one)\n"); return 2; }
 	if (!dynaPath.empty()) {
 		string err;
 		if (!readDynaFile(dynaPath, dynas, err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
@@ -468,7 +496,7 @@ int main(int argc, char** argv) {
 			string path = out;
 			if (path.empty() || all) {
 				string dir = outDir.empty() ? "." : outDir;
-				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + (falling ? "_falling" : "") + (extendedOnly ? "_extended" : "") + (firstPerPair ? "_first" : "") + (slopeOnly ? "_slope" : groundOnly ? "_ground" : "") + (actions.empty() ? "" : "_actions") + setupTag + (dyna.raw.empty() ? "" : "_dyna") +
+				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + typeTag(types) + (firstPerPair ? "_first" : "") + setupTag + (dyna.raw.empty() ? "" : "_dyna") +
 					// (--pair: its own file, not over the whole map's scan)
 					(onlyPusher >= 0 ? "_pair" + std::to_string(onlyPusher) + "-" + std::to_string(onlyCrossed) : "") + ".json";
 			}
@@ -494,12 +522,12 @@ int main(int argc, char** argv) {
 			vector<string> csvPaths;  // --yaw: the CSV written per yaw
 			for (const Variant* vp : job.forms) {
 				const Variant& v = *vp;
-				// --actions: the ones this form does (none: skipped, before sharing
+				// --type actions: the ones this form does (none: skipped, before sharing
 				// a scan - Deku has Human's radius but no sword)
 				vector<int> formActions;
 				for (int ai : actions) if (actionForForm(ACTIONS[ai], upper(v.form))) formActions.push_back(ai);
 				if (!actions.empty() && formActions.empty()) {
-					fprintf(stderr, "%s - %s (%s): none of the --actions are for this form, skipped\n", game.c_str(), e.name.c_str(), v.form.c_str());
+					fprintf(stderr, "%s - %s (%s): none of the --action-keys are for this form, skipped\n", game.c_str(), e.name.c_str(), v.form.c_str());
 					continue;
 				}
 				auto same = std::find_if(results.begin(), results.end(),
@@ -521,13 +549,14 @@ int main(int argc, char** argv) {
 				m.build(tris, ch.numPolygons);
 				addDynaActors(m, dyna);
 				m.dynaPairsOnly = dynaOnly;
-				m.slope = !noSlope;
-				m.slopeOnly = slopeOnly;
+				// the wall push scan: for its clips, or the lunges' targets
+				m.wallPushes = types & (TYPE_ACUTE | TYPE_EXTENDED | TYPE_FALLING | TYPE_ACTIONS);
+				m.slope = types & (TYPE_SLOPE | TYPE_ACTIONS);
 				m.slopeStarts = slopeStarts;
-				m.ground = !noGround && actions.empty();
-				m.groundOnly = groundOnly;
+				m.ground = types & TYPE_GROUND;
 				m.groundStepMax = groundStepMax;
 				m.slopeStepMax = slopeStepMax;
+				m.wallStep = wallStep;
 				m.keepLoadVoid = keepLoadVoid;
 				// --pair: the scan only looks near those two polys
 				if (onlyPusher >= 0) {
@@ -541,8 +570,12 @@ int main(int argc, char** argv) {
 				if (!simArg.empty()) return runSim(m, simArg, game, upper(v.form));
 				if (!triArg.empty()) return printTris(m, triArg);
 				vector<Clip> found = scan(m, threads, firstPerPair);
-				// --actions: the lunges aimed at the scan's walking and slope clip points
-				if (!formActions.empty()) found = actionScan(m, found, formActions, threads);
+				keepTypes(found, types);
+				// --type actions: the lunges aimed at the scan's walking and slope clip points
+				if (!formActions.empty()) {
+					found = actionScan(m, found, formActions, threads);
+					keepTypes(found, types);
+				}
 				// --pair: just the clips of that wall pair
 				if (onlyPusher >= 0) {
 					found.erase(std::remove_if(found.begin(), found.end(),
@@ -810,6 +843,22 @@ int main(int argc, char** argv) {
 					if (dropped) fprintf(stderr, "  --max-per-pair %d: kept %zu of %zu clip points\n", maxPerPair, found.size(), before);
 				}
 				results.push_back({ v.form, v.radius, F(v.checkHeight), std::move(found) });
+			}
+			// --type actions without --max-per-pair: a lunge clips from far more
+			// starts than the viewer needs (thousands for one wall pair), so
+			// each row keeps at most ACTION_MAX_PER_PAIR points spread out,
+			// fewer when the file would pass ACTION_POINT_BUDGET points (~1 KB
+			// each, with the lunge's frames)
+			if (!actions.empty() && maxPerPair == 0) {
+				constexpr int ACTION_MAX_PER_PAIR = 40, ACTION_MIN_PER_PAIR = 6;
+				constexpr size_t ACTION_POINT_BUDGET = 4000;
+				vector<const vector<Clip>*> sets;
+				for (const FormResult& r : results) sets.push_back(&r.clips);
+				const int cap = thinCapForBudget(sets, ACTION_MAX_PER_PAIR, ACTION_MIN_PER_PAIR, ACTION_POINT_BUDGET);
+				size_t before = 0, after = 0;
+				for (FormResult& r : results) { before += r.clips.size(); thinClips(r.clips, cap); after += r.clips.size(); }
+				if (after < before) fprintf(stderr, "  actions: kept %zu of %zu clip points (at most %d per wall pair and action; --max-per-pair N sets it)\n", after, before, cap);
+				MAX_PER_PAIR = after < before ? cap : 0;
 			}
 			f << toJson(game, e.name, ch.numPolygons, falling, extendedOnly, results, dyna.raw, dyna.setups);
 			f.close();

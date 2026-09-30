@@ -253,8 +253,8 @@ struct Model {
 	bool behindPoly(const Poly& p, const V3& pos) const;
 
 	bool dynaPairsOnly = false; // --dyna-only: wall pairs with a dynapoly wall in them
-	bool slope = true, slopeOnly = false; // slope clips (--no-slope), and only them (--slope-only)
-	bool ground = true, groundOnly = false; // ground clips (--no-ground), and only them (--ground-only)
+	// which scans run (--type): wall pushes (walking, and falling with lowDrop), slope clips, ground clips
+	bool wallPushes = true, slope = true, ground = false;
 	// --pair: only scan the candidates (wall pairs, slope walls) near these
 	// two polys; -1 none. Every poly still collides as usual.
 	int focusA = -1, focusB = -1;
@@ -265,6 +265,10 @@ struct Model {
 	int groundStepMax = 3;
 	// --slope-step: the same for the slope clip scan
 	int slopeStepMax = 3;
+	// --wall-step: a second wall push pass on the wall pairs nothing clipped
+	// through, standing points every wallStep (no cap on a pair's grid) and
+	// crossing points every wallStep / 2, one clip per new pair (0: none)
+	double wallStep = 0;
 	// --keep-load-void: keep clips that start on a loading zone or void plane
 	bool keepLoadVoid = false;
 	// Whether the floor Link stands on at `start` is a loading zone or void plane.

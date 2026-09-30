@@ -52,3 +52,26 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair = false);
 // --min-speed reach, and an acute point of an acute pair. Keeps the order.
 // Returns how many were left out.
 size_t thinClips(vector<Clip>& clips, int n);
+
+// The largest per-row cap, at most maxN (and at least minN), that thinClips
+// can use on every one of `sets` (one file's forms) and keep them under
+// `budget` points in all. maxN when they're already under.
+int thinCapForBudget(const vector<const vector<Clip>*>& sets, int maxN, int minN, size_t budget);
+
+// --type: which clips to look for and keep
+enum : int {
+	TYPE_ACUTE = 1, TYPE_EXTENDED = 2, TYPE_SLOPE = 4, TYPE_GROUND = 8, TYPE_FALLING = 16, TYPE_ACTIONS = 32,
+	TYPE_ALL = 31,  // "all": every clip type, not the lunges
+};
+// "acute,extended,slope,ground,falling,actions" (or "all": the first five) to TYPE_ bits; 0 and err if a name is wrong
+int parseTypes(const string& list, string& err);
+// The file name part for a set of types: "" for the default (acute,
+// extended, slope), "_all" for all, else "_" and the names joined by "-",
+// e.g. "_acute-falling"
+string typeTag(int types);
+// Drop the clips the types don't ask for: walking wall pushes by the pair's
+// category (acute / extended), falling ones with falling (and the category,
+// if acute or extended was picked), slope and ground clips by theirs. With
+// actions and none of acute / extended / slope, all three are kept (the
+// lunges' targets, then the lunges' clips).
+void keepTypes(vector<Clip>& clips, int types);

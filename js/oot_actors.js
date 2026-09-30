@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { addModelCheckbox, getModelGroup, resetGroupModelState, applyGroupMasterState } from './render.js';
+import { addModelCheckbox, getModelGroup, resetGroupModelState, applyGroupMasterState, removeGroupRow } from './render.js';
 import { replayDisplayLists, makeZeldaMesh, parseZeldaSceneInfo, scrollSegment, SEG_FLEX_MATRICES } from './zelda_textured.js';
 import { attachTextured, clearTexturedPairs } from './bk_textured.js';
 import { addTypeRow, makeYawLine, groupBy, ACTOR_COLOR } from './bk_setup.js';
@@ -1794,6 +1794,7 @@ for (const layer of ACTOR_LAYERS) {
         saveLayers();
         const shown = layerShown(layer);
         for (const g of layerGroups) if (g.userData.actorLayer === layer) g.visible = shown;
+        if (layer === 'model' && shown && pendingModels) buildPendingModels().catch(err => console.error(err));
         if (layerScene) clearSelection(layerScene);
     });
 }
@@ -1885,6 +1886,49 @@ function addActorRow(scene, groupBody, rowName, instances, built, dyna) {
     // loadedModels entries); listed so clearAllModels takes it off the scene.
     loadedModelsNotSelectable.push({ name: rowName, mesh: root, edges: null });
     addModelCheckbox(scene, rowName, root, null, false, true, color, false, colorTarget, groupBody);
+    return root;
+}
+
+// The distinct models of these instances, built (key -> buildModel result).
+async function buildModels(instances, ctx) {
+    const built = new Map();
+    const models = new Map();
+    for (const inst of instances) if (inst.model && !models.has(inst.model.key)) models.set(inst.model.key, inst.model);
+    await Promise.all([...models.values()].map(async m => {
+        const b = await buildModel(m, ctx);
+        if (b) built.set(m.key, b);
+    }));
+    return built;
+}
+
+// Rows whose models were skipped because the "Model" layer was off when the
+// scene loaded: { scene, ctx, rows: [{ root, rowName, instances }] }.
+let pendingModels = null;
+
+async function buildPendingModels() {
+    const job = pendingModels;
+    pendingModels = null;
+    // A different map has been loaded since (clearAllModels took the rows off).
+    if (!job || !job.rows.some(r => r.root.parent)) return;
+    const built = await buildModels(job.rows.flatMap(r => r.instances), job.ctx);
+    for (const { root, rowName, instances } of job.rows) {
+        if (!root.parent) continue;
+        const ok = instances.filter(i => built.has(i.model.key));
+        if (ok.length) addLayer(root, 'model', buildModelLayer(rowName, ok, built).objects);
+        const failed = instances.filter(i => !built.has(i.model.key));
+        if (failed.length) {
+            for (const inst of failed) inst.model = null;
+            const group = getModelGroup(GROUP_MARKERS, 'Actors (no model)');
+            addTypeRow(job.scene, group.body, rowName, failed, ACTOR_COLOR, true, buildMarkerInstance);
+        }
+        // No model built and no collision: the row a normal load wouldn't have.
+        if (!root.children.length) {
+            removeGroupRow(GROUP_MODELS, rowName);
+            root.parent.remove(root);
+            const i = loadedModelsNotSelectable.findIndex(e => e.mesh === root);
+            if (i !== -1) loadedModelsNotSelectable.splice(i, 1);
+        }
+    }
 }
 
 ////////////////////////////////////////
@@ -2005,15 +2049,13 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
     };
     forEachSetupSpawn(game, sceneDv, setup, setupID, addSpawn);
 
-    // ---- build every distinct model up front, so rows come out in name order
-    const built = new Map();
-    const models = new Map();
-    for (const inst of instances) if (inst.model && !models.has(inst.model.key)) models.set(inst.model.key, inst.model);
-    await Promise.all([...models.values()].map(async m => {
-        const b = await buildModel(m, ctx);
-        if (b) built.set(m.key, b);
-    }));
-    for (const inst of instances) if (inst.model && !built.has(inst.model.key)) inst.model = null;
+    // ---- build every distinct model up front, so rows come out in name order.
+    // With the "Model" layer off, only the collision is built now; the models
+    // wait for the layer to be switched on (buildPendingModels).
+    pendingModels = null;
+    const deferModels = !layerShown('model');
+    const built = deferModels ? new Map() : await buildModels(instances, ctx);
+    if (!deferModels) for (const inst of instances) if (inst.model && !built.has(inst.model.key)) inst.model = null;
 
     // Dynapoly collision, keyed by actor name like the rows.
     const dyna = await buildDynaPolyActors(scene, game, sceneName, dynaSpawns,
@@ -2025,6 +2067,7 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
     const types = [...byType].sort((a, b) => a[0].localeCompare(b[0]));
 
     let modelRows = 0, markerRows = 0, triangles = 0, missing = 0;
+    const pending = [];
     for (const [name, list] of types) {
         // An actor type can have both modelled and marker instances (a variant
         // this cannot draw); they are split between the two groups. Its
@@ -2036,9 +2079,10 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
         if (withModel.length || collision.length) {
             const group = getModelGroup(GROUP_MODELS, 'Actors');
             const count = withModel.length || collision.length;
-            addActorRow(scene, group.body, rowLabel(name, count), withModel, built, collision);
+            const root = addActorRow(scene, group.body, rowLabel(name, count), deferModels ? [] : withModel, built, collision);
+            if (deferModels && withModel.length) pending.push({ root, rowName: rowLabel(name, count), instances: withModel });
             modelRows++;
-            for (const key of new Set(withModel.map(i => i.model.key))) {
+            if (!deferModels) for (const key of new Set(withModel.map(i => i.model.key))) {
                 triangles += built.get(key).triangles * withModel.filter(i => i.model.key === key).length;
                 missing += built.get(key).missingTextures;
             }
@@ -2050,6 +2094,7 @@ export async function renderOOTActors(scene, sceneBuffer, sceneName, game = 'OOT
         }
     }
     for (const key of [GROUP_MODELS, GROUP_MARKERS]) applyGroupMasterState(key);
+    if (pending.length) pendingModels = { scene, ctx, rows: pending };
 
     console.log(`${sceneName} setup ${setupID}: ${instances.length} actors, ${modelRows} modelled types (${triangles} triangles),` +
                 ` ${markerRows} marker types` + (missing ? `, ${missing} texture loads from unmapped segments` : ''));

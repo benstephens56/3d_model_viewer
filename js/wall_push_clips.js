@@ -1640,7 +1640,7 @@ export function setupWallPushClipUI(scene) {
                 if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
                 if (c.speed2 !== undefined) clip.speed2 = c.speed2;
                 if (c.vy !== undefined) clip.vy = c.vy;
-                // clipfinder --actions: the lunge that does it
+                // clipfinder --type actions: the lunge that does it
                 if (c.action) Object.assign(clip, { action: c.action, actionKey: c.actionKey, facing: c.facing, actionFrames: c.actionFrames, frames: c.frames.map(vec) });
                 // clipfinder --min-speed: the reachability already worked out
                 if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;

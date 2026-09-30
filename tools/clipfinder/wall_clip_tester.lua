@@ -27,7 +27,7 @@
 --   3. Run this script. Progress prints to the Lua console; the summary goes
 --      to the console and to wall_clip_results.txt next to the tests file.
 --      The game is put back to the starting savestate at the end.
---   Action clips (clipfinder --actions, a sword lunge doing the clip): the
+--   Action clips (clipfinder --type actions, a sword lunge doing the clip): the
 --   game does the attack itself - see ACTION_HOLD below for what the
 --   savestate needs.
 --   Recording a video: set RECORD = true below, run BizHawk at normal speed
@@ -47,7 +47,7 @@
 local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\MM_Clock_Tower_Interior_Human_actions_setup0_dyna.json]]
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
-local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --falling scans)
+local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --type falling scans)
 -- Only test one area of the map: the clip points (the viewer's dots) outside
 -- these ranges are ignored. Each is { min, max } (ends included), or nil for
 -- no limit on that axis. E.g. X_RANGE = { 300, 500 }, Z_RANGE = { 550, 700 }.
@@ -96,7 +96,7 @@ local FORM = nil
 -- speed (shouldn't). Each grid's in-game result goes to <that CSV>_ingame.csv,
 -- mismatches marked, and the summary lists them.
 local CSV_TESTS = false
--- Action clips (clipfinder --actions: the lunge's own movement does the clip).
+-- Action clips (clipfinder --type actions: the lunge's own movement does the clip).
 -- Each test: Link held at the start facing the test's facing, with Z held
 -- (Z-targeting nothing swings the camera behind him), then B pressed with the
 -- stick forward for one game frame - the stabs keep Z held (the targeted

@@ -34,7 +34,7 @@ the split costs no speed.
 tools/clipfinder/clipfinder.exe --game MM --map "Laundry Pool" --form Human -o tools/clipfinder/results/laundry.json
 
 # Every map, adult and child, falling clips too, one file per map
-tools/clipfinder/clipfinder.exe --game OOT --all --form Adult,Child --falling --out-dir tools/clipfinder/results
+tools/clipfinder/clipfinder.exe --game OOT --all --form Adult,Child --type all --out-dir tools/clipfinder/results
 
 # Resume an --all run after the map where it stopped
 tools/clipfinder/clipfinder.exe --game MM --all --form All --after "Laundry Pool" --out-dir tools/clipfinder/results
@@ -53,10 +53,10 @@ tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Dek
 tools/clipfinder/clipfinder.exe --game MM --map "Treasure Chest Shop" --form Human --sim "-239.859,0,824.246,0xFF9D,11" --out-dir tools/clipfinder/results
 
 # One map's dynapoly actors in setup 2 (from the viewer's export), only the wall pairs with a dynapoly wall in them
-tools/clipfinder/clipfinder.exe --game OOT --map "Spot 01 - Kakariko Village" --form All --falling --dyna OOT_dyna_all.json --setup 2 --dyna-only -o tools/clipfinder/results/kak_dyna.json
+tools/clipfinder/clipfinder.exe --game OOT --map "Spot 01 - Kakariko Village" --form All --type all --setup 2 --dyna-only -o tools/clipfinder/results/kak_dyna.json
 
 # Every map's dynapolys, every setup ("Export all dynapolys"), one file per map and set of setups
-tools/clipfinder/clipfinder.exe --game OOT --all --form All --falling --dyna OOT_dyna_all.json --dyna-only --out-dir tools/clipfinder/results
+tools/clipfinder/clipfinder.exe --game OOT --all --form All --type all --dyna-only --out-dir tools/clipfinder/results
 ```
 
 Progress and summaries print to the terminal (stderr). The JSON goes to the
@@ -85,20 +85,33 @@ the radius, so scan each form you care about.
 
 ### What to look for
 
+`--type` picks the clips, as a comma-separated list, e.g. `--type acute,falling`.
+
+Types: `acute`, `extended`, `slope`, `ground`, `falling`, `actions`
+
+| Type | Clips |
+|---|---|
+| `acute` | Walking wall push clips of acute pairs (see **Acute or extended** below) |
+| `extended` | Walking wall push clips of extended pairs; without `acute`, acute pairs are left out entirely |
+| `slope` | Slope clips (see **Slope clips** below) |
+| `ground` | Ground clips (see **Ground clips** below) |
+| `falling` | Falling wall push clips: of acute / extended pairs if either is picked too, else of both |
+| `actions` | Sword lunge clips (see `--action-keys` and **Action clips** below); not with `falling` or `ground` |
+
+Default: `acute,extended,slope`. `all` means `acute,extended,slope,ground,falling` (everything but `actions`).
+
 | Option | Meaning |
 |---|---|
-| `--falling` | Also look for clips while falling ("low" clips, `drop` > 0). Link's post-move position (posNext) is 2–30 below the floor, so the wall check runs lower than when walking. Slower. Falling crossings are only generated for drops where `checkHeight + dy >= 5`, and each move is checked again from its own start: the drop is measured from the floor at the clip point, and downhill Link starts higher, so he can fall further than that (tested in game: OoT Kakariko Village child, 20 such moves through TRI 673 / 21 / 26 / 20 / 28 falling 21-26 from the start, none clipped). Beyond that, the game's line test runs from Link's feet with floors included and stops him on his own floor (MM Human: drop over 21.8, OoT: over 21, Crawlspace: over 10). |
-| `--extended-only` | Keep only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) See **Acute or extended** below for how a wall pair is categorised; this leaves out every acute pair, all its points included. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
+| `--type T,...` | Which clips to look for (the types above). A scan only runs when a type needs it (the wall push scan for acute / extended / falling, the slope and ground scans for theirs), so `--type slope` or `--type ground` is quick. `--clip-kind falling / slope / ground` adds its type. `--out-dir` adds the types to the file name unless they are the default: `..._acute-falling.json`, `..._all.json`. The JSON's `"falling"` is true with `falling`, `"extendedOnly"` with `extended` and not `acute`. |
+| (`falling`) | The wall push clips while falling ("low" clips, `drop` > 0). Link's post-move position (posNext) is 2–30 below the floor, so the wall check runs lower than when walking. Slower. Falling crossings are only generated for drops where `checkHeight + dy >= 5`, and each move is checked again from its own start: the drop is measured from the floor at the clip point, and downhill Link starts higher, so he can fall further than that (tested in game: OoT Kakariko Village child, 20 such moves through TRI 673 / 21 / 26 / 20 / 28 falling 21-26 from the start, none clipped). Beyond that, the game's line test runs from Link's feet with floors included and stops him on his own floor (MM Human: drop over 21.8, OoT: over 21, Crawlspace: over 10). |
+| (`extended` alone) | `extended` without `acute` keeps only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) See **Acute or extended** below for how a wall pair is categorised; this leaves out every acute pair, all its points included. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
-| `--max-per-pair N` | Keep at most N points of each wall pair, spread out evenly: the first chosen, then over and over the point farthest from all the ones chosen so far (so they cover the pair end to end, e.g. 10 points 120 apart along a 1300 long wall). Each row the viewer shows a pair in (crossing / standing, walking / falling, and each kind) is thinned separately, so no row goes missing. Always kept: the lowest `--min-speed` reach (thinning runs after it), and a point that makes an acute pair acute. Smaller files: OoT Kakariko Village, child, `--falling`: 16178 points / 6.8 MB, with `--max-per-pair 10` 1403 points / 0.59 MB, all 184 rows still there. Written to the JSON as `"maxPerPair"`. Not applied with `--refine`, `--yaw` or `--angles`. |
-| `--actions all\|KEY,...` | Action clips: a sword lunge's own movement doing the clip, from a standing start (see **Action clips** below). Keys: `1h-slash`, `1h-stab`, `2h-slash`, `2h-stab`, `stick-slash` (the Deku stick: two-handed and always the forward slash, so the 2h slash's frames). MM: Human, all five; OoT: Adult (the four sword ones) and Child (`1h-slash`, `1h-stab` with the Kokiri Sword, `stick-slash`); other forms are skipped. `--out-dir` names the file `..._actions.json`. Not with `--falling`, `--min-speed`, `--refine`, `--yaw`, `--angles`, `--slope-only`, `--ground-only` or `--extended-only`. |
+| `--max-per-pair N` | Keep at most N points of each wall pair, spread out evenly: the first chosen, then over and over the point farthest from all the ones chosen so far (so they cover the pair end to end, e.g. 10 points 120 apart along a 1300 long wall). Each row the viewer shows a pair in (crossing / standing, walking / falling, and each kind) is thinned separately, so no row goes missing. Always kept: the lowest `--min-speed` reach (thinning runs after it), and a point that makes an acute pair acute. Smaller files: OoT Kakariko Village, child, falling: 16178 points / 6.8 MB, with `--max-per-pair 10` 1403 points / 0.59 MB, all 184 rows still there. Written to the JSON as `"maxPerPair"`. Not applied with `--refine`, `--yaw` or `--angles`. `--type actions` thins by default (see below); `--max-per-pair` there sets the cap instead. |
+| `--action-keys KEY,...` | `--type actions`: a sword lunge's own movement doing the clip, from a standing start (see **Action clips** below). Default all; keys: `1h-slash`, `1h-stab`, `2h-slash`, `2h-stab`, `stick-slash` (the Deku stick: two-handed and always the forward slash, so the 2h slash's frames). MM: Human, all five; OoT: Adult (the four sword ones) and Child (`1h-slash`, `1h-stab` with the Kokiri Sword, `stick-slash`); other forms are skipped. The file is `..._actions.json`; the other types picked with it (acute / extended / slope) narrow which clip points the lunges aim at and which of their clips are kept. A lunge clips from far more starts than the viewer needs (over a thousand for one wall pair, about 1 KB each with its frames), so without `--max-per-pair` each row keeps at most 40 points, spread out as `--max-per-pair` does, fewer (down to 6) when the file would pass 4000 points in all: MM Pirates' Fortress Interior, 50451 points / 47.7 MB, becomes about 4000 / 4 MB. Not with the `falling` or `ground` types, `--min-speed`, `--refine`, `--yaw` or `--angles`. |
 | `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them; for a slope or ground clip P is the floor, C the wall). Needed for `--refine` / `--angles`. The scan only looks near the two triangles: the wall pairs and slope walls within a frame's move (`--max-move`) plus two radii and 10 of them. Every triangle still collides as usual, and the pair's clips come out the same as a whole-map scan's (OoT Death Mountain Trail setup 2, falling, TRI 90 → 25: 168 s → 14 s). |
-| `--dyna FILE` | Add the dynapoly actors, from the viewer's **Export all dynapolys** (every map's, every setup; see **Dynapolys** below). A single map's `dynapoly-1` export (the old **Export dynapolys**) still works. Each map is scanned once per set of setups with the same dynapolys, and once without dynapolys if the file has none for it. Output files named by `--out-dir` get `_setup<N>[-<N>...]_dyna` added; with `-o` and several sets, `_setup...` goes before `.json`. |
-| `--no-slope` | Leave out the slope clips (see **Slope clips** below). |
-| `--slope-only` | Only the slope clips: the wall push and ground clip scans are skipped. `--out-dir` names the file `..._slope.json`. |
-| `--no-ground` | Leave out the ground clips (see **Ground clips** below). |
-| `--ground-only` | Only the ground clips: the wall push and slope clip scans are skipped. `--out-dir` names the file `..._ground.json`, so it doesn't overwrite the full scan's. |
+| `--dyna FILE\|none` | The dynapoly actors; by default `tools/clipfinder/<GAME>_dyna_all.json` (a warning and no dynapolys if it isn't there), `none` for none. From the viewer's **Export all dynapolys** (every map's, every setup; see **Dynapolys** below). A single map's `dynapoly-1` export (the old **Export dynapolys**) still works. Each map is scanned once per set of setups with the same dynapolys, and once without dynapolys if the file has none for it. Output files named by `--out-dir` get `_setup<N>[-<N>...]_dyna` added; with `-o` and several sets, `_setup...` goes before `.json`. |
 | `--slope-step 1\|2\|3` | The slope clip scan's widest step along a wall's bottom edge (default 3; see **Slope clips** below). `1` searches every unit. |
+| `--wall-step S` | After the normal scan, look again for wall push clips on the wall pairs that have none, with standing points every S (below the normal 0.5, e.g. `0.25` or `0.1`) and crossing points every S / 2 along the pushing wall. The normal scan coarsens a big pair's grid until it's at most 40000 points (a long wall can end up several units apart); this pass doesn't. It stops at each new pair's first clip, so the file only grows by about a point per pair it finds: once a pair is known to clip, `--pair P,C --refine` / `--angles` / `--yaw` look at it closely. Pairs with a clip already (any kind) are skipped. Slow: a step half the size is about 4x the standing points. The terminal says how many new pairs it found. |
 | `--ground-step 1\|2\|3` | The ground clip scan's widest step along a wall's bottom edge (default 3; see **Ground clips** below). `1` searches every unit: the most (floor, wall) pairs, about 2.5x as long. |
 | `--keep-load-void` | Keep the clips whose start is on a loading zone (a floor with an exit, `SurfaceType_GetExitIndex`) or a void plane (floor property 5 / 12, MM 13 too). Left out by default: standing there takes Link out of the scene before any clip matters. Only the floor under the start counts; dynapolys never do (the export has no surface types). E.g. OoT Death Mountain Trail, adult: 374 of 1818 points, nearly all of TRI 348 → 346 / 345, start on the summit's exit to the crater (TRI 453, exit 5). `--sim` prints the start's floor, and `--tri` a poly's exit and floor property. |
 | `--slope-starts` | Also search the crossing points whose surroundings are only in bounds when the rays that go into a slope first are ignored (see **In bounds** below). Finds some more crossing clips starting on slopes, but about 3x slower on a mountain: OoT Death Mountain Trail setup 2, adult, falling: 21333 points (4 more wall pairs) in 110 s instead of 21039 in 38 s. |
@@ -377,7 +390,7 @@ after the second.
 
 ## Ground clips
 
-`"kind": "ground"`. Falling fast, the game's wall check changes its line
+`"kind": "ground"`, with `--type ground` (not in the default types). Falling fast, the game's wall check changes its line
 test: when checkHeight + dy < 5 (dy is posNext.y - prevPos.y, so a y
 velocity below (5 - checkHeight) / 1.5, -14 for Link in OoT) it tests the
 line from prevPos to posNext themselves, Link's feet, with floors, instead
@@ -421,7 +434,7 @@ up to ceilingCheckHeight + dy - 10, which is small at this dy).
 
 ## Action clips
 
-`--actions`. A melee attack's lunge moves Link by its animation's root
+`--type actions`. A melee attack's lunge moves Link by its animation's root
 motion (`func_80837948` starts the attack with
 `ANIM_FLAG_UPDATE_XZ | ANIM_FLAG_ENABLE_MOVEMENT` and zeroes his speed).
 `AnimTask_ActorMovement` adds it to `world.pos` after Player's update, so

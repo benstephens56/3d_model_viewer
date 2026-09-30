@@ -1110,7 +1110,7 @@ export function makeZeldaMesh(batches, caches, options = {}) {
 // Scene entry point
 ////////////////////////////////////////
 
-const ROOM_GROUP_KEY = 'oot-rooms';
+export const ROOM_GROUP_KEY = 'oot-rooms';
 let texturedRoot = null;
 
 /** models/<game>/ file name of a scene's room (the decomp's naming). */

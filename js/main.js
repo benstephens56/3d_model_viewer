@@ -17,9 +17,9 @@ import { renderBKSetup } from './bk_setup.js';
 import { renderBTSetup } from './bt_setup.js';
 import { renderSky, drawSky } from './sky.js';
 import { loadBTTextureBank, getBTTextureBank } from './bt_textures.js';
-import { renderZeldaSceneTextured, parseZeldaSceneInfo, zeldaRoomFileName, zeldaAreaTextureFileName } from './zelda_textured.js';
+import { renderZeldaSceneTextured, parseZeldaSceneInfo, zeldaRoomFileName, zeldaAreaTextureFileName, ROOM_GROUP_KEY } from './zelda_textured.js';
 import { renderOOTActors } from './oot_actors.js';
-import { addModelCheckbox, buildTest } from './render.js';
+import { addModelCheckbox, buildTest, deferGroupBuild } from './render.js';
 import { setupWallPushClipUI } from './wall_push_clips.js';
 import { installWaterboxDepthToggle } from './waterboxes.js';
 
@@ -445,7 +445,9 @@ async function loadSelectedMap(game) {
             // OOT / MM: the rooms' display lists, textured (zelda_textured.js).
             // models/<game>/<scene>_room_<n>, see tools/oot/import_oot_rooms.py
             // and tools/mm/import_mm_rooms.py.
-            if (game == "OOT" || game == "MM") {
+            // With the group last left unchecked, nothing is fetched or built
+            // until it is checked again (deferGroupBuild).
+            const buildRooms = async () => {
                 const { numRooms } = parseZeldaSceneInfo(buffer1);
                 const rooms = [];
                 for (let i = 0; i < numRooms; i++) {
@@ -461,8 +463,11 @@ async function loadSelectedMap(game) {
                     if (res.ok) areaTextures = await res.arrayBuffer();
                     else console.warn(`${areaFile}: ${res.status}`);
                 }
-                await showLoading(`${mapName}: textured rooms…`);
                 renderZeldaSceneTextured(scene, buffer1, rooms, mapFilename, { game, areaTextures });
+            };
+            if ((game == "OOT" || game == "MM") && !deferGroupBuild(ROOM_GROUP_KEY, 'Textured Rooms', buildRooms)) {
+                await showLoading(`${mapName}: textured rooms…`);
+                await buildRooms();
             }
 
             // OOT / MM: every actor of the selected setup, drawn with its model

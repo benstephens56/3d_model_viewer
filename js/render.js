@@ -399,6 +399,21 @@ export function getModelGroup(key, label) {
         // Remember the choice for the same group on the next scene load.
         groupMasterState.set(key, target);
 
+        // A group deferred at load (deferGroupBuild) has no rows yet: build
+        // them now. The builder ends with applyGroupMasterState, which turns
+        // the new rows on.
+        if (target && group.pendingBuild) {
+            const build = group.pendingBuild;
+            group.pendingBuild = null;
+            master.disabled = true;
+            count.textContent = 'loading…';
+            Promise.resolve().then(build).catch(err => console.error(err)).finally(() => {
+                master.disabled = false;
+                syncGroupMaster(group);
+            });
+            return;
+        }
+
         // Suppress the per-row resync for the duration of the batch: it is
         // N redundant passes over the same list, and it makes the master
         // visibly flicker through indeterminate on the way.
@@ -488,6 +503,29 @@ export function applyGroupMasterState(groupKey) {
     if (group.master.checked === saved && !group.master.indeterminate) return;
     group.master.checked = saved;
     group.master.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/**
+ * Skip building a group whose master was last left unchecked: create it
+ * empty and unchecked, and run build() (which adds its rows, then calls
+ * applyGroupMasterState) the first time the master is checked. Returns true
+ * when deferred; false means the caller should build now.
+ */
+export function deferGroupBuild(groupKey, label, build) {
+    if (groupMasterState.get(groupKey) !== false) return false;
+    const group = getModelGroup(groupKey, label);
+    group.pendingBuild = build;
+    group.count.textContent = 'not loaded';
+    return true;
+}
+
+/** Take a row (by model name) out of a group box, keeping its master and count in step. */
+export function removeGroupRow(groupKey, name) {
+    const group = modelGroups.get(groupKey);
+    const row = group && [...group.body.querySelectorAll('.model-row')].find(r => r.dataset.modelName === name);
+    if (!row) return;
+    row.remove();
+    syncGroupMaster(group);
 }
 
 export function resetGroupModelState(groupKey) {

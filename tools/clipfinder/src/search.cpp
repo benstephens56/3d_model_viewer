@@ -178,7 +178,10 @@ static bool cornerBox(const Poly& A, const Poly& B, double R, double lo, double 
 	return true;
 }
 
-static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, const std::function<void(const NextPos&)>& yield) {
+// step0: the grid step; capGrid: coarsen it until the pair's box is at most
+// 40000 points (off for --wall-step's pass)
+static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, const std::function<void(const NextPos&)>& yield,
+	double step0 = NEXT_STEP, bool capGrid = true) {
 	const Poly& A = m.polys[pair.A];
 	const Poly& B = m.polys[pair.B];
 	const double R = m.radius, ch = m.checkHeight, lo = pair.lo, hi = pair.hi, cosAB = pair.cosAB;
@@ -190,8 +193,8 @@ static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, c
 		z0 = std::max(z0, cb[2]); z1 = std::min(z1, cb[3]);
 		if (x1 < x0 || z1 < z0) return;
 	}
-	double step = NEXT_STEP;
-	while (((x1 - x0) / step) * ((z1 - z0) / step) > 40000) step *= 1.25;
+	double step = step0;
+	while (capGrid && ((x1 - x0) / step) * ((z1 - z0) / step) > 40000) step *= 1.25;
 	double x = 0, z = 0;
 	auto reachable = [&](double h) {
 		double dA = planeDist(A, x, h, z);
@@ -257,7 +260,7 @@ static void nextPositionsForPair(const Model& m, Scratch& s, const Pair& pair, c
 struct CrossPoint { V3 p; double floorY; int drop; double spotU, spotY; };
 
 static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, const vector<const Pair*>& pairsA,
-	const std::function<void(const CrossPoint&)>& yield) {
+	const std::function<void(const CrossPoint&)>& yield, double crossStep = CROSS_STEP) {
 	const double ch = m.checkHeight;
 	double nx = A.nx * A.invNXZ, nz = A.nz * A.invNXZ;
 	double tx = -nz, tz = nx;
@@ -331,7 +334,7 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 	double block = 0;
 	vector<double> blockYs;
 	int ui = 0;
-	for (double u = u0; u <= u1; ui++, u += CROSS_STEP) {
+	for (double u = u0; u <= u1; ui++, u += crossStep) {
 		if (!isNear(u)) continue;
 		double b = std::floor(u / FLOOR_BLOCK);
 		if (!haveBlock || b != block) {
@@ -589,8 +592,23 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		std::lock_guard<std::mutex> g(foundMu);
 		return foundPairs.insert({ a, b }).second;
 	};
+	// --wall-step's fine pass: the wall pairs that have a clip (from the normal
+	// passes, or found in this one), so it only looks for new pairs, and only
+	// until each has one clip
+	std::set<std::pair<int, int>> fineFound;
+	auto isFound = [&](bool fine, int a, int b) {
+		if (!fine) return pairFound(a, b);
+		std::lock_guard<std::mutex> g(foundMu);
+		return fineFound.count({ a, b }) > 0;
+	};
+	auto claim = [&](bool fine, int a, int b) {
+		if (!fine) return claimPair(a, b);
+		std::lock_guard<std::mutex> g(foundMu);
+		return fineFound.insert({ a, b }).second;
+	};
+	SharedSet seenFine;
 	std::atomic<size_t> nextPair{ 0 }, pairsDone{ 0 };
-	// --extended-only: wall pairs (pusher, crossed) with an acute point found
+	// --type extended without acute: wall pairs (pusher, crossed) with an acute point found
 	// (not kept). That makes the pair acute, so all its points are left out,
 	// extended ones included.
 	std::mutex acuteMu;
@@ -610,41 +628,44 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		fprintf(stderr, "\r  %s %zu / %zu (%.0fs)   ", phase, done, total, std::chrono::duration<double>(now - t0).count());
 	};
 
-	auto worker1 = [&]() {
+	// fine: --wall-step's pass (see fineFound)
+	auto worker1 = [&](bool fine) {
 		Scratch s;
 		s.stamp.assign(m.polys.size(), 0);
 		vector<Clip> local;
+		const char* phase = fine ? "fine wall pairs" : "wall pairs";
+		SharedSet& seenP = fine ? seenFine : seen;
 		for (;;) {
 			size_t pi = nextPair++;
 			if (pi >= pairs.size()) break;
 			s.clearCache();
 			const Pair& pr = pairs[pi];
 			// (a floor pusher only snaps Link through the line test: crossings only)
-			if (m.polys[pr.A].isFloor) { progress("wall pairs", ++pairsDone, pairs.size()); continue; }
+			if (m.polys[pr.A].isFloor || isFound(fine, pr.A, pr.B)) { progress(phase, ++pairsDone, pairs.size()); continue; }
 			nextPositionsForPair(m, s, pr, [&](const NextPos& np) {
-				if (pairFound(pr.A, pr.B)) return;
+				if (isFound(fine, pr.A, pr.B)) return;
 				const V3& p = np.p;
 				double h = p.y + m.checkHeight;
-				if (h - GROUND_DROP >= np.lo && h - GROUND_DROP <= np.hi && seen.insert({ p.x, p.z, p.y, 0 })) {
+				if (h - GROUND_DROP >= np.lo && h - GROUND_DROP <= np.hi && seenP.insert({ p.x, p.z, p.y, 0 })) {
 					if (auto c = standingClip(m, s, p)) {
 						// (extended plane only: an acute one still ends the point, it's just not kept)
 						if (m.extendedOnly && c->acutePoint) markAcute(c->pusher, c->crossed);
-						else if (claimPair(c->pusher, c->crossed)) local.push_back(*c);
+						else if (claim(fine, c->pusher, c->crossed)) local.push_back(*c);
 						return;
 					}
 				}
 				for (int k = 2; k <= m.lowDrop; k += 2) {
 					double hk = h - k;
 					if (hk < np.lo || hk > np.hi) continue;
-					if (!seen.insert({ p.x, p.z, p.y, k })) continue;
+					if (!seenP.insert({ p.x, p.z, p.y, k })) continue;
 					if (auto c = lowClip(m, s, p, k)) {
 						if (m.extendedOnly && c->acutePoint) markAcute(c->pusher, c->crossed);
-						else if (claimPair(c->pusher, c->crossed)) local.push_back(*c);
+						else if (claim(fine, c->pusher, c->crossed)) local.push_back(*c);
 						break;
 					}
 				}
-			});
-			progress("wall pairs", ++pairsDone, pairs.size());
+			}, fine ? m.wallStep : NEXT_STEP, !fine);
+			progress(phase, ++pairsDone, pairs.size());
 		}
 		std::lock_guard<std::mutex> g(outMu);
 		clips.insert(clips.end(), local.begin(), local.end());
@@ -661,10 +682,11 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	}
 	std::atomic<size_t> nextPusher{ 0 }, pushersDone{ 0 };
 
-	auto worker2 = [&]() {
+	auto worker2 = [&](bool fine) {
 		Scratch s;
 		s.stamp.assign(m.polys.size(), 0);
 		vector<Clip> local;
+		const char* phase = fine ? "fine crossing walls" : "crossing walls";
 		for (;;) {
 			size_t ai = nextPusher++;
 			if (ai >= pushers.size()) break;
@@ -672,6 +694,10 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 			s.standSpots.clear();
 			const Poly& A = m.polys[pushers[ai]];
 			const vector<int>& partners = partnersOf[A.id];
+			if (fine && std::all_of(partners.begin(), partners.end(), [&](int b) { return isFound(true, A.id, b); })) {
+				progress(phase, ++pushersDone, pushers.size());
+				continue;
+			}
 			double k = F(m.radius * F(1 / A.nXZ));
 			std::set<std::pair<double, double>> done;
 			// one point per (start, move) frame (the frame's
@@ -688,7 +714,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 					double d = planeDist(B, res.x, h, res.z);
 					if (d >= 0 || d < -4 * m.radius) continue;
 					double t = d / B.nMag;
-					if (pointInTri3D(B, res.x - t * B.nx, h - t * B.ny, res.z - t * B.nz, 1) && !pairFound(A.id, bid)) {
+					if (pointInTri3D(B, res.x - t * B.nx, h - t * B.ny, res.z - t * B.nz, 1) && !isFound(fine, A.id, bid)) {
 						behind = true;
 						behindDyna = B.bg >= 0;
 						break;
@@ -735,7 +761,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 				auto sr = crossingClip(m, s, A, cp, STRICT);
 				bool strict = sr && sr->first.clip.onFace;
 				if (m.extendedOnly && strict) { markAcute(A.id, r->first.clip.crossed); return; }
-				if (!claimPair(A.id, r->first.clip.crossed)) return;
+				if (!claim(fine, A.id, r->first.clip.crossed)) return;
 				const CrossFound& f = r->first;
 				Clip c;
 				c.acutePoint = strict;
@@ -747,8 +773,8 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 				c.yaw = f.yaw; c.speed = f.speed; c.hasMove = true;
 				c.crossed = f.clip.crossed; c.pusher = A.id;
 				local.push_back(c);
-			});
-			progress("crossing walls", ++pushersDone, pushers.size());
+			}, fine ? m.wallStep / 2 : CROSS_STEP);
+			progress(phase, ++pushersDone, pushers.size());
 		}
 		std::lock_guard<std::mutex> g(outMu);
 		clips.insert(clips.end(), local.begin(), local.end());
@@ -764,17 +790,17 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		}
 		fprintf(stderr, "  (dynapoly: %zu pairs with one dynapoly wall, %zu dynapoly with dynapoly)\n", one, both);
 	}
-	// (--slope-only / --ground-only: just the slope / ground clips below)
-	if (!m.slopeOnly && !m.groundOnly) {
+	// (--type: the wall push scan only if a wall push type is picked)
+	if (m.wallPushes) {
 		{
 			vector<std::thread> ts;
-			for (int i = 0; i < threads; i++) ts.emplace_back(worker1);
+			for (int i = 0; i < threads; i++) ts.emplace_back(worker1, false);
 			for (auto& t : ts) t.join();
 		}
 		fprintf(stderr, "\n  standing points: %.1fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 		{
 			vector<std::thread> ts;
-			for (int i = 0; i < threads; i++) ts.emplace_back(worker2);
+			for (int i = 0; i < threads; i++) ts.emplace_back(worker2, false);
 			for (auto& t : ts) t.join();
 		}
 		fprintf(stderr, "\n");
@@ -787,7 +813,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		if (m.dynaPairsOnly && p.bg < 0 && std::none_of(m.bgActors.begin(), m.bgActors.end(), [&](const BgActor& b) {
 			return b.cx + b.r >= p.minX - 50 && b.cx - b.r <= p.maxX + 50 && b.cz + b.r >= p.minZ - 50 && b.cz - b.r <= p.maxZ + 50;
 		})) continue;
-		if (m.slope && !m.groundOnly && m.nearFocus(p, focusMargin)) slopeWalls.push_back(p.id);
+		if (m.slope && m.nearFocus(p, focusMargin)) slopeWalls.push_back(p.id);
 	}
 	std::atomic<size_t> nextSlope{ 0 }, slopesDone{ 0 };
 	size_t slopeFound = 0;
@@ -818,7 +844,7 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	}
 	// Ground clips (ground.h): every wall rising out of a floor, along its bottom edge
 	vector<int> groundWalls;
-	if (m.ground && !m.slopeOnly) {
+	if (m.ground) {
 		for (const Poly& p : m.polys) {
 			if (!p.exists || !p.isWall || !(p.nXZ > 0)) continue;
 			// --dyna-only: a static wall only near a dynapoly actor (its floor can be the one he falls through)
@@ -854,6 +880,25 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 		for (int i = 0; i < threads; i++) ts.emplace_back(worker4);
 		for (auto& t : ts) t.join();
 		fprintf(stderr, "\n  ground clips: %zu points (%.1fs)\n", groundFound, std::chrono::duration<double>(std::chrono::steady_clock::now() - tg0).count());
+	}
+	// --wall-step: the wall push passes again, finer and uncapped, on the wall
+	// pairs without a clip yet, one clip each (a pair is known to clip then;
+	// --pair --refine / --angles look at it closely)
+	if (m.wallStep > 0 && m.wallPushes) {
+		auto tf0 = std::chrono::steady_clock::now();
+		for (const Clip& c : clips) fineFound.insert({ c.pusher, c.crossed });
+		for (const auto& pr : acutePairs) fineFound.insert(pr);
+		const size_t before = clips.size(), knownPairs = fineFound.size();
+		nextPair = 0; pairsDone = 0; nextPusher = 0; pushersDone = 0;
+		for (auto worker : { std::function<void(bool)>(worker1), std::function<void(bool)>(worker2) }) {
+			vector<std::thread> ts;
+			for (int i = 0; i < threads; i++) ts.emplace_back(worker, true);
+			for (auto& t : ts) t.join();
+			fprintf(stderr, "\n");
+		}
+		fprintf(stderr, "  --wall-step %g: %zu more wall pairs (%zu points; %zu pairs already had clips) in %.1fs\n",
+			m.wallStep, fineFound.size() - knownPairs, clips.size() - before, knownPairs,
+			std::chrono::duration<double>(std::chrono::steady_clock::now() - tf0).count());
 	}
 	// Deterministic order: standing points first, then crossings, by position.
 	std::sort(clips.begin(), clips.end(), [](const Clip& a, const Clip& b) {
@@ -903,13 +948,28 @@ vector<Clip> scan(const Model& m, int threads, bool firstPerPair) {
 	return out;
 }
 
+// thinClips' rows: a wall pair, its kind, crossing / standing, walking /
+// falling and the action
+using ThinKey = std::tuple<int, int, int, bool, bool, int>;
+static ThinKey thinKey(const Clip& c) { return { c.pusher, c.crossed, c.kind, c.cross, c.drop > 0, c.action }; }
+
+int thinCapForBudget(const vector<const vector<Clip>*>& sets, int maxN, int minN, size_t budget) {
+	vector<size_t> sizes;
+	for (const vector<Clip>* set : sets) {
+		std::map<ThinKey, size_t> n;
+		for (const Clip& c : *set) n[thinKey(c)]++;
+		for (auto& [k, v] : n) sizes.push_back(v);
+	}
+	auto total = [&](int cap) { size_t t = 0; for (size_t v : sizes) t += std::min(v, (size_t)cap); return t; };
+	int cap = maxN;
+	while (cap > minN && total(cap) > budget) cap--;
+	return cap;
+}
+
 size_t thinClips(vector<Clip>& clips, int n) {
 	if (n <= 0) return 0;
-	std::map<std::tuple<int, int, int, bool, bool, int>, vector<size_t>> groups;
-	for (size_t i = 0; i < clips.size(); i++) {
-		const Clip& c = clips[i];
-		groups[{ c.pusher, c.crossed, c.kind, c.cross, c.drop > 0, c.action }].push_back(i);
-	}
+	std::map<ThinKey, vector<size_t>> groups;
+	for (size_t i = 0; i < clips.size(); i++) groups[thinKey(clips[i])].push_back(i);
 	vector<bool> keep(clips.size(), false);
 	for (auto& [k, idx] : groups) {
 		if ((int)idx.size() <= n) { for (size_t i : idx) keep[i] = true; continue; }
@@ -944,4 +1004,45 @@ size_t thinClips(vector<Clip>& clips, int n) {
 	const size_t dropped = clips.size() - w;
 	clips.resize(w);
 	return dropped;
+}
+
+static const char* const TYPE_NAMES[] = { "acute", "extended", "slope", "ground", "falling", "actions" };
+
+int parseTypes(const string& list, string& err) {
+	int t = 0;
+	for (size_t a = 0; a <= list.size();) {
+		size_t b = list.find(',', a);
+		if (b == string::npos) b = list.size();
+		string name = list.substr(a, b - a);
+		for (auto& ch : name) ch = (char)tolower((unsigned char)ch);
+		a = b + 1;
+		if (name.empty()) continue;
+		if (name == "all") { t |= TYPE_ALL; continue; }
+		int bit = 0;
+		for (int k = 0; k < 6; k++) if (name == TYPE_NAMES[k]) bit = 1 << k;
+		if (!bit) { err = "unknown type " + name + " (acute, extended, slope, ground, falling, actions, or all: the first five)"; return 0; }
+		t |= bit;
+	}
+	if (!t) err = "no types";
+	return t;
+}
+
+string typeTag(int types) {
+	if (types == (TYPE_ACUTE | TYPE_EXTENDED | TYPE_SLOPE)) return "";
+	if (types == TYPE_ALL) return "_all";
+	string s;
+	for (int k = 0; k < 6; k++) if (types & (1 << k)) s += (s.empty() ? "_" : "-") + string(TYPE_NAMES[k]);
+	return s;
+}
+
+void keepTypes(vector<Clip>& clips, int types) {
+	if ((types & TYPE_ACTIONS) && !(types & (TYPE_ACUTE | TYPE_EXTENDED | TYPE_SLOPE))) types |= TYPE_ACUTE | TYPE_EXTENDED | TYPE_SLOPE;
+	const int cats = types & (TYPE_ACUTE | TYPE_EXTENDED);
+	clips.erase(std::remove_if(clips.begin(), clips.end(), [&](const Clip& c) {
+		if (c.kind == 2) return !(types & TYPE_SLOPE);
+		if (c.kind == 3) return !(types & TYPE_GROUND);
+		const int cat = c.kind == 0 ? TYPE_ACUTE : TYPE_EXTENDED;
+		if (c.drop == 0) return !(types & cat);
+		return !(types & TYPE_FALLING) || (cats && !(types & cat));
+	}), clips.end());
 }
