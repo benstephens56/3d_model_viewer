@@ -1,6 +1,6 @@
 #include "collision.h"
 
-static void initPoly(Poly& p, int id, const int v[3][3], const int n[3], int d) {
+static void initPoly(Poly& p, int id, const int v[3][3], const int n[3], double d) {
 	p.exists = true;
 	p.id = id;
 	p.ax = v[0][0]; p.ay = v[0][1]; p.az = v[0][2];

@@ -29,6 +29,8 @@
 //     (--first-per-pair: one clip point per wall pair, the first found - much faster)
 //   clipfinder --game OOT --all --form Adult [--type all] --out-dir results/
 //   clipfinder --game OOT --map "Spot 01 - Kakariko Village" --form All -o kak.json
+//   clipfinder --game OOT3D --map "Link's House" --form Child --dyna none -o links_house.json
+//     (OOT3D: the 3DS scene files in models/OOT3D, with OoT's player logic)
 //   clipfinder --game MM --map "South Clock Town" --form Human [--setup N] [--dyna-only] -o sct.json
 //     (--dyna: the scene's dynapoly actors too, from the viewer's "Export all dynapolys";
 //      --dyna-only: just the wall pairs with a dynapoly wall in them)
@@ -87,6 +89,8 @@ static bool exists(const string& p) { std::ifstream f(p); return (bool)f; }
 // room whose file isn't there.
 static vector<int> roomTypes(const string& root, const string& game, const string& sceneFile, const vector<uint8_t>& scene) {
 	vector<int> out;
+	// (OOT3D: the room files aren't in models/OOT3D - every room unknown)
+	if (game == "OOT3D") return out;
 	int numRooms = 0;
 	for (size_t o = 0; o + 8 <= scene.size() && scene[o] != 0x14; o += 8)
 		if (scene[o] == 0x04) { numRooms = scene[o + 1]; break; }
@@ -290,20 +294,25 @@ int main(int argc, char** argv) {
 	if (angleSweep && (onlyPusher < 0 || maxSpeed <= 0)) { fprintf(stderr, "--angles needs --pair PUSHER,CROSSED and --max-speed S\n"); return 2; }
 	if (angleSweep && (atYaw >= 0 || minSpeed)) { fprintf(stderr, "--angles can't be used with --yaw / --min-speed / --refine\n"); return 2; }
 	for (auto& ch : game) ch = (char)toupper((unsigned char)ch);
+	// OOT3D: the 3DS scene files (models/OOT3D, the viewer's OOT3D_Maps), with
+	// OoT's forms, radii, check heights and actions. Whether the 3DS port's
+	// player and collision code match the N64 decomp's is still to be checked
+	// in game.
+	const string base = game == "OOT3D" ? "OOT" : game;
 	// --type actions: the scan's walking and slope clip points, then the lunges aimed at them
 	vector<int> actions;
 	if (types & TYPE_ACTIONS) {
 		string err;
-		actions = parseActions(game, actionsArg, err);
+		actions = parseActions(base, actionsArg, err);
 		if (actions.empty()) { fprintf(stderr, "--action-keys: %s\n", err.empty() ? "no actions" : err.c_str()); return 2; }
 		if ((types & (TYPE_FALLING | TYPE_GROUND)) || minSpeed || atYaw >= 0 || angleSweep) {
 			fprintf(stderr, "--type actions can't be used with falling / ground types, --min-speed / --refine / --yaw / --angles\n");
 			return 2;
 		}
 	}
-	if ((game != "OOT" && game != "MM") || (mapName.empty() && !all)) {
+	if ((game != "OOT" && game != "OOT3D" && game != "MM") || (mapName.empty() && !all)) {
 		fprintf(stderr,
-			"usage: clipfinder --game OOT|MM (--map \"<name in the viewer's map list>\" | --all)\n"
+			"usage: clipfinder --game OOT|OOT3D|MM (--map \"<name in the viewer's map list>\" | --all)\n"
 			"                  [--form Adult|Child|Crawlspace|Human|Deku|Zora|Goron|FierceDeity|All, or a list: Adult,Child] [--radius R] [--first-per-pair]\n"
 			"                  [--type acute,extended,slope,ground,falling,actions | all]  (which clips; default acute,extended,slope; all: every one but actions)\n"
 			"                  [--min-speed] [--pair PUSHER,CROSSED] [--refine (with --pair: the exact lowest walking speed)]\n"
@@ -337,7 +346,7 @@ int main(int argc, char** argv) {
 		{ "OOT", { "Adult", "Child", "Crawlspace" } },
 		{ "MM", { "Human", "Deku", "Zora", "Goron", "FierceDeity" } },
 	};
-	if (form.empty()) form = game == "OOT" ? "Adult" : "Human";
+	if (form.empty()) form = base == "OOT" ? "Adult" : "Human";
 	auto upper = [](string v) { for (auto& ch : v) ch = (char)toupper((unsigned char)ch); return v; };
 	struct Variant { string form; double radius, checkHeight; };
 	vector<Variant> variants;
@@ -349,7 +358,7 @@ int main(int argc, char** argv) {
 			if (b == string::npos) b = form.size();
 			string f = form.substr(a, b - a);
 			if (!f.empty()) {
-				if (upper(f) == "ALL") list.insert(list.end(), allForms.at(game).begin(), allForms.at(game).end());
+				if (upper(f) == "ALL") list.insert(list.end(), allForms.at(base).begin(), allForms.at(base).end());
 				else list.push_back(f);
 			}
 			a = b + 1;
@@ -363,8 +372,8 @@ int main(int argc, char** argv) {
 				r = radii.at(fu);
 			}
 			// OoT's PLAYER_STATE2_CRAWLING checks walls at 15 instead of 26 (z_player.c)
-			const bool crawl = game == "OOT" && (fu == "CRAWLSPACE" || fu == "CRAWL");
-			variants.push_back({ f, r, crawl ? 15.0 : game == "OOT" ? 26.0 : F(F(268 * F(0.1))) });
+			const bool crawl = base == "OOT" && (fu == "CRAWLSPACE" || fu == "CRAWL");
+			variants.push_back({ f, r, crawl ? 15.0 : base == "OOT" ? 26.0 : F(F(268 * F(0.1))) });
 		}
 	}
 	if (root.empty()) {
@@ -625,7 +634,7 @@ int main(int argc, char** argv) {
 					m.focusA = onlyPusher;
 					m.focusB = onlyCrossed;
 				}
-				if (!simArg.empty()) return runSim(m, simArg, game, upper(v.form));
+				if (!simArg.empty()) return runSim(m, simArg, base, upper(v.form));
 				if (!triArg.empty()) return printTris(m, triArg);
 				vector<Clip> found = scan(m, threads, firstPerPair);
 				keepTypes(found, types | (anyJump(formActions) ? TYPE_FALLING : 0));

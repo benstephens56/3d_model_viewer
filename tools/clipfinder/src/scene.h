@@ -7,7 +7,7 @@ struct Tri {
 	int id;
 	int v[3][3];
 	int n[3];
-	int d;
+	double d; // N64: an s16; OoT3D: an f32
 	uint32_t surf0 = 0; // its SurfaceType's data[0] (exit index, floor property, ...)
 	uint32_t surf1 = 0; // and data[1] (floor effect, ...)
 };

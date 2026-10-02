@@ -23,6 +23,8 @@ A rebuild fails at the link step (`ld returned 1 exit status`) while
 `clipfinder.exe` is running. Wait for the run to finish first, or build a
 copy somewhere else with `OUT=path/to/other.exe sh tools/clipfinder/build.sh`.
 
+On Linux, use the system g++ instead: `GXX=g++ OUT=clipfinder sh tools/clipfinder/build.sh`.
+
 The source is in `src/`, split by layer; `src/main.cpp`'s header comment
 lists what each file holds. `-flto=auto` lets the hot collision checks inline across files, so
 the split costs no speed.
@@ -32,6 +34,9 @@ the split costs no speed.
 ```bash
 # One map, one form
 tools/clipfinder/clipfinder.exe --game MM --map "Laundry Pool" --form Human -o tools/clipfinder/results/laundry.json
+
+# OoT3D (the 3DS scene files in models/OOT3D): one map, one form, one frame step by step
+tools/clipfinder/clipfinder.exe --game OOT3D --map "Link's House" --form Child --dyna none --sim "-57.3,0,75.3,0x4000,6/6/6"
 
 # Every map, adult and child, falling clips too, one file per map
 tools/clipfinder/clipfinder.exe --game OOT --all --form Adult,Child --type all
@@ -321,6 +326,31 @@ scanned with `--setup`, which takes every form.
 The viewer does the same on auto-import: loading setup 0-3 of an OoT map
 shows only the forms that play in it (the status says which were left out);
 a cutscene setup shows every form.
+
+## OoT3D
+
+`--game OOT3D` reads the 3DS scene files the viewer loads for OoT3D
+(`models/OOT3D/*.zsi`, the `OOT3D_Maps` list in `js/model_list.js`), the same
+way `js/parse_model.js` does:
+
+- The file starts with a 0x10 byte `ZSI` header; the scene commands follow,
+  little endian, and every offset in them counts from the end of that header.
+- The collision header has the polygon and surface type counts at 0x0E / 0x10
+  and the vertex, polygon and surface type lists at 0x18 / 0x1C / 0x20.
+- A polygon is 0x14 bytes: its normal at 0x0A and its plane distance an
+  **f32** at 0x10 (N64: an s16 at 0x0E), so `Tri::d` is a double.
+- The overworld "Spot" scenes are split into 32 x 8 x 32 subdivisions (as
+  `js/subdivisions.js` does for OoT3D), the rest as OoT.
+
+Everything else - forms, radii, check heights, actions, the collision checks
+themselves - is OoT's (the N64 decomp's). **That the 3DS port runs the same
+player and collision code has not been checked in game yet**: compare `--sim`
+with Link's position frame by frame in an emulator before trusting a result.
+The OoT3D collision is not the N64's: of the 100 maps in both lists, 95 have
+different polygons (Link's House shares 8 of 151), so the N64 results don't
+carry over. Not there yet: dynapolys (there is no OoT3D export; use
+`--dyna none`) and room types (the room files aren't in `models/OOT3D`, so
+every room counts as not indoors).
 
 ## Holding the stick, and floor snaps
 
