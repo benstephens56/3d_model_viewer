@@ -513,6 +513,40 @@ The first frames, as speed (move / 1.5) and angle from the facing:
 | | `1h-stab` | 10.8242 at -0x004B, 6.2687 at -0x0081, then small |
 | | `2h-slash` | 10.6615 at -0x00B1, 5.6416 at -0x015F, then small |
 | | `2h-stab` | 13.5888 at +0x0170, 7.1554 at +0x0128, then back ~13 |
+| OoT Child | `stick-slash` | 3.7496 at -0x75D3 (back), 11.0236 at -0x0109, 5.9938 at -0x01FF, then small |
+| MM Human | `stick-slash` | 10.6615 at -0x00B1, 5.6416 at -0x015F, then small |
+
+The other actions, the same way (from `ACTIONS`; flat ground, nothing in the
+way):
+
+| Game | Key | Frames |
+|---|---|---|
+| OoT Adult / Child, MM Human | `1h-jumpslash` | air: 8 frames on flat ground, speedXZ 5 stepping down 0.1 a frame (velocity.y 5, gravity -1.0 then -1.2); landing frame: the air speed - 1 (~3.3) plus root motion 18.1878 at +0x0077 (OoT adult; child 18.1868 at +0x0026; MM 0), then small |
+| | `1h-jumpslash-fwd` | as `1h-jumpslash`, but the air speed goes up 0.05 a frame instead (to at most 6 OoT, 6.72 MM: full stick x 0.8 x 0.14) |
+| | `1h-jumpslash-ls`, `1h-jumpslash-fwd-ls` | as above, then after the landing frame the stored lunge: 9.7200 at +0x0000, 4.6467 at +0x000F (MM 9.8188, 4.7714 at +0x0009), then small |
+| OoT Adult | `1h-spin-fwd` | 0.6679 at -0x4271, 10.0006 at -0x006F, 5.0000 at +0x002A, 1.5215 and 1.2276 at +0x3E (sideways), then small |
+| | `2h-spin-fwd` | 1.2234 at -0x6468, 10.8069 at +0x0040, 5.1468 at -0x0044, then small |
+| | `2h-spin-lock` | 1.2234 at -0x6468, then small for 15 frames, **14.7600 at +0x0000** (the end animation's jump), then back 4.1412, 4.0951, 6.6354 (~0x8000), then small |
+| | `2h-spin-lock-fwd` | 1.2234 at -0x6468, 10.8069 at +0x0040, 5.1468 at -0x0044, then as `2h-spin-lock` |
+| | `2h-spin-lock-r`, `2h-spin-lock-fwd-r` | as without `-r`, stopping at the 14.7600 frame (no step back) |
+| OoT Child | `1h-spin-fwd` | as adult |
+| | `2h-spin-fwd`, `2h-spin-lock*` | as adult, the first frame 1.3156 at -0x6106 |
+| MM Human | `1h-spin-fwd` | 10.0002 at -0x0048, 5.0000 at +0x001B, then small |
+| | `2h-spin-fwd` | 10.5220 at +0x002B, 5.0949 at -0x002C, then small |
+| | `2h-spin-lock` | small for 15 frames, **9.5506 at +0x0000** (the jump), then back 2.6796, 2.6498, 4.2935 (~0x8000), then small |
+| | `2h-spin-lock-fwd` | 10.5220 at +0x002B, 5.0949 at -0x002C, then as `2h-spin-lock` |
+| | `2h-spin-lock-r`, `2h-spin-lock-fwd-r` | as without `-r`, stopping at the 9.5506 frame |
+| MM Deku | `deku-spin` | run 2, 4, 6, the A frame 6, then the spin: 8.0000, 9.9405, then down 0.3892 a frame to 4.8811 (all at +0x0000; walls lower the stick's speed, see **Deku spin**) |
+| | `deku-spin-backwalk` | backwalk 1.5 up to 9.0000, Z let go 9.0000, the A frame 9.0000, then the spin: 10.3297, 9.9405, then down 0.3892 a frame to 4.8811 (all at -0x8000, backwards) |
+| MM Zora | `zora-punch` | 12.0004 at -0x01F3, 6.0910, 3.0740, 1.8963 (about -0x02 to -0x04), small, then back 6.2044, 11.2036, 3.1938 (~0x7E00) |
+| | `zora-jumpslash`, `zora-jumpslash-fwd` | air: 10 frames on flat ground, speedXZ 5.5 (velocity.y 4.5, gravity -1.0 then -0.8; `-fwd` up 0.05 a frame to at most 6); landing frame: the air speed - 1 (~3.6), then 1.4600, 1.3933 forward, ~4 back, ~2 forward |
+| | `zora-clip`, `zora-clip-fwd` | as the Zora jumpslash, then **42.9533 at +0x0000** (64.4 units in one frame), 1.7054, 2.3968, 2.7082, 1.6933 |
+
+The `-walkin` variants (every lunge, stick slash, jumpslash and Zora key; not
+the spin attacks or Deku spins) run in first: speed 2, 4, then the run limit
+(MM Human 5.5, else 6), held 6 more frames, the B / A frame at the run speed,
+and for the slashes and stabs a frame standing still (see **Running into a
+corner first**), then the same frames.
 
 Not modelled: the sword hitting a wall. From the animation's frame 2 on
 (`func_80842DF4`, MM `func_808401F4`), if the line past the sword's tip hits a
@@ -671,11 +705,22 @@ Every lunge and jumpslash key also has a `-walkin` variant (e.g.
 first (the stick at full tilt, Z held for stabs and the jumpslash) - speed 2,
 4, then the run limit (OoT 6, MM Human 5.5, capped by walls as above), held for
 6 more frames - so an acute corner wedges him in deeper than he can stand, then
-the B / A press (that frame still moves him at the run speed) and the attack
+the B / A press (that frame still moves him at the run speed, capped by the
+wall he touched) and, for the slashes and stabs, a frame standing still (the
+attack's setup zeroes speedXZ; its lunge is only set at the end of the next
+frame, so the walls push him back out of the corner first), then the attack
 as before. Aimed at acute wall corners only; a clip during the run in is a
 walking clip and isn't kept. The tester runs the same 9 frames (`WALKIN_RUN`)
-before the press. Deku Palace (Human) finds the corners by the pillar this way:
-1h slash and 2h stab, 1504 -> 1531 and 1502 -> 1531.
+before the press. The speed cap uses the first wall that pushed him
+(`actor.wallPoly`), not the last. Deku Palace (Human): the corners by the
+pillar (1504 / 1502 -> 1531) were found before the standing frame and the
+first-wall cap were modelled, and all failed in game; with them the run in and
+the lunge match the game to ~0.005 and there are none.
+
+Not modelled: the sword's wall recoil (MM `func_808401F4`): from the attack
+animation's frame 2 on, a line along the blade (10 behind the hilt to the tip)
+hitting a wall sets speedXZ -14 - in a corner the 2h stab bounced Link back
+~13 two frames after the lunge.
 
 ### Zora: punch, jumpslash, Zora clip
 

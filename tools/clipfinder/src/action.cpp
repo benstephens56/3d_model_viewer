@@ -304,6 +304,13 @@ static Action walkInVariant(const Action& a) {
 	// the wall that frame touched like any run frame's ('R'; with 'H' it ran at
 	// the uncapped speed: Deku Palace 0x5272, the game 5.13, clipfinder 5.5)
 	w.pre.push_back({ 0, 0, 0, 0, speed, false, 0, 'R' });
+	// then a frame standing still: the attack's setup zeroes speedXZ and its
+	// lunge (15 -> 10) is only set by the attack action at the end of the next
+	// frame, so that frame moves him nowhere and the walls push him back out of
+	// the corner (Deku Palace 0x5200: the game's gf+2 is exactly that, and gf+3
+	// the lunge from there). From a standing start the frame does nothing; the
+	// jumpslash leaves the ground on the press (its setup sets the jump speed)
+	if (!a.jump) w.pre.push_back({ 0, 0, 0, 0, 0, false, 0, 0 });
 	w.corners = w.cornersOnly = true;
 	return w;
 }
