@@ -60,6 +60,10 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 		if (c.hold) o << ",\"hold\":true";
 		// ends in bounds: past a dynapoly, or somewhere he couldn't walk to
 		if (c.inBounds) o << ",\"inBounds\":true";
+		// and how far the walk there is (-1: no way) - a shortcut (Model::walkUnreachable)
+		if (c.inBounds && c.walkDist != 0) o << ",\"walkDistance\":" << (int)std::lround(c.walkDist);
+		// --aerial: prev is in the air where he couldn't stand still
+		if (c.aerial) o << ",\"aerial\":true";
 		if (c.hasFloorY) o << ",\"floorY\":" << num(c.floorY);
 		if (c.cross) {
 			o << ",\"yaws\":[";
@@ -78,6 +82,7 @@ string toJson(const string& game, const string& map, int numPolygons, bool falli
 				o << (k ? "," : "") << "[" << num(F(c.frameMoves[k].first)) << "," << c.frameMoves[k].second << "]";
 			o << "]";
 			if (c.airFrames) o << ",\"airFrames\":" << c.airFrames;
+			if (c.stopAfter) o << ",\"stopAfter\":" << c.stopAfter;
 			o << ",\"frames\":[";
 			for (size_t k = 0; k < c.frames.size(); k++) o << (k ? "," : "") << vec(c.frames[k]);
 			o << "]";

@@ -9,6 +9,23 @@ static const char* P(const V3& v) {
 	return b[k];
 }
 
+// Whether Link could be at the start at all: a floor within the floor check's
+// reach (from y + 50) above his feet would put him up on it (inside a step:
+// MM West Clock Town, under the platform floor TRI 162), and with no floor
+// under him there's nothing to stand on. A floor below is fine, but says he's
+// in the air.
+static void warnStartFloor(const Model& m, const V3& start) {
+	int fp = -1;
+	auto fy = m.floorCheck(start.x, start.z, F(start.y + 50), &fp);
+	if (fy && F(*fy - start.y) > 0.01)
+		printf("WARNING: the start is under %s (y %.9g, %.9g above his feet): the floor check would put him up on it - not a real start\n",
+			m.polyName(fp).c_str(), *fy, F(*fy - start.y));
+	else if (!fy)
+		printf("WARNING: no floor under the start: nothing to stand on (out of the level, or over a void)\n");
+	else if (F(start.y - *fy) > 0.01)
+		printf("note: the start is %.9g above its floor (%s at y %.9g): in the air\n", F(start.y - *fy), m.polyName(fp).c_str(), *fy);
+}
+
 // SPEED as "15/7": a frame of walking per speed (the same yaw), each ending
 // with the floor check, then two frames standing still. For slope clips
 // (slope.h), where the frame after the one through the wall can matter.
@@ -20,6 +37,7 @@ static int runSimFrames(const Model& m, const V3& start, const vector<std::funct
 	Scratch s;
 	s.stamp.assign(m.polys.size(), 0);
 	printf("start %s, in bounds: %s\n", P(start), m.isInBounds(s, start, true) ? "yes" : "NO");
+	warnStartFloor(m, start);
 	{
 		int fp = -1;
 		auto fy = m.floorCheck(start.x, start.z, F(start.y + 1), &fp);
@@ -74,7 +92,8 @@ static int runSimGround(const Model& m, Scratch& s, const V3& start, int yaw, do
 		const double pa = F(F(F(F(F(q.sx * start.x) + F(q.sy * start.y)) + F(q.sz * start.z)) * NORMAL_FRAC) + q.dist);
 		printf("start's floor: %s at y %.9g (start %s it); the line test's plane distance at the start: %.9g (%s)\n", m.polyName(fp).c_str(), *fy,
 			*fy == start.y ? "exactly on" : *fy < start.y ? "above" : "below", pa, pa < 0 ? "< 0: the line doesn't cross it" : ">= 0: the line stops on it");
-	} else printf("no floor under the start\n");
+	}
+	warnStartFloor(m, start);
 	printf("checkHeight + dy = %.9g < 5: the line test runs at the feet, floors included\n", F(m.checkHeight + F(next.y - start.y)));
 	const GroundLine gl = groundLine(m, s, start, next);
 	if (gl.poly >= 0) printf("line test hits %s, puts him at %s\n", m.polyName(gl.poly).c_str(), P(gl.res));
@@ -97,6 +116,34 @@ static int runSimGround(const Model& m, Scratch& s, const V3& start, int yaw, do
 
 int runSim(const Model& m, const string& simArg, const string& game, const string& formUpper) {
 	{
+		// X,Y,Z,walk,X2,Y2,Z2: Model::walkUnreachable's flood fill, the path it
+		// walks from the first point to the second (why an end counts as reachable)
+		double x, y, z, x2, y2, z2;
+		if (sscanf(simArg.c_str(), "%lf,%lf,%lf,walk,%lf,%lf,%lf", &x, &y, &z, &x2, &y2, &z2) == 6) {
+			Scratch s;
+			s.stamp.assign(m.polys.size(), 0);
+			const vector<V3> path = m.walkPath(s, { x, y, z }, { x2, y2, z2 });
+			if (path.empty()) { printf("not reachable walking (the flood fill never gets there): an end there counts\n"); return 0; }
+			printf("reachable walking, %zu steps:\n", path.size());
+			for (size_t i = 0; i < path.size(); i++) {
+				// (only where it turns or climbs, and the ends)
+				const bool turn = i == 0 || i + 1 == path.size() ||
+					std::fabs((path[i].x - path[i - 1].x) - (path[i + 1].x - path[i].x)) > 1e-6 ||
+					std::fabs((path[i].z - path[i - 1].z) - (path[i + 1].z - path[i].z)) > 1e-6 || std::fabs(path[i].y - path[i - 1].y) > 1;
+				if (turn) printf("  %zu: (%.1f, %.1f, %.1f)\n", i, path[i].x, path[i].y, path[i].z);
+				// (a wall lower down the fill steps through: it only looks 50 up)
+				if (i > 0) for (double up : { 10.0, 30.0 }) {
+					const double h = F(path[i - 1].y + up);
+					if (auto hit = m.lineHit(s, { path[i - 1].x, h, path[i - 1].z }, { path[i].x, h, path[i].z }, LOOSE, false, false, true)) {
+						printf("    step %zu goes through %s at %g up (the fill only checks 50 up)\n", i, m.polyName(hit->poly).c_str(), up);
+						break;
+					}
+				}
+			}
+			return 0;
+		}
+	}
+	{
 		// X,Y,Z,FACING,@ACTION: an action's frames (action.h) from facing FACING
 		char act[64] = {}, yawS[32] = {};
 		double x, y, z;
@@ -110,7 +157,8 @@ int runSim(const Model& m, const string& simArg, const string& game, const strin
 			const int facing = (int)strtol(yawS, nullptr, 0) & 0xFFFF;
 			const V3 start = { F(x), F(y), F(z) };
 			printf("%s, facing 0x%04X\n", a.name.c_str(), facing);
-			if (a.jump) printActionFrames(m, start, facing, ai[0]);  // (the jumpslash: in the air, then the landing slash)
+			// (the jumpslash: in the air, then the landing slash; a -walkin: the run in first)
+			if (a.jump || !a.pre.empty()) printActionFrames(m, start, facing, ai[0]);
 			else {
 				vector<std::function<V3(const V3&)>> moves;
 				vector<bool> swing;
@@ -127,6 +175,7 @@ int runSim(const Model& m, const string& simArg, const string& game, const strin
 			if (!c) printf("no clip\n");
 			else printf("CLIP: %s %s through %s (%s), ends %s\n", m.polyName(c->pusher).c_str(), c->kind == 2 ? "(the floor check) lifts Link" : "pushes Link",
 				m.polyName(c->crossed).c_str(), c->kind == 2 ? "slope" : c->acutePoint ? "acute point" : "needs the extended planes", P(c->end));
+			if (c && c->stopAfter) printf("  (stop after frame %d: out of bounds in the wall there; the rest of the frames would carry him on)\n", c->stopAfter);
 			return 0;
 		}
 	}
@@ -162,6 +211,7 @@ int runSim(const Model& m, const string& simArg, const string& game, const strin
 		return runSimGround(m, s, start, yaw, F(speed), std::isnan(vy) ? F(-drop / SPEED_RATE) : vy);
 	printf("start %s  yaw 0x%04X  speed %.9g -> posNext %s\n", P(start), yaw, F(speed), P(next));
 	printf("start in bounds: %s\n", m.isInBounds(s, start, true) ? "yes" : "NO");
+	warnStartFloor(m, start);
 	auto rest = m.restingSpot(start);
 	printf("start is a resting spot: %s\n", rest && rest->x == start.x && rest->z == start.z ? "yes" : rest ? (string("no, rests at ") + P(*rest)).c_str() : "no (pushes don't settle)");
 	{

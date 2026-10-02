@@ -160,6 +160,13 @@ std::optional<V3> standSpot(const Model& m, double x, double z, double floorY) {
 	}
 	return std::nullopt;
 }
+std::optional<V3> aerialSpot(const Model& m, double x, double z, double floorY) {
+	auto y = standFloor(m, x, z, floorY);
+	if (!y) return std::nullopt;
+	auto fy = m.floorCheck(x, z, F(*y + 50));
+	if (fy && *fy > *y) return std::nullopt;
+	return V3{ x, *y, z };
+}
 // standSpot through the thread's cache (Scratch::standSpots).
 std::optional<V3> standSpotCached(const Model& m, Scratch& s, double x, double z, double floorY) {
 	auto bits = [](double v) { float f = (float)v; uint32_t u; memcpy(&u, &f, 4); return u; };

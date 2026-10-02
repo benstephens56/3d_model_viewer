@@ -57,3 +57,11 @@ std::optional<V3> standSpot(const Model& m, double x, double z, double floorY);
 
 // standSpot through the thread's cache (Scratch::standSpots).
 std::optional<V3> standSpotCached(const Model& m, Scratch& s, double x, double z, double floorY);
+
+// --aerial: Link exactly at (x, z), level with his floor there (the one near
+// floorY, as standSpot picks it), in the air - not moved to a resting spot:
+// the walls there needn't have pushed him out (a bomb or an enemy knocks him
+// back after the frame's wall pushes: MM West Clock Town, the step TRI 164
+// through TRI 59 from z 23.57, 11.4 in front of 59). Not under a floor within
+// 50 above (the floor check would put him up on it).
+std::optional<V3> aerialSpot(const Model& m, double x, double z, double floorY);

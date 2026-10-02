@@ -152,7 +152,7 @@ struct Scratch {
 	// the floor heights it reached, per 10 x 10 cell. An end it can't reach
 	// takes the whole fill, and falling / ground clips land at many ends from
 	// the same few starts.
-	using WalkFill = std::unordered_map<int64_t, vector<std::array<float, 3>>>;  // x, z, floor y
+	using WalkFill = std::unordered_map<int64_t, vector<std::array<float, 4>>>;  // x, z, floor y, walking distance
 	std::unordered_map<uint64_t, std::shared_ptr<const WalkFill>> walkFills;
 
 	vector<uint32_t> stamp;
@@ -254,8 +254,20 @@ struct Model {
 	// 50, drops up to 300, walls (either face, dynapolys too) more than 50 tall
 	// block - never gets within a step of it. Climbing, jumping, hookshots,
 	// ... aren't modelled, and a way round further than 600 counts as none.
+	// Or (the user's rule: a clip counts if it's a shorter way to somewhere
+	// reachable) the walk there is a long way round: walkDistance at least
+	// WALK_SHORTCUT_MIN (150) more than the straight line, and at least twice it.
 	// Cached per spot (Scratch::unreachable).
 	bool walkUnreachable(Scratch& s, const V3& end, const V3& from) const;
+	// How far Link walks from `from` to `end` (the same flood fill; its BFS steps x
+	// 10, a lower bound: diagonal steps count 10), or -1 if it doesn't get there
+	double walkDistance(Scratch& s, const V3& end, const V3& from) const;
+	// The walk if it makes the clip a shortcut by walkUnreachable's rule, -1 if
+	// he can't walk there, else 0 (the clip counted for another reason)
+	double walkShortcut(Scratch& s, const V3& end, const V3& from) const;
+	// --sim X,Y,Z,walk,X2,Y2,Z2: the same flood fill's path from `from` to `end`
+	// (each grid point, feet), empty if it doesn't get there
+	vector<V3> walkPath(Scratch& s, const V3& from, const V3& end) const;
 	bool behindPoly(const Poly& p, const V3& pos) const;
 
 	bool dynaPairsOnly = false; // --dyna-only: wall pairs with a dynapoly wall in them
@@ -267,6 +279,9 @@ struct Model {
 	// --slope-starts: crossing points whose surroundings are only in bounds
 	// not counting the rays into a slope are searched too (slower)
 	bool slopeStarts = false;
+	// --aerial: falling clips may also start in the air where Link couldn't
+	// stand still (aerialSpot)
+	bool aerial = false;
 	// --ground-step: the ground clip scan's widest step along a wall (1: every unit)
 	int groundStepMax = 3;
 	// --slope-step: the same for the slope clip scan
@@ -277,6 +292,9 @@ struct Model {
 	double wallStep = 0;
 	// --keep-load-void: keep clips that start on a loading zone or void plane
 	bool keepLoadVoid = false;
+	// every room of the scene is indoors (ROOM_TYPE_INDOORS): Player_SetBootData
+	// (MM func_80123140) sets R_RUN_SPEED_LIMIT 500 there (action.h stick frames)
+	bool indoors = false;
 	// Whether the floor Link stands on at `start` is a loading zone or void plane.
 	bool startOnLoadVoid(const V3& start) const {
 		int poly = -1;

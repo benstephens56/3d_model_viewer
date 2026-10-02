@@ -122,6 +122,7 @@ int main(int argc, char** argv) {
 	int groundStepMax = 3, slopeStepMax = 3;
 	double wallStep = 0;  // --wall-step S: the fine pass on pairs without a clip (Model::wallStep)
 	bool dynaOnly = false, slopeStarts = false, keepLoadVoid = false;
+	bool aerial = false;  // --aerial: falling clips may start in the air (Model::aerial)
 	string typeArg;  // --type acute,extended,slope,ground,falling,actions (TYPE_*)
 	int onlySetup = -1;  // --setup N: just the dynapolys of that setup
 	bool night = false;  // --night: OoT's night setups (1, 3) too
@@ -212,6 +213,7 @@ int main(int argc, char** argv) {
 		else if (a == "--dyna-only") dynaOnly = true;
 		else if (a == "--night") night = true;
 		else if (a == "--slope-starts") slopeStarts = true;
+		else if (a == "--aerial") aerial = true;
 		else if (a == "--slope-step") {
 			slopeStepMax = std::stoi(val());
 			if (slopeStepMax < 1 || slopeStepMax > 3) { fprintf(stderr, "--slope-step wants 1, 2 or 3\n"); return 2; }
@@ -275,6 +277,8 @@ int main(int argc, char** argv) {
 	const bool falling = types & TYPE_FALLING;
 	// extended and not acute: the old --extended-only (Model::extendedOnly)
 	const bool extendedOnly = (types & TYPE_EXTENDED) && !(types & TYPE_ACUTE);
+	if (aerial && !falling) { fprintf(stderr, "--aerial needs falling clips: --type with falling (e.g. --type acute,extended,falling)\n"); return 2; }
+	if (aerial && (minSpeed || atYaw >= 0 || angleSweep)) { fprintf(stderr, "--aerial can't be used with --min-speed / --refine / --yaw / --angles\n"); return 2; }
 	if (exact && atYaw < 0) { fprintf(stderr, "--exact needs --yaw\n"); return 2; }
 	if (gridSpeed > 0 && atYaw < 0 && !angleSweep) { fprintf(stderr, "--speed needs --yaw or --angles\n"); return 2; }
 	// (--speed without --max-speed: the search for starts goes up to that speed)
@@ -314,9 +318,9 @@ int main(int argc, char** argv) {
 			"                  [--tri ID[,ID...]]  (print those polys: vertices, normal, type)\n"
 			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
 			"                  [--dyna FILE|none [--dyna-only] [--setup N] [--night]]  (the viewer's dynapoly export; default tools/clipfinder/<GAME>_dyna_all.json)\n"
-			"                  [--slope-step 1|2|3] [--wall-step S] [--slope-starts] [--keep-load-void] [--ground-step 1|2|3]\n"
+			"                  [--slope-step 1|2|3] [--wall-step S] [--slope-starts] [--aerial] [--keep-load-void] [--ground-step 1|2|3]\n"
 			"                  [--max-per-pair N]  (at most N points per wall pair, spread out evenly: smaller files)\n"
-			"                  [--action-keys 1h-slash,1h-stab,2h-slash,2h-stab,stick-slash]  (with --type actions: which lunges, default all)\n"
+			"                  [--action-keys 1h-slash,1h-stab,2h-slash,2h-stab,stick-slash,...,deku-spin,deku-spin-backwalk]  (with --type actions: which, default all)\n"
 			"                  [-o out.json | --out-dir dir (default tools/clipfinder/results)] [--root viewer_dir] [--threads N]\n");
 		return 2;
 	}
@@ -468,7 +472,14 @@ int main(int argc, char** argv) {
 		// The jumpslash: not where every room is indoors (Z + A rolls there,
 		// Player_ActionHandler_10; the room Link is in isn't known, so a scene
 		// with some indoor rooms keeps it)
-		bool noJump = false;
+		bool noJump = false, indoors = false;
+		// (always: --sim @KEY too)
+		{
+			// (the stick's speed: R_RUN_SPEED_LIMIT 500 indoors; a scene with some
+			// indoor rooms: the room Link is in isn't known, the outdoor limit)
+			const vector<int> rt = roomTypes(root, game, e.file, buf);
+			indoors = !rt.empty() && (size_t)std::count(rt.begin(), rt.end(), ROOM_TYPE_INDOORS) == rt.size();
+		}
 		if (anyJump(actions)) {
 			const vector<int> rt = roomTypes(root, game, e.file, buf);
 			const size_t indoors = std::count(rt.begin(), rt.end(), ROOM_TYPE_INDOORS);
@@ -536,7 +547,7 @@ int main(int argc, char** argv) {
 			if (path.empty() || all) {
 				// (default: the viewer's results folder, where its auto-import looks)
 				string dir = outDir.empty() ? root + "/tools/clipfinder/results" : outDir;
-				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + typeTag(types) + (firstPerPair ? "_first" : "") + setupTag + (dyna.raw.empty() ? "" : "_dyna") +
+				path = dir + "/" + safeName(game + "_" + e.name + "_" + form) + typeTag(types) + (firstPerPair ? "_first" : "") + (aerial ? "_aerial" : "") + setupTag + (dyna.raw.empty() ? "" : "_dyna") +
 					// (--pair: its own file, not over the whole map's scan)
 					(onlyPusher >= 0 ? "_pair" + std::to_string(onlyPusher) + "-" + std::to_string(onlyCrossed) : "") + ".json";
 			}
@@ -565,7 +576,7 @@ int main(int argc, char** argv) {
 			for (const Variant* vp : job.forms) {
 				const Variant& v = *vp;
 				// --type actions: the ones this form does (none: skipped, before sharing
-				// a scan - Deku has Human's radius but no sword)
+				// a scan)
 				vector<int> formActions;
 				for (int ai : actions) if (actionForForm(ACTIONS[ai], upper(v.form)) && !(noJump && ACTIONS[ai].jump)) formActions.push_back(ai);
 				if (!actions.empty() && formActions.empty()) {
@@ -573,7 +584,8 @@ int main(int argc, char** argv) {
 						noJump ? " (or here)" : "");
 					continue;
 				}
-				auto same = std::find_if(results.begin(), results.end(),
+				// (not with actions: each form's are its own - Human's sword, Deku's spins)
+				auto same = !actions.empty() ? results.end() : std::find_if(results.begin(), results.end(),
 					[&](const FormResult& r) { return r.radius == v.radius && r.checkHeight == v.checkHeight; });
 				if (same != results.end()) {
 					fprintf(stderr, "%s - %s (%s): same radius and check height as %s, sharing its scan\n",
@@ -597,11 +609,13 @@ int main(int argc, char** argv) {
 				m.wallPushes = types & (TYPE_ACUTE | TYPE_EXTENDED | TYPE_FALLING | TYPE_ACTIONS);
 				m.slope = types & (TYPE_SLOPE | TYPE_ACTIONS);
 				m.slopeStarts = slopeStarts;
+				m.aerial = aerial;
 				m.ground = types & TYPE_GROUND;
 				m.groundStepMax = groundStepMax;
 				m.slopeStepMax = slopeStepMax;
 				m.wallStep = wallStep;
 				m.keepLoadVoid = keepLoadVoid;
+				m.indoors = indoors;
 				// --pair: the scan only looks near those two polys
 				if (onlyPusher >= 0) {
 					if (onlyPusher >= (int)m.polys.size() || onlyCrossed >= (int)m.polys.size() || !m.polys[onlyPusher].exists || !m.polys[onlyCrossed].exists) {

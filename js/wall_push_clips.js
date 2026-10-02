@@ -4,6 +4,7 @@ import { getPointSubdivisionIndex } from './subdivisions.js';
 import { addModelCheckbox, primaryColorTarget } from './render.js';
 import { sins } from './libultra_sins.js';
 import { setupDynaExports, sceneNumPolygons } from './oot_actors.js';
+import { getSelectedClips } from './selection.js';
 
 ////////////////////////////////////////
 // System: Wall Push Clips (OOT / MM)
@@ -60,7 +61,7 @@ const SPEED_RATE = 1.5;
 
 const ACUTE_COLOR = 0xff3030;
 const EXTENDED_COLOR = 0xff40ff;
-const LOW_ACUTE_COLOR = 0x3070ff;
+const LOW_ACUTE_COLOR = 0x7040ff; // (indigo: blue was too close to the Main Model's 0x3aa6ff)
 const LOW_EXTENDED_COLOR = 0x30e0ff;
 const LOW_COLOR = 0x30c8ff; // falling clips from older files, not split by category
 const SLOPE_COLOR = 0xff90d0; // slope clips (clipfinder slope.h)
@@ -71,6 +72,14 @@ const ACTION_STICK_COLOR = 0xc8a060; // and the Deku stick
 const JUMP_1H_COLOR = 0x40ff90; // the jumpslash (clipfinder action.h Action::jump), one-handed
 const JUMP_2H_COLOR = 0xff8040; // two-handed
 const JUMP_STICK_COLOR = 0xa8d040; // the Deku stick
+const SPIN_COLOR = 0x60ff40; // MM Deku spin, run up to 6 (clipfinder action.cpp dekuSpinFrames)
+const BACKSPIN_COLOR = 0xff40c0; // and from a backwalk at 9
+const ZORA_PUNCH_COLOR = 0x40a0ff; // MM Zora punch (clipfinder zoraActions)
+const ZORA_JUMP_COLOR = 0x00d0c0; // Zora jumpslash
+const ZORA_CLIP_COLOR = 0xff2060; // the Zora clip (jumpslash with B held: the fins aimed, a ~64 jump on landing)
+const SPIN_LOCK_COLOR = 0xffa020; // the 2h spin attack ending locked on to an enemy (a ~22 / ~14 jump into its endR)
+const SPIN_FWD_COLOR = 0xffe060; // a spin attack released with the stick forward (its lunge), no lock-on
+const JUMP_LS_COLOR = 0xc0ff00; // the jumpslash with a lunge stored (15 -> 10, 5 after landing)
 const PUSHER_COLOR = 0xffd000;
 
 const SNORMAL_FLOOR = Math.trunc(0.5 * 32767);   // COLPOLY_SNORMAL(0.5f)
@@ -948,7 +957,7 @@ const hex4 = n => "0x" + (n & 0xFFFF).toString(16).toUpperCase().padStart(4, "0"
 const slopeReach = c => ({ speed: Math.max(c.speed, c.speed2 ?? 0), yaw: c.yaw, start: c.prev });
 
 function describeReach(c) {
-    if (c.action) return `  reachable: the ${c.actionKey?.includes("jumpslash") ? "jumpslash" : "lunge"} is the move (no stick speed needed)`;
+    if (c.action) return `  reachable: the ${isSpinKey(c.actionKey) ? "spin" : c.actionKey?.includes("jumpslash") ? "jumpslash" : "lunge"} is the move (no stick speed needed)`;
     if (c.reach === undefined) return `  reachability: tick "Reachable only" to work it out`;
     if (!c.reach) return `  not reachable from a standable start (at up to speed ${REACH_DIST / SPEED_RATE})`;
     const r = c.reach;
@@ -959,17 +968,26 @@ function describeClip(g, c, checkHeight) {
     const form = g.form ? `  form: ${g.form} (radius ${g.model.radius}, check height ${+checkHeight.toPrecision(7)})\n` : "";
     const lines = describeClipLines(g, c, checkHeight).split("\n");
     // (clipfinder Model::endCounts: past a dynapoly, or somewhere he couldn't walk to from the start)
-    const inBounds = c.inBounds ? "\n  ends in bounds, somewhere Link couldn't walk to from his start (past a dynapoly, onto a ledge, into another room)" : "";
-    return [lines[0], form + lines.slice(1).join("\n")].join("\n") + inBounds + "\n" + describeReach(c);
+    // (Model::walkUnreachable: walkDistance > 0 is a shortcut - the walk there is a long way round)
+    const inBounds = !c.inBounds ? "" : c.walkDistance > 0
+        ? `\n  ends in bounds - a shortcut: walking there from his start is about ${c.walkDistance} (the clip goes ${Math.round(Math.hypot(c.end.x - c.prev.x, c.end.z - c.prev.z))})`
+        : "\n  ends in bounds, somewhere Link couldn't walk to from his start (past a dynapoly, onto a ledge, into another room)";
+    // (clipfinder --aerial: the start is mid-air where Link couldn't stand still)
+    const aerial = c.aerial ? "\n  aerial start: Link has to be at the start in the air (e.g. knocked there by a bomb), he can't stand still there" : "";
+    return [lines[0], form + lines.slice(1).join("\n")].join("\n") + inBounds + aerial + "\n" + describeReach(c);
 }
 
 // (clipfinder action clips' rows: the lunges' action-*, the jumpslash's jump-*)
 const isActionCat = cat => cat.startsWith("action") || cat.startsWith("jump");
+const isSpinKey = k => k?.startsWith("deku-spin");
 
 const CAT_TITLES = {
     acute: "acute angle", extended: "extended plane only",
     "low-acute": "falling, acute angle", "low-extended": "falling, extended plane only", low: "falling",
     slope: "slope", ground: "ground", "action-1h": "action, one-handed", "action-2h": "action, two-handed", "action-stick": "action, Deku stick",
+    "action-spin": "action, Deku spin", "action-backspin": "action, Deku spin from a backwalk",
+    "action-zora": "action, Zora punch", "jump-zora": "jumpslash, Zora", "action-zoraclip": "action, Zora clip",
+    "action-spinlock": "action, 2h spin attack locked on", "action-spinfwd": "action, spin attack with the stick forward", "jump-ls": "jumpslash, lunge stored",
     "jump-1h": "jumpslash, one-handed", "jump-2h": "jumpslash, two-handed", "jump-stick": "jumpslash, Deku stick",
 };
 
@@ -1018,12 +1036,32 @@ function describeClipLinesBase(g, c, checkHeight) {
         return [
             `ACTION CLIP (${c.action}): ${how}`,
             `  stand still at ${fmt(c.prev)} (feet), facing ${hex4(c.facing)}, and do the ${c.action}` +
-                (!c.actionKey?.includes("jumpslash") ? "" : c.actionKey.endsWith("-fwd")
+                // (frames counted from the first one he moves on; clipfinder dekuSpinFrames / walkInVariant)
+                (c.actionKey === "deku-spin" ? ` (the stick held at full tilt toward ${hex4(c.facing)} throughout: A on his 4th frame moving, once speedXZ is 6)`
+                : c.actionKey === "deku-spin-backwalk" ? ` (Z held, the stick at full tilt toward ${hex4(c.facing + 0x8000)} - behind him - throughout: ` +
+                    `once speedXZ is 9, his 6th frame moving, let go of Z for a frame, then A)`
+                : (c.actionKey?.endsWith("-walkin") ? ` (first the stick held toward ${hex4(c.facing)} for 9 frames, running into the corner, then the press)` : "") +
+                // (MM Zora: no R - the barrier - and the clip keeps B held; clipfinder zoraActions)
+                (c.actionKey?.startsWith("zora-clip") ? ` (fins out: hold B to aim them, hold Z, then A, B held to the end; ` +
+                    (c.actionKey.replace(/-walkin$/, "").replace(/-ls$/, "").endsWith("-fwd") ? `the stick and Z held forward for ${c.airFrames ?? "its"} frames in the air)` : `the stick left alone)`)
+                : c.actionKey?.startsWith("zora-jumpslash") ? ` (fins out: Z + A, ` +
+                    (c.actionKey.replace(/-walkin$/, "").replace(/-ls$/, "").endsWith("-fwd") ? `the stick and Z held forward for ${c.airFrames ?? "its"} frames in the air)` : `the stick left alone)`)
+                : c.actionKey?.startsWith("zora-punch") ? ` (B once)`
+                // (clipfinder spinLockActions / lungeStored)
+                : c.actionKey?.includes("spin-lock") ? ` (Z locked on to an enemy - the lock-on turns him to face it - slash and hold B to charge, ` +
+                    `then let go of B${c.actionKey.replace(/-r$/, "").endsWith("-fwd") ? " with the stick forward (its lunge)" : ""}, Z still held as the spin ends` +
+                    (c.actionKey.endsWith("-r") ? `; the frame after it switches to the locked-on end, let go of Z and hold R: the shield stops the step back - only with Z let go)` : `)`)
+                : /^(1h|2h)-spin-fwd/.test(c.actionKey ?? "") ? ` (slash and hold B to charge, no Z, then let go of B with the stick forward: its lunge)`
+                : /-ls(-walkin)?$/.test(c.actionKey ?? "") ? ` (with a lunge stored first - an attack whose lunge never fired, e.g. stopped by the sword hitting a wall - then ` +
+                    (c.actionKey.replace(/-walkin$/, "").replace(/-ls$/, "").endsWith("-fwd") ? `Z + A, the stick and Z held forward for ${c.airFrames ?? "its"} frames in the air, then R held)` : `Z + A, the stick left alone, R held)`)
+                : !c.actionKey?.includes("jumpslash") ? "" : c.actionKey.replace(/-walkin$/, "").replace(/-ls$/, "").endsWith("-fwd")
                     ? ` (Z + A, the stick and Z held forward for ${c.airFrames ?? "its"} frames in the air, then R held)`
-                    : ` (Z + A, the stick left alone, R held: shield stops the step back)`),
+                    : ` (Z + A, the stick left alone, R held: shield stops the step back)`)),
             `  its frames (speed, angle from facing): ${(c.actionFrames ?? []).map(([v, a]) => `${num(v)} at ${a < 0 ? "-" : "+"}${hex4(Math.abs(a))}`).join(", then ")}`,
             ...(c.frames ?? []).map((p, i) => `  after frame ${i + 1}: ${fmt(p)}`),
             `  the clip frame moves at yaw ${hex4(c.yaw)}, speed ${num(c.speed)}: posNext ${fmt(c.next)}`,
+            // (clipfinder judge's canStop: the rest of the spin would carry him on, e.g. out the other side of a thin wall)
+            ...(c.stopAfter ? [`  stop after frame ${c.stopAfter}: he's out of bounds inside the wall there (keep going and the rest of the frames carry him on)`] : []),
             c.end.noFloor ? `  then no floor under him: falls out of bounds` : `  ends at: ${fmt(c.end)} (out of bounds)`,
         ].join("\n");
     }
@@ -1047,7 +1085,7 @@ function describeClipLinesBase(g, c, checkHeight) {
             ...(c.drop > 0 ? [`  that's ${c.drop} below the floor (y ${f32Str(c.floorY)}): falling at y velocity ` +
                 `${(-c.drop / 1.5).toFixed(2)} or faster this frame`] : []),
             `  works moving at yaw ${c.yaws.map(hex4).join(", ")} (any speed that gets past ${polyLabel(g.pusher)}'s plane)`,
-            `  e.g. standing still at ${fmt(c.prev)} (feet), moving to ${fmt(c.next)}` +
+            `  e.g. ${c.aerial ? "in the air" : "standing still"} at ${fmt(c.prev)} (feet), moving to ${fmt(c.next)}` +
                 (c.speed !== undefined ? ` (yaw ${hex4(c.yaw)}, speed ${f32Str(c.speed).split(" ")[0]})` : ""),
             `  line check + pushes put Link at: ${fmt(c.res)}`,
             c.drop > 0
@@ -1123,7 +1161,8 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
     // on to where he ends up. Each dot's description goes in
     // userData.clipSpots (same order as the positions) for selection.js to
     // show when it's clicked.
-    const pts = [], lines = [], startLines = [], spots = [];
+    // (clipRefs: each dot's group and clip, for "Export selected")
+    const pts = [], lines = [], startLines = [], spots = [], clipRefs = [];
     const lift = 2;
     for (const g of groups) {
         for (const c of g.clips) {
@@ -1143,6 +1182,7 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
             lines.push(c.from.x, c.from.y + up, c.from.z, c.end.x, c.end.y + up, c.end.z);
             if (c.prev) startLines.push(c.prev.x, c.prev.y + lift, c.prev.z, c.from.x, c.from.y + up, c.from.z);
             spots.push(describeClip(g, c, checkHeight));
+            clipRefs.push({ g, c });
         }
     }
     const startGeom = new THREE.BufferGeometry();
@@ -1159,6 +1199,7 @@ function buildMarkerGroup(model, groups, color, checkHeight) {
     points.userData.onTop = true;
     points.userData.unselectable = true;
     points.userData.clipSpots = spots;
+    points.userData.clipRefs = clipRefs;
     group.add(points);
 
     const lineGeom = new THREE.BufferGeometry();
@@ -1178,12 +1219,18 @@ const MODEL_NAMES = {
     "low-acute": "Low Wall Clips (falling, acute)", "low-extended": "Low Wall Clips (falling, extended)",
     low: "Low Wall Clips (falling)", slope: "Slope Clips", ground: "Ground Clips",
     "action-1h": "Action Clips (1h lunges)", "action-2h": "Action Clips (2h lunges)", "action-stick": "Action Clips (Deku stick lunges)",
+    "action-spin": "Action Clips (Deku spin)", "action-backspin": "Action Clips (backwalk Deku spin)",
+    "action-zora": "Action Clips (Zora punch)", "jump-zora": "Action Clips (Zora jumpslash)", "action-zoraclip": "Action Clips (Zora clip)",
+    "action-spinlock": "Action Clips (2h spin, locked on)", "action-spinfwd": "Action Clips (spin attack, stick forward)", "jump-ls": "Action Clips (jumpslash, lunge stored)",
     "jump-1h": "Action Clips (1h jumpslash)", "jump-2h": "Action Clips (2h jumpslash)", "jump-stick": "Action Clips (Deku stick jumpslash)",
 };
 const CAT_COLORS = {
     acute: ACUTE_COLOR, extended: EXTENDED_COLOR,
     "low-acute": LOW_ACUTE_COLOR, "low-extended": LOW_EXTENDED_COLOR, low: LOW_COLOR, slope: SLOPE_COLOR, ground: GROUND_COLOR,
     "action-1h": ACTION_1H_COLOR, "action-2h": ACTION_2H_COLOR, "action-stick": ACTION_STICK_COLOR,
+    "action-spin": SPIN_COLOR, "action-backspin": BACKSPIN_COLOR,
+    "action-zora": ZORA_PUNCH_COLOR, "jump-zora": ZORA_JUMP_COLOR, "action-zoraclip": ZORA_CLIP_COLOR,
+    "action-spinlock": SPIN_LOCK_COLOR, "action-spinfwd": SPIN_FWD_COLOR, "jump-ls": JUMP_LS_COLOR,
     "jump-1h": JUMP_1H_COLOR, "jump-2h": JUMP_2H_COLOR, "jump-stick": JUMP_STICK_COLOR,
 };
 
@@ -1230,6 +1277,8 @@ function exportJson(groups, info) {
             if (c.end.noFloor) f.push(`"endNoFloor":true`);
             if (c.hold) f.push(`"hold":true`);
             if (c.inBounds) f.push(`"inBounds":true`);
+            if (c.walkDistance) f.push(`"walkDistance":${c.walkDistance}`);
+            if (c.aerial) f.push(`"aerial":true`);
             if (c.floorY !== undefined) f.push(`"floorY":${num(c.floorY)}`);
             if (c.yaws) f.push(`"yaws":[${c.yaws.join(",")}]`);
             if (c.speed !== undefined) f.push(`"yaw":${c.yaw & 0xFFFF}`, `"speed":${num(c.speed)}`);
@@ -1239,6 +1288,7 @@ function exportJson(groups, info) {
                 f.push(`"action":${JSON.stringify(c.action)}`, `"actionKey":${JSON.stringify(c.actionKey)}`, `"facing":${c.facing & 0xFFFF}`,
                     `"actionFrames":[${c.actionFrames.map(([v, a]) => `[${num(v)},${a}]`).join(",")}]`, `"frames":[${c.frames.map(vec).join(",")}]`);
                 if (c.airFrames) f.push(`"airFrames":${c.airFrames}`);
+                if (c.stopAfter) f.push(`"stopAfter":${c.stopAfter}`);
             }
             if (c.reach === null) f.push(`"reach":null`);
             else if (c.reach) f.push(`"reach":{"speed":${num(c.reach.speed)},"yaw":${c.reach.yaw & 0xFFFF},"start":${vec(c.reach.start)}}`);
@@ -1467,6 +1517,14 @@ export function setupWallPushClipUI(scene) {
             (points("slope") ? `, ${points("slope")} slope` : "") + (points("ground") ? `, ${points("ground")} ground` : "") +
             (points("action-1h") ? `, ${points("action-1h")} 1h lunge` : "") + (points("action-2h") ? `, ${points("action-2h")} 2h lunge` : "") +
             (points("action-stick") ? `, ${points("action-stick")} Deku stick lunge` : "") +
+            (points("action-spin") ? `, ${points("action-spin")} Deku spin` : "") +
+            (points("action-backspin") ? `, ${points("action-backspin")} backwalk Deku spin` : "") +
+            (points("action-zora") ? `, ${points("action-zora")} Zora punch` : "") +
+            (points("jump-zora") ? `, ${points("jump-zora")} Zora jumpslash` : "") +
+            (points("action-zoraclip") ? `, ${points("action-zoraclip")} Zora clip` : "") +
+            (points("action-spinlock") ? `, ${points("action-spinlock")} 2h spin locked on` : "") +
+            (points("action-spinfwd") ? `, ${points("action-spinfwd")} spin attack (stick forward)` : "") +
+            (points("jump-ls") ? `, ${points("jump-ls")} lunge-stored jumpslash` : "") +
             (points("jump-1h") ? `, ${points("jump-1h")} 1h jumpslash` : "") + (points("jump-2h") ? `, ${points("jump-2h")} 2h jumpslash` : "") +
             (points("jump-stick") ? `, ${points("jump-stick")} Deku stick jumpslash` : "") + ` ` +
             `clip points${byReach ? ` reachable at speed ${maxSpeed}` : ""}${byVy ? ` at |y velocity| ${maxVy} or less` : ""} (${last.note})`;
@@ -1519,16 +1577,41 @@ export function setupWallPushClipUI(scene) {
             status.textContent = "No clip points shown to export";
             return;
         }
+        downloadClips(ticked, "");
+    });
+    // exportJson of these groups, downloaded as <GAME>_<map>_<forms><suffix>.json
+    function downloadClips(groups, suffix) {
         const map = document.getElementById("mapDropdown").value;
-        const text = exportJson(ticked, {
+        const text = exportJson(groups, {
             game, map, falling: last.falling, extendedOnly: last.extendedOnly,
             numPolygons: last.numPolygons, dyna: last.dyna,
         });
         const a = document.createElement("a");
         a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
-        a.download = `${game}_${map}_${last.formLabel}`.replace(/[^A-Za-z0-9_-]/g, "_") + ".json";
+        a.download = `${game}_${map}_${last.formLabel}${suffix}`.replace(/[^A-Za-z0-9_-]/g, "_") + ".json";
         a.click();
         URL.revokeObjectURL(a.href);
+    }
+
+    // Just the selected dots (selection.js), each clip once, grouped by the
+    // wall pair group it was drawn from
+    document.getElementById("wallClipExportSelected").addEventListener("click", () => {
+        if (!last || !window.wallPushClips) {
+            status.textContent = "Import results first";
+            return;
+        }
+        const byGroup = new Map();
+        for (const { g, c } of getSelectedClips()) {
+            if (!byGroup.has(g)) byGroup.set(g, new Set());
+            byGroup.get(g).add(c);
+        }
+        if (byGroup.size === 0) {
+            status.textContent = "No clip points selected: click a dot to select it (tick Multi-select for several)";
+            return;
+        }
+        const groups = [...byGroup].map(([g, cs]) => ({ ...g, clips: [...cs] }));
+        downloadClips(groups, "_selected");
+        status.textContent = `Exported ${groups.reduce((n, g) => n + g.clips.length, 0)} selected clip points`;
     });
 
     // Every map and setup's dynapolys in one file, for clipfinder --all --dyna
@@ -1651,13 +1734,15 @@ export function setupWallPushClipUI(scene) {
                 if (c.next) clip.next = vec(c.next);
                 if (c.hold) clip.hold = true;
                 if (c.inBounds) clip.inBounds = true;
+                if (c.walkDistance) clip.walkDistance = c.walkDistance;
+                if (c.aerial) clip.aerial = true;
                 if (c.floorY !== undefined) clip.floorY = c.floorY;
                 if (c.yaws) clip.yaws = c.yaws;
                 if (c.speed !== undefined) { clip.yaw = c.yaw; clip.speed = c.speed; }
                 if (c.speed2 !== undefined) clip.speed2 = c.speed2;
                 if (c.vy !== undefined) clip.vy = c.vy;
                 // clipfinder --type actions: the lunge that does it
-                if (c.action) Object.assign(clip, { action: c.action, actionKey: c.actionKey, facing: c.facing, actionFrames: c.actionFrames, airFrames: c.airFrames, frames: c.frames.map(vec) });
+                if (c.action) Object.assign(clip, { action: c.action, actionKey: c.actionKey, facing: c.facing, actionFrames: c.actionFrames, airFrames: c.airFrames, stopAfter: c.stopAfter, frames: c.frames.map(vec) });
                 // clipfinder --min-speed: the reachability already worked out
                 if ("reach" in c) clip.reach = c.reach ? { speed: c.reach.speed, yaw: c.reach.yaw, start: vec(c.reach.start) } : null;
                 clips.push(clip);
@@ -1676,7 +1761,14 @@ export function setupWallPushClipUI(scene) {
             if (c.action) {
                 const k = c.actionKey ?? "";
                 const pre = k.includes("jumpslash") ? "jump" : "action";
-                c.cat = `${pre}-${k.startsWith("stick") ? "stick" : k.startsWith("2h") ? "2h" : "1h"}`;
+                c.cat = isSpinKey(k) ? (k.endsWith("backwalk") ? "action-backspin" : "action-spin")
+                    // (MM Zora: the punch, the jumpslash, the Zora clip - B held - each its own row)
+                    : k.startsWith("zora-clip") ? "action-zoraclip"
+                    : k.includes("spin-lock") ? "action-spinlock"
+                    : /^(1h|2h)-spin-fwd/.test(k) ? "action-spinfwd"
+                    : /-ls(-walkin)?$/.test(k) ? "jump-ls"
+                    : k.startsWith("zora-") ? `${pre}-zora`
+                    : `${pre}-${k.startsWith("stick") ? "stick" : k.startsWith("2h") ? "2h" : "1h"}`;
                 continue;
             }
             if (c.kind === "slope" || c.kind === "ground") { c.cat = c.kind; continue; }

@@ -29,7 +29,15 @@
 // swing: the sword swing is active at this frame's collision (meleeWeaponState
 // != 0): if Link leaves the ground, func_8083AA10 (MM func_8083827C) puts him
 // back at prevPos and zeroes speedXZ - no lunging off a ledge.
-struct ActionFrame { int jx, jz, px, pz; double speed; bool swing; };
+// angle: speedXZ moves Link at facing + angle (the Deku spins: the backwalk
+// moves him backwards, 0x8000).
+// stick: speedXZ comes from the stick (held at full tilt) instead of `speed`
+// (which is then only its value unobstructed, for aiming and display), worked
+// out frame by frame in runFrames, since a wall Link touches lowers the stick's
+// speed (Player_ProcessSceneCollision's unk_B50): 'R' running (+2 / -1.5 to
+// it), 'B' the Z backwalk (+1.5 / -2 to it x 1.5), 'H' kept as it is (an action
+// handler's frame), 'S' a Deku spin frame (dekuSpinFrames).
+struct ActionFrame { int jx, jz, px, pz; double speed; bool swing; int angle = 0; char stick = 0; };
 // jump: the jumpslash (Z-targeting + A: func_8083BA90 / MM func_808395F0).
 // Link leaves the ground at speedXZ 5, velocity.y 5, and moves as any actor
 // in the air (Player_Action_80844AF4 / MM Player_Action_29): no root motion,
@@ -54,6 +62,33 @@ struct Action {
 	vector<ActionFrame> frames;
 	bool jump = false;
 	bool stickForward = false;  // (jump) the stick held forward in the air
+	// actionScan aims only the frames moving at least this fast (the Deku
+	// spins: faster than Deku can run, 6 - slower is a walking clip, and
+	// above 2 a clip on a slower frame doesn't count)
+	double aimMin = 2;
+	// actionScan also aims it at acute wall corners (cornerTargets): one
+	// frame can wedge Link into the corner deeper than he can stand, the next
+	// push him through - a clip no standing start does, so the scan's own clip
+	// points don't have it (the Deku spins)
+	bool corners = false;
+	// (stick frames) the form's run speed limit, R_RUN_SPEED_LIMIT / 100: the
+	// stick's full speed; Model::indoors: 5
+	double runLimit = 6;
+	// Frames run before all the others (a jumpslash: before its air frames):
+	// the -walkin variants run into the corner first (walkInVariant). A clip
+	// during them is a walking clip, not the action's. cornersOnly: aimed at
+	// acute corners only.
+	vector<ActionFrame> pre;
+	bool cornersOnly = false;
+	// (MM) the root motion's scale, the form's ageProperties->unk_08: Human
+	// 11/17, Zora 1
+	double animScale = 11.0 / 17.0;
+	// (jump) the jump's speedXZ and velocity.y (func_808395F0: 5 and 5; Zora
+	// x 1.1 and x 0.9), the gravity in the air after the first frame
+	// (Player_Action_29: -1.2, Zora -0.8), and the cap on the stick's speed in
+	// the air (0: OoT 6, MM 10 as before; Zora 6, its run limit)
+	double jumpSpeed = 5, jumpVy = 5, airGravity = -1.2, airCap = 0;
+	bool noWalkIn = false;  // no -walkin variant (the charged spin attack)
 };
 extern const vector<Action> ACTIONS;
 

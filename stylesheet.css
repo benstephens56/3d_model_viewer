@@ -161,8 +161,9 @@ button {
     flex-basis: 100%
 }
 
-/* The wall push clip panel: small buttons on one line, then one line each for
-   auto-import and the reachability filter */
+/* The wall push clip panel: small buttons (wrapping onto a second line when
+   they don't fit), then one line each for auto-import and the reachability
+   filter */
 .clip-buttons,
 .clip-line {
     flex-basis: 100%;
@@ -175,6 +176,10 @@ button {
 .clip-line {
     justify-content: space-between;
     gap: 4px;
+}
+
+.clip-buttons {
+    flex-wrap: wrap;
 }
 
 .clip-buttons button {

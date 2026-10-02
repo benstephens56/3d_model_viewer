@@ -103,6 +103,12 @@ export function updateSelectionUI() {
 }
 
 // Clear selection
+// The selected wall push clip dots' { g, c } (wall_push_clips.js clipRefs),
+// in the order they were picked
+export function getSelectedClips() {
+    return selectedPoints.filter(p => p.clip).map(p => p.clip);
+}
+
 export function clearSelection(scene) {
     // ---- WATERBOX ----
     selectedTriangles
@@ -296,7 +302,8 @@ function pickClipSpot(camera, renderer) {
                 if (v.z < -1 || v.z > 1) continue;
                 const d = Math.hypot((v.x + 1) / 2 * rect.width - mx, (1 - v.y) / 2 * rect.height - my);
                 if (d <= CLIP_PICK_PX && (!best || d < best.d)) {
-                    best = { d, modelName: m.name, index: i, pos: world, info: spots[i], markerPx: (obj.material.size || 12) + 2 };
+                    best = { d, modelName: m.name, index: i, pos: world, info: spots[i], markerPx: (obj.material.size || 12) + 2,
+                        clip: obj.userData.clipRefs?.[i] };
                 }
             }
         });

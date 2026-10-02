@@ -96,7 +96,7 @@ Types: `acute`, `extended`, `slope`, `ground`, `falling`, `actions`
 | `slope` | Slope clips (see **Slope clips** below) |
 | `ground` | Ground clips (see **Ground clips** below) |
 | `falling` | Falling wall push clips: of acute / extended pairs if either is picked too, else of both |
-| `actions` | Sword lunge and jumpslash clips (see `--action-keys` and **Action clips** below); not with `falling` or `ground` |
+| `actions` | Sword lunge, jumpslash and Deku spin clips (see `--action-keys` and **Action clips** below); not with `falling` or `ground` |
 
 Default: `acute,extended,slope`. `all` means `acute,extended,slope,ground,falling` (everything but `actions`).
 
@@ -107,7 +107,7 @@ Default: `acute,extended,slope`. `all` means `acute,extended,slope,ground,fallin
 | (`extended` alone) | `extended` without `acute` keeps only the wall pairs (pusher, clipped wall) that clip **only** thanks to the walls' extended planes: the 1-unit / `detMax 300` tolerance of the game's triangle checks, or the pusher reaching past its own edge. (The game's wall check projects Link onto a wall along the Z or X axis, not the wall's normal, so a diagonal wall also pushes Link standing beside it, past its end: at 45 degrees as far past as he is in front of its plane.) See **Acute or extended** below for how a wall pair is categorised; this leaves out every acute pair, all its points included. The terminal says how many pairs and points were left out. With `--first-per-pair`, a pair whose first point found was extended isn't checked for acute points afterwards. |
 | `--first-per-pair` | Keep the first clip found for each wall pair (pushing wall, clipped wall), like the tester's one-per-pair recording mode. The output is much smaller, but the scan isn't much faster: most of the time goes on points that never clip. |
 | `--max-per-pair N` | Keep at most N points of each wall pair, spread out evenly: the first chosen, then over and over the point farthest from all the ones chosen so far (so they cover the pair end to end, e.g. 10 points 120 apart along a 1300 long wall). Each row the viewer shows a pair in (crossing / standing, walking / falling, and each kind) is thinned separately, so no row goes missing. Always kept: the lowest `--min-speed` reach (thinning runs after it), and a point that makes an acute pair acute. Smaller files: OoT Kakariko Village, child, falling: 16178 points / 6.8 MB, with `--max-per-pair 10` 1403 points / 0.59 MB, all 184 rows still there. Written to the JSON as `"maxPerPair"`. Not applied with `--refine`, `--yaw` or `--angles`. `--type actions` thins by default (see below); `--max-per-pair` there sets the cap instead. |
-| `--action-keys KEY,...` | `--type actions`: a sword attack's own movement doing the clip, from a standing start (see **Action clips** below). Default all; keys: `1h-slash`, `1h-stab`, `2h-slash`, `2h-stab`, `stick-slash` (the Deku stick: two-handed and always the forward slash, so the 2h slash's frames), and the jumpslash: `1h-jumpslash` with the stick left alone in the air, `1h-jumpslash-fwd` with it held forward (see **Jumpslash** below; one-handed only, the other weapons jump the same way). MM: Human, all of them; OoT: Adult (the sword ones) and Child (the Kokiri Sword's and the stick's); other forms are skipped. The jumpslash is left out of a map whose rooms are all indoors (Z + A rolls there). The file is `..._actions.json`; the other types picked with it (acute / extended / slope) narrow which clip points the lunges aim at and which of their clips are kept. A lunge clips from far more starts than the viewer needs (over a thousand for one wall pair, about 1 KB each with its frames), so without `--max-per-pair` each row keeps at most 40 points, spread out as `--max-per-pair` does, fewer (down to 6) when the file would pass 4000 points in all: MM Pirates' Fortress Interior, 50451 points / 47.7 MB, becomes about 4000 / 4 MB. Not with the `falling` or `ground` types, `--min-speed`, `--refine`, `--yaw` or `--angles`. |
+| `--action-keys KEY,...` | `--type actions`: a sword attack's own movement doing the clip, from a standing start (see **Action clips** below). Default all; keys: `1h-slash`, `1h-stab`, `2h-slash`, `2h-stab`, `stick-slash` (the Deku stick: two-handed and always the forward slash, so the 2h slash's frames), and the jumpslash: `1h-jumpslash` with the stick left alone in the air, `1h-jumpslash-fwd` with it held forward (see **Jumpslash** below; one-handed only, the other weapons jump the same way), each of those with a `-walkin` variant (run into a corner first, see below), and MM Deku's `deku-spin` and `deku-spin-backwalk` (see **Deku spin** below). MM: Human, the sword ones; Deku, the spins; OoT: Adult (the sword ones) and Child (the Kokiri Sword's and the stick's); other forms are skipped. The jumpslash is left out of a map whose rooms are all indoors (Z + A rolls there). The file is `..._actions.json`; the other types picked with it (acute / extended / slope) narrow which clip points the lunges aim at and which of their clips are kept. A lunge clips from far more starts than the viewer needs (over a thousand for one wall pair, about 1 KB each with its frames), so without `--max-per-pair` each row keeps at most 40 points, spread out as `--max-per-pair` does, fewer (down to 6) when the file would pass 4000 points in all: MM Pirates' Fortress Interior, 50451 points / 47.7 MB, becomes about 4000 / 4 MB. Not with the `falling` or `ground` types, `--min-speed`, `--refine`, `--yaw` or `--angles`. |
 | `--pair P,C` | Keep only the clips where TRI P pushes Link through TRI C (polygon ids, as the viewer and tester show them; for a slope or ground clip P is the floor, C the wall). Needed for `--refine` / `--angles`. The scan only looks near the two triangles: the wall pairs and slope walls within a frame's move (`--max-move`) plus two radii and 10 of them. Every triangle still collides as usual, and the pair's clips come out the same as a whole-map scan's (OoT Death Mountain Trail setup 2, falling, TRI 90 → 25: 168 s → 14 s). |
 | `--dyna FILE\|none` | The dynapoly actors; by default `tools/clipfinder/<GAME>_dyna_all.json` (a warning and no dynapolys if it isn't there), `none` for none. From the viewer's **Export all dynapolys** (every map's, every setup; see **Dynapolys** below). A single map's `dynapoly-1` export (the old **Export dynapolys**) still works. Each map is scanned once per set of setups with the same dynapolys, and once without dynapolys if the file has none for it. Output files named by `--out-dir` get `_setup<N>[-<N>...]_dyna` added; with `-o` and several sets, `_setup...` goes before `.json`. |
 | `--slope-step 1\|2\|3` | The slope clip scan's widest step along a wall's bottom edge (default 3; see **Slope clips** below). `1` searches every unit. |
@@ -115,6 +115,7 @@ Default: `acute,extended,slope`. `all` means `acute,extended,slope,ground,fallin
 | `--ground-step 1\|2\|3` | The ground clip scan's widest step along a wall's bottom edge (default 3; see **Ground clips** below). `1` searches every unit: the most (floor, wall) pairs, about 2.5x as long. |
 | `--keep-load-void` | Keep the clips whose start is on a loading zone (a floor with an exit, `SurfaceType_GetExitIndex`) or a void plane (floor property 5 / 12, MM 13 too). Left out by default: standing there takes Link out of the scene before any clip matters. Only the floor under the start counts; dynapolys never do (the export has no surface types). E.g. OoT Death Mountain Trail, adult: 374 of 1818 points, nearly all of TRI 348 → 346 / 345, start on the summit's exit to the crater (TRI 453, exit 5). `--sim` prints the start's floor, and `--tri` a poly's exit and floor property. |
 | `--slope-starts` | Also search the crossing points whose surroundings are only in bounds when the rays that go into a slope first are ignored (see **In bounds** below). Finds some more crossing clips starting on slopes, but about 3x slower on a mountain: OoT Death Mountain Trail setup 2, adult, falling: 21333 points (4 more wall pairs) in 110 s instead of 21039 in 38 s. |
+| `--aerial` | With the `falling` type: a falling clip may also start in the air where Link couldn't stand still, exactly where the move starts, not moved to a resting spot (the walls there needn't have pushed him out: a bomb or an enemy knocks him there after the frame's wall pushes). Only for a clip point no resting start does. Not under a floor within 50 above him (the floor check would put him up on it). The JSON marks those clips `"aerial": true` (the viewer says so in the description), and the file name gets `_aerial`. E.g. MM West Clock Town, human: the step TRI 164 through TRI 59 from z 23.57, 11.4 in front of 59 (a community setup, bombed at the corner). Not with `--min-speed`, `--refine`, `--yaw` or `--angles`. |
 | `--dyna-only` | With `--dyna`: only scan the wall pairs that have a dynapoly wall in them (pusher or clipped wall), and skip maps without dynapolys. Much faster; the static-only pairs are what a scan without `--dyna` finds, give or take the dynapolys' effect on them. |
 | `--setup N` | With `--dyna`: only the dynapolys of setup N, for every form. Without it, OoT pairs each form with the setups it plays in (see **OoT forms and setups** below). |
 | `--night` | OoT: the night setups too (child 1, adult 3), which are left out by default. |
@@ -138,7 +139,7 @@ Default: `acute,extended,slope`. `all` means `acute,extended,slope,ground,fallin
 
 | Option | Meaning |
 |---|---|
-| `--sim X,Y,Z,YAW,SPEED[,DROP]` | Run one frame and print each step (a slope clip is reported too). DROP can be given as a y velocity instead, `vVY`: `v-20` is a drop of 30. A drop of more than checkHeight - 5 runs the ground clip frame (see **Ground clips**): the start floor's line test plane distance, the line test at the feet, the pushes, the floor check and the verdict. SPEED as `15/7`: one frame of walking per speed at the same yaw, each ending with the floor check, then two frames standing still, printing where each one leaves Link and which wall he's behind; for slope clips. Link stands at (X, Y, Z) (feet) and moves at YAW (`0x1234` or decimal) with speedXZ SPEED. posNext is 7.5 below his feet (walking), or DROP below if given (falling). Prints: whether the start is in bounds and a resting spot, the line test and what it hits, every wall push, where he ends up, and whether that's a clip and out of bounds. Use it when a clip works in game but the scan disagrees, or the other way round. Nothing is written. `X,Y,Z,FACING,@KEY` (e.g. `@2h-stab`) runs that action's frames instead, Link facing FACING, and prints each frame, the two standing still and the action clip verdict. |
+| `--sim X,Y,Z,YAW,SPEED[,DROP]` | Run one frame and print each step (a slope clip is reported too). DROP can be given as a y velocity instead, `vVY`: `v-20` is a drop of 30. A drop of more than checkHeight - 5 runs the ground clip frame (see **Ground clips**): the start floor's line test plane distance, the line test at the feet, the pushes, the floor check and the verdict. SPEED as `15/7`: one frame of walking per speed at the same yaw, each ending with the floor check, then two frames standing still, printing where each one leaves Link and which wall he's behind; for slope clips. Link stands at (X, Y, Z) (feet) and moves at YAW (`0x1234` or decimal) with speedXZ SPEED. posNext is 7.5 below his feet (walking), or DROP below if given (falling). Prints: whether the start is in bounds and a resting spot (with a `WARNING` when there is no floor under it, or a floor within 50 above his feet that the floor check would put him up on: inside a step, not a real start; a floor further below is noted as being in the air), the line test and what it hits, every wall push, where he ends up, and whether that's a clip and out of bounds. Use it when a clip works in game but the scan disagrees, or the other way round. Nothing is written. `X,Y,Z,FACING,@KEY` (e.g. `@2h-stab`) runs that action's frames instead, Link facing FACING, and prints each frame, the two standing still and the action clip verdict. |
 
 ### Output and running
 
@@ -408,7 +409,7 @@ ground, and under the walls on it, to the back of some wall far off. (The
 Death Mountain Trail start above was out of bounds without this, by a wall
 240 away.) Whether a clip *ends* out of bounds still uses every ray. One
 check keeps every ray unless `--slope-starts`: the crossing search's quick
-"is anywhere around this point in bounds" test. Its sample spots are at a
+"is anywhere around this point in bounds" test (3 and 12 either side of the pushing wall along its normal, then 3 and 12 in front of it at 45 degrees either side: at an acute corner the spots along the normal are all behind the other wall or the pusher, MM West Clock Town TRI 164 by TRI 59). Its sample spots are at a
 nearby floor's height, often in the air or the ground, and ignoring the rays
 into slopes there lets through far more points than it finds clips for.
 `reach` is the move itself (the faster of the two speeds); `--min-speed`
@@ -604,6 +605,155 @@ modelled: ceilings (a low one cuts the jump short), the sword hitting a wall
 (a recoil), and which room the start is in (a scene with some indoor rooms
 keeps the jumpslash, and the tester says "no attack" there).
 
+### Deku spin
+
+MM Deku, A on the ground (`Player_ActionHandler_6` -> `func_80839A84`,
+`Player_Action_95`). No root motion, only speedXZ, each frame worked out as
+the game does it in floats (`dekuSpinFrames` in `src/action.cpp`), from
+standing still with the stick held at full tilt throughout:
+
+| Key | Inputs | Speeds |
+|---|---|---|
+| `deku-spin` | stick toward the facing; A the frame after speedXZ reaches 6 | run up 2, 4, 6; the A frame 6 (the action handler runs before the speed step); then the spin 8, **9.94**, 9.55, 9.16, ... |
+| `deku-spin-backwalk` | Z held, stick back (Link faces `facing`, moves the other way); once speedXZ is 9, Z off for a frame, then A | backwalk 1.5 ... 9 (the parallel backwalk, `Player_Action_6`, steps to the stick's 6 x 1.5); Z off 9 (`func_8083A844`: he turns to face the way he's moving); A 9; then the spin **10.33**, 9.94, 9.55, ... |
+
+The spin: `func_808373A4` sets `unk_B10[0]` 20000. Each frame the target is
+the stick's speed (Deku's run limit, 6) x (1 - 0.9 (11100 - B10[0]) / 11100)
+with B10[0] going down 800 a frame, and speedXZ steps to it up 2.0 / down 1.5.
+Run up at 6, the first frame only gets to 8 and the second to 9.94; from the
+backwalk's 9 the first frame is the whole 10.33. 15 spin frames, then
+standing. Only the frames faster than Deku runs (above 6) are aimed at clip
+points, and a clip on a slower frame isn't kept (a walking clip does that).
+They are also aimed at every acute wall corner (two walls facing into a wedge
+narrower than 90 degrees, `cornerTargets`): one spin frame can wedge Link into
+a corner deeper than he can stand, so the next can push him through - a clip no
+single move from a standing start does, so the scan's own clip points miss it.
+Each spin has its own viewer row (**Action Clips (Deku spin)** / **(backwalk
+Deku spin)**). Not modelled: a floor pitch (it lowers the stick's speed), a
+Deku flower under him.
+
+The speeds above are unobstructed. `runFrames` works them out frame by frame
+(`ActionFrame::stick`), because a wall Link touches lowers the stick's speed:
+in both games Link moves and collides before the action runs, and touching a
+wall on the ground the collision caps the stick's speed (`unk_B50`, OoT
+`unk_880`) at the run limit x |yaw - (wallYaw + 0x8000)| x 0.00008 when that's
+under 1 - wallYaw from `Player_PosVsWallLineTest` along his shape yaw (which
+the spin turns 19200, 18400, ... a frame), else the last wall that pushed him.
+In a scene whose rooms are all indoors the run limit is 5 (`Player_SetBootData`).
+
+Stopping part way (the spins only: a lunge's root motion can't be stopped): a
+frame after the clip that leaves Link out of bounds, still behind the wall
+after two frames standing there, counts even if the rest of the spin would
+carry him out again - e.g. through Deku Palace's 19 thick low wall (TRI 1531)
+and back into bounds on its far side. The JSON has `"stopAfter"`: let go after
+that frame.
+
+Deku Palace: `deku-spin-backwalk` 1504 -> 1531 (yaw ~0x4C91 into the corner by
+the pillar, stop after the 9.94 frame) - the user's clip. The east corner
+(1502 -> 1531) needs two 10.33 frames in the model; the spin has one.
+Laundry Pool (Deku): `deku-spin` finds TRI 27 -> 71 on the 9.94 frame.
+
+The tester (`wall_clip_tester.lua`, `runSpin`) does the inputs above, counting
+game frames as clipfinder does (from the first one Link moves on: a wall can
+keep speedXZ under 6 / 9), lets go of the stick after `stopAfter`, and aims the
+stick through the active camera every emulated frame (`stickToward`), so
+fixed cameras such as Deku Palace's get the right world direction. MM reads
+the stick's angle from the raw stick, not the dead-zone-adjusted one
+(`Lib_GetControlStickData`), so there the raw stick itself points along it
+(an earlier version was up to ~0x300 off, enough to miss the Deku Palace
+`-walkin` corners, whose window is about +-0x40). Statuses
+"no run-up" (he never moved) and "no spin" (A didn't start one).
+
+### Running into a corner first (-walkin)
+
+Every lunge and jumpslash key also has a `-walkin` variant (e.g.
+`1h-slash-walkin`, `1h-jumpslash-fwd-walkin`): Link runs along the facing
+first (the stick at full tilt, Z held for stabs and the jumpslash) - speed 2,
+4, then the run limit (OoT 6, MM Human 5.5, capped by walls as above), held for
+6 more frames - so an acute corner wedges him in deeper than he can stand, then
+the B / A press (that frame still moves him at the run speed) and the attack
+as before. Aimed at acute wall corners only; a clip during the run in is a
+walking clip and isn't kept. The tester runs the same 9 frames (`WALKIN_RUN`)
+before the press. Deku Palace (Human) finds the corners by the pillar this way:
+1h slash and 2h stab, 1504 -> 1531 and 1502 -> 1531.
+
+### Zora: punch, jumpslash, Zora clip
+
+MM Zora (`zoraActions`; tables from `gen_mm_attack_frames.py`, which emulates
+the game frames from MM's animation data and rebuilds the Human 1h slash table
+exactly - `--check`):
+
+| Key | Inputs | Movement |
+|---|---|---|
+| `zora-punch` | B once (the first punch, `PLAYER_MWA_ZORA_PUNCH_LEFT`) | no lunge speed; `pz_attackA`'s root motion (~35 forward) then its end animation's (~34 back) |
+| `zora-jumpslash[-fwd]` | fins out, Z + A (`-fwd`: the stick and Z forward in the air) | speedXZ 5.5, velocity.y 4.5 (`func_808395F0`: x 1.1, x 0.9), gravity -1.0 the first frame then -0.8, the stick's cap in the air 6; landing `pz_jumpATend`, then `pz_wait` (stands still) |
+| `zora-clip[-fwd]` | fins out, B held (aiming them), Z, A, B still held to the end | the jumpslash, then when the landing animation ends `Player_Action_84` calls `Player_ActionHandler_8`: the fin aim, whose animation (`pz_cutterwaitC`) becomes the lower body's too, root motion still on - **64.4 forward in one frame** (its first root vs `pz_jumpATend`'s last), ~12 more after |
+
+Root motion is x 0.01 x the form's `unk_08` (Zora 1). The Zora clip is aimed
+only with, and counted only on, its ~64 frame (`aimMin` 10): a clip in its air
+or landing frames is the plain jumpslash's. The jumpslash keys are slow on big
+maps (like the Human jumpslash: every air and landing frame aimed at every
+walking and falling clip point - Zora Hall, ~10000 targets, about 30 minutes). Each has a `-walkin`
+variant (Zora's run limit 6). The viewer has a row each: **Action Clips (Zora
+punch / Zora jumpslash / Zora clip)**. The tester draws the fins with a B
+press while holding Link at the start ("no fins" if `heldItemAction` isn't 8,
+`PLAYER_IA_ZORA_BOOMERANG`), never holds R (the Zora barrier), and for the
+clip holds B from 30 frames before Z + A until after the settle (letting go
+throws the fins). Not modelled: the punch combo (2nd / 3rd presses), the ledge
+check during root motion (`func_808381F8`).
+
+### 2h spin attack, locked on (spin-lock)
+
+`2h-spin-lock[-fwd]` (OoT adult and child - a child can have the Biggoron Sword
+on B - and MM Human; there's no Deku stick spin attack): the half-charged two-handed
+spin (`PLAYER_MWA_SPIN_ATTACK_2H`) ending while Z-targeting an enemy. With a
+hostile lock-on the attack action picks the "R" end animation,
+`link_anchor_Lrolling_kiru_endR`, whose root starts 2214 forward of where the
+spin's ended, the root-motion flags kept (the Zora clip's mechanism): **22.1 in
+one frame** (OoT; MM Human x 11/17: 14.3), then ~26 back over its frames.
+`-fwd`: B let go with the stick forward, which also lunges (15 -> 10, 5).
+Tables: `gen_mm_attack_frames.py --spin` (its OoT mode rebuilds the OoT adult
+1h slash table exactly). The lock-on turns Link to face the enemy, so the
+facing has to point at one; the scan doesn't know where enemies are. No
+`-walkin`. Lost Woods (adult): 974 -> 799 / 807 on the 22.1 frame. The
+tester holds Z (an enemy must be in range: "no lock-on" otherwise), holds B for
+the last `SPIN_CHARGE` frames of the hold (slash, then charge), and lets go.
+
+`-r` (`2h-spin-lock-r`, `2h-spin-lock-fwd-r`): the
+step back cut short - the rows stop at the jump. Z held through the frame the
+spin switches to its end animation (the lock-on picks the endR one then), then
+on the next Z let go and R held: Idle's shield handler
+(`Player_ActionHandler_11`) only runs with no lock-on, and its full-body shield
+action ends the root motion; still locked on, R only raises the shield on the
+upper body and the step back plays out (the user saw both). Gerudo Valley
+(adult): 3 wall pairs (`2h-spin-lock` 5 - some clips need the step back). The
+tester spots the switch (actionFunc leaving the attack's) and lets go of Z /
+holds R from the next game frame.
+
+### Spin attack with the stick forward (spin-fwd)
+
+`1h-spin-fwd` (OoT adult / child, MM Human), `2h-spin-fwd` (OoT adult / child
+with the Biggoron Sword, MM Human): the half-charged spin attack
+released (B let go) with the stick forward - which, like a stab, sets the
+lunge flag: 15 on its first frame (stepped to 10, then 5) - and no lock-on, so
+the ordinary end animation (no ~22 jump). One-handed:
+`PLAYER_MWA_SPIN_ATTACK_1H` (`link_fighter_rolling_kiru`, unk_D 12);
+two-handed: `SPIN_ATTACK_2H`. Without Z the stick turns Link while
+charging, so any direction held becomes forward. Gerudo Valley (adult): 1h 5
+wall pairs, 2h 7 (the 1h stab: 3). The tester charges as for spin-lock, without
+Z, and lets go with the stick forward.
+
+### Lunge storage (-ls)
+
+Every Human / adult / child jumpslash key has a `-ls` variant (e.g.
+`1h-jumpslash-ls`, `1h-jumpslash-fwd-ls-walkin`): the lunge flag (OoT
+`PLAYER_STATE2_30`, MM `PLAYER_STATE2_40000000`, set by an attack started with
+the stick forward) is only cleared where it fires, an attack action's first
+frame; skip that (e.g. the sword's wall recoil) and it waits for the next
+attack - the jumpslash's landing, which then lunges: the frame after the big
+landing frame moves at 10 (14.6 with the root motion instead of -0.4), then 5.
+The tester sets the flag in `stateFlags2` just before Z + A.
+
 ## Ending in bounds
 
 A clip through a static wall usually has to leave Link out of bounds. It
@@ -617,6 +767,17 @@ Such clips are marked `"inBounds": true` in the JSON, and the viewer says so
 when you click one. Climbing, jumping and the like aren't modelled, so a
 ledge Link could climb up to still counts, and a way round longer than 600
 counts as none.
+
+It also counts as a **shortcut** (the user's rule: a shorter way to somewhere
+reachable): the walk there (`Model::walkDistance`, the fill's steps x 10, a
+lower bound) is at least 150 more than the straight line from the start and at
+least twice it. The JSON then has `"walkDistance"` (-1: no way to walk there)
+and the viewer says "a shortcut: walking there ... is about N". The Deku Palace
+1h slash (Human, 834, 0, 1089, facing 0x6132; the user's, in game) goes through
+the low block 1318/1317 and out behind it, a walk of ~250 round. `--sim
+X,Y,Z,walk,X2,Y2,Z2` prints the fill's path between two points, and any wall it
+steps through 10 or 30 up (it only checks 50 up: walls lower than that don't
+block it - Deku Palace TRI 1198, 10 up, did).
 
 Falling and ground clips are judged where Link lands, and landing in bounds
 counts the same way: OoT Shadow Temple, adult, falling through TRI 1160 off

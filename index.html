@@ -77,6 +77,7 @@
           <div class="clip-buttons">
             <button id="wallClipImport" title="Load one clipfinder results file for the loaded map">Import</button><input id="wallClipImportFile" type="file" accept=".json,application/json" style="display:none">
             <button id="wallClipExport" title="Write the shown points out as JSON (clipfinder's format, for wall_clip_tester.lua): the clip kinds whose rows are ticked, filtered by Reachable and |Y velocity|">Export JSON</button>
+            <button id="wallClipExportSelected" title="Write just the selected clip points out as JSON (the same format as Export JSON): click a dot to select it, tick Multi-select to pick several">Export selected</button>
             <button id="wallClipDynaExportAll" title="Every map's dynapoly actors, for every setup, in one file (nothing is drawn), for clipfinder --all --dyna. Setups with the same dynapolys are written once.">Export all dynapolys</button>
           </div>
           <label class="clip-line" title="When a map loads, import every clipfinder results file for it from this folder (served by the viewer's server): files named by --out-dir, for this map, that are static scans or scans with the loaded setup's dynapolys. They're merged."><input id="wallClipAutoImport" type="checkbox" checked> Auto-import <input id="wallClipAutoDir" type="text" value="tools/clipfinder/results"></label>

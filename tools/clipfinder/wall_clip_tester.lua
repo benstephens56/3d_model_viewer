@@ -44,16 +44,16 @@
 -- wall_clip_tests.json next to this script. Its clips are turned into tests,
 -- with the walls read from RAM (load that map first). (A .lua test file from
 -- an older viewer still works too.)
-local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\MM_Clock_Tower_Interior_Human_actions_setup0_dyna.json]]
+local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\MM_Deku_Palace_Human_selected.json]] -- \results\
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
 local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --type falling scans)
 -- Only test one area of the map: the clip points (the viewer's dots) outside
 -- these ranges are ignored. Each is { min, max } (ends included), or nil for
 -- no limit on that axis. E.g. X_RANGE = { 300, 500 }, Z_RANGE = { 550, 700 }.
-local X_RANGE = nil -- { -250, 270 }
+local X_RANGE = nil -- { -3000, -2500 }
 local Y_RANGE = nil
-local Z_RANGE = nil -- { -350, 520 }
+local Z_RANGE = nil -- { -370, 100 }
 -- "needed": a wall pair's falling clips ("low-acute" / "low-extended") only if
 -- the pair has no walking clips of that kind, or the falling ones need a lower
 -- speed (the slowest move in the file: --min-speed's reach, or the clip's own).
@@ -71,7 +71,7 @@ local FAST = true                 -- skip drawing while testing (client.invisibl
 -- camera behind him), and pauses RECORD_BUFFER emulated frames (60 a second)
 -- before and after each one. Off by default.
 local RECORD = false
-local RECORD_BUFFER = 90
+local RECORD_BUFFER = 30
 local RECORD_ONE_PER_PAIR = true  -- recording: once a wall pair's test works, skip the rest of that pair's
 if RECORD then FAST = false end
 -- How the test frame is set up:
@@ -107,18 +107,20 @@ local CSV_TESTS = false
 -- swings it: that's over before the test). Two-handed (Player_HoldsTwoHandedWeapon):
 -- OoT the Biggoron Sword / Giant's Knife, and the Deku stick (which always
 -- does the forward slash); MM the Great Fairy's Sword.
+-- The Deku spins (deku-spin, deku-spin-backwalk; MM Deku, no weapon): see
+-- runSpin. The stick is aimed through the active camera every emulated frame
+-- (stickToward), so fixed cameras (e.g. Deku Palace) get the right world yaw.
 local SET_WEAPON = true           -- false: use whatever the savestate has on B (and drawn)
 local ACTION_WEAPONS = {          -- B button item per game / form / one- or two-handed
 	OOT = {
 		Adult = { ["1h"] = 0x3C, ["2h"] = 0x3D },     -- Master Sword, Biggoron Sword / Giant's Knife
-		Child = { ["1h"] = 0x3B, stick = 0x00 },      -- Kokiri Sword, Deku stick
+		Child = { ["1h"] = 0x3B, ["2h"] = 0x3D, stick = 0x00 },  -- Kokiri Sword, Biggoron Sword (on B: the 2h spin keys), Deku stick
 	},
 	MM = {
 		Human = { ["1h"] = 0x4D, ["2h"] = 0x10, stick = 0x08 },  -- Kokiri Sword (77), Great Fairy's Sword (16), Deku stick (8)
 	},
 }
 local ACTION_HOLD = 150           -- emulated frames Link is held at the start first (3 per game frame; he draws the weapon in them)
-local STICK_FORWARD = 127         -- the analog "Y Axis" value for stick up (forward, with the camera behind him)
 local ACTION_KEYS = nil           -- nil: every action in the file; or a list, e.g. { "2h-stab" }
 local CSV_CELLS = "all"           -- "all", or "border": only cells next to one with the other answer
 local CSV_DRIFT = 0.0001          -- Link pushed further than this off a cell's start before the move: No
@@ -167,6 +169,7 @@ if GAME == "OOT" then
 	K.rideActor = 0x430
 	K.actorSpeed = 0x68                 -- Actor.speed
 	K.stateFlags2 = 0x670
+	K.focusActor = 0x654                -- Player.focusActor (the lock-on target; debug 0x664)
 	K.crawling = 0x40000                -- PLAYER_STATE2_CRAWLING
 	K.linkAge = 0x11A5D4                -- gSaveContext.linkAge (0 adult, 1 child)
 	K.meleeWeaponAnimation = 0x832      -- Player.meleeWeaponAnimation (s8)
@@ -187,6 +190,8 @@ else
 	K.shapeRotY = 0xBE
 	K.actionFunc = 0x748
 	K.stateFlags1 = 0xA6C
+	K.stateFlags2 = 0xA70
+	K.focusActor = 0x730                -- Player.focusActor (the lock-on target)
 	K.skelAnime = 0x240
 	K.rideActor = 0x390
 	K.actorSpeed = 0x70
@@ -204,6 +209,11 @@ end
 K.home = 0x08                           -- Actor.home.pos (both games)
 K.rotY = 0x32                           -- Actor.world.rot.y (both games)
 K.pos = 0x24                            -- Actor.world.pos (both games)
+-- The active camera (GET_ACTIVE_CAM): play->cameraPtrs[play->activeCamId];
+-- its inputDir.y is the yaw stick up points at (Player_ProcessControlStick)
+K.cameraPtrs = GAME == "OOT" and 0x790 or 0x800
+K.activeCamId = GAME == "OOT" and 0x7A0 or 0x810
+K.camInputDirY = 0x136                  -- Camera.inputDir.y (both games)
 -- Actor bg check results (the log names the wall / floor polys Link touched)
 if GAME == "OOT" then
 	K.wallPoly, K.floorPoly, K.wallBgId, K.bgCheckFlags = 0x74, 0x78, 0x7C, 0x88
@@ -461,7 +471,7 @@ local function testsFromJson(path)
 				pusher = c.pusher, crossed = c.crossed, prev = prev, next = nxt, from = vec(c.from),
 				yaw = c.speed and c.yaw or nil, speed = c.speed, speed2 = c.speed2, vy = c.vy, expect = vec(c["end"]),
 				reachSpeed = type(c.reach) == "table" and c.reach.speed or nil,
-				action = c.action, actionKey = c.actionKey, facing = c.facing, actionFrames = c.frames and #c.frames or nil, airFrames = c.airFrames,
+				action = c.action, actionKey = c.actionKey, facing = c.facing, actionFrames = c.frames and #c.frames or nil, airFrames = c.airFrames, stopAfter = c.stopAfter,
 			}
 			T.walls[c.pusher] = true
 			T.walls[c.crossed] = true
@@ -667,12 +677,38 @@ end
 -- its top side and slid or jumped off: OoT Death Mountain Trail TRI 90 -> 25).
 -- The plane alone can't tell: far past a leaning wall's edge its plane says
 -- nothing about the wall.
+-- In front of the plane counts as "no" over the clipped wall or any scene
+-- wall in the same plane: a thin strip's check point can end up over the
+-- wall above it (MM West Clock Town: TRI 66 is y 60-75 under TRI 62; Link
+-- dropped back onto floor TRI 145 at y 60, check point at 86.8, was "away").
+local coplanarCache = {}
+local function coplanarWalls(id)
+	if coplanarCache[id] then return coplanarCache[id] end
+	local w, out = T.walls[id], {}
+	if id < numPolygons then
+		for j = 0, numPolygons - 1 do
+			if j ~= id then
+				local n, d = polyPlane(j)
+				if n[1] == w.n[1] and n[2] == w.n[2] and n[3] == w.n[3] and d == w.d then
+					out[#out + 1] = { v = polyVerts(j), n = n, d = d }
+				end
+			end
+		end
+	end
+	coplanarCache[id] = out
+	return out
+end
 local function judge(test, after, final)
 	local w = T.walls[test.crossed]
 	if dist3(final, test.next) > 300 then return "voided" end
 	if final[2] < test.next[2] - 150 then return "fell" end
 	if planeDist(w, final) < -BEHIND_MIN and planeDist(w, after) < -BEHIND_MIN then return "clipped" end
-	if planeDist(w, final) >= -BEHIND_MIN and offTriangle(w, final) <= radius then return "no" end
+	if planeDist(w, final) >= -BEHIND_MIN then
+		if offTriangle(w, final) <= radius then return "no" end
+		for _, c in ipairs(coplanarWalls(test.crossed)) do
+			if offTriangle(c, final) <= radius then return "no" end
+		end
+	end
 	if dist3(final, test.prev) <= radius then return "no" end
 	return "away"
 end
@@ -904,6 +940,49 @@ local function yawTo(dx, dz)
 	return ((a + 0x8000) % 0x10000) - 0x8000
 end
 
+-- The stick pushed so the game reads it as pointing at world yaw `yaw` (nil:
+-- centred). The game turns the stick into a world yaw with the active
+-- camera's inputDir.y: Lib_GetControlStickData's angle is
+-- Math_Atan2S(relY, -relX) (0 = stick up), plus Camera_GetInputDirYaw. So
+-- with a fixed camera stick up isn't Link's forward: the stick is turned by
+-- (yaw - camera yaw). rel is the raw stick minus the 7 dead zone, capped at
+-- 60 per axis (PadUtils_UpdateRelXY), so the direction is scaled to a 60 rel
+-- on its long axis (magnitude >= 60: a full push) and 7 added back.
+-- MM takes the angle from the raw stick instead (Lib_GetControlStickData:
+-- Math_Atan2S_XY(cur.stick_y, -cur.stick_x); only the magnitude is rel's), so
+-- the 7 added to each axis turned the direction up to ~4 degrees toward the
+-- diagonal (0x300 off in Deku Palace): there the raw stick itself points
+-- along the direction, its long axis at 127 (rel 60 or more: a full push).
+local function stickToward(yaw)
+	if not yaw then
+		joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = 0 }, 1)
+		return
+	end
+	local cam = read_u32(K.play + K.cameraPtrs + 4 * mainmemory.read_s16_be(K.play + K.activeCamId))
+	local camYaw = cam >= 0x80000000 and mainmemory.read_s16_be(cam - 0x80000000 + K.camInputDirY) or 0
+	local a = ((yaw - camYaw) % 0x10000) / 0x8000 * math.pi
+	local dx, dy = -math.sin(a), math.cos(a)
+	local m = math.max(math.abs(dx), math.abs(dy))
+	if GAME == "MM" then
+		-- (the whole stick, long axis 90-127, nearest the angle: these clips can
+		-- need it within 0x40)
+		local best, bx, by = math.huge, 0, 0
+		for L = 90, 127 do
+			local x, y = math.floor(dx / m * L + 0.5), math.floor(dy / m * L + 0.5)
+			local e = math.abs(atan2(x * dy - y * dx, x * dx + y * dy))
+			if e < best then best, bx, by = e, x, y end
+		end
+		joypad.setanalog({ ["X Axis"] = bx, ["Y Axis"] = by }, 1)
+		return
+	end
+	local function axis(v)
+		local rel = math.floor(v / m * 60 + 0.5)
+		if rel > 0 then return rel + 7 elseif rel < 0 then return rel - 7 end
+		return 0
+	end
+	joypad.setanalog({ ["X Axis"] = axis(dx), ["Y Axis"] = axis(dy) }, 1)
+end
+
 -- The attack clipfinder's action keys are (PLAYER_MWA_*, both games)
 -- (the Deku stick is two-handed and always does the forward slash)
 local ACTION_MWA = { ["1h-slash"] = 0, ["2h-slash"] = 1, ["1h-stab"] = 12, ["2h-stab"] = 13, ["stick-slash"] = 1 }
@@ -912,6 +991,19 @@ for _, k in ipairs({ "1h-jumpslash", "2h-jumpslash", "stick-jumpslash" }) do
 	ACTION_MWA[k] = GAME == "OOT" and 19 or 20
 	ACTION_MWA[k .. "-fwd"] = ACTION_MWA[k]
 end
+-- MM Zora: PLAYER_MWA_ZORA_PUNCH_LEFT; the jumpslash and the Zora clip end as
+-- PLAYER_MWA_ZORA_JUMPKICK_FINISH
+ACTION_MWA["zora-punch"] = 27
+for _, k in ipairs({ "zora-jumpslash", "zora-jumpslash-fwd", "zora-clip", "zora-clip-fwd" }) do ACTION_MWA[k] = 21 end
+local ZORA_FINS_IA = 8   -- PLAYER_IA_ZORA_BOOMERANG: the fins out (B pressed once as Zora)
+-- The two-handed spin attack (PLAYER_MWA_SPIN_ATTACK_2H), locked on to an enemy
+-- (no Deku stick spin: 1h and 2h only - the user)
+for _, k in ipairs({ "2h-spin-lock", "2h-spin-lock-fwd", "2h-spin-fwd", "2h-spin-lock-r", "2h-spin-lock-fwd-r" }) do
+	ACTION_MWA[k] = GAME == "OOT" and 25 or 31
+end
+ACTION_MWA["1h-spin-fwd"] = GAME == "OOT" and 24 or 30   -- PLAYER_MWA_SPIN_ATTACK_1H
+local LUNGE_FLAG = 0x40000000   -- OoT PLAYER_STATE2_30 / MM PLAYER_STATE2_40000000: a lunge to come (-ls: stored)
+local SPIN_CHARGE = 60          -- (spin-lock) emulated frames B is held at the end of the hold: the slash, then charging (under the great spin's 0.85)
 -- The Player item action (heldItemAction) each B item gives (PLAYER_IA_*), to check he's holding it
 local WEAPON_IA = GAME == "OOT" and { [0x3C] = 3, [0x3B] = 4, [0x3D] = 5, [0x55] = 5, [0x00] = 6 }
 	or { [0x4D] = 3, [0x4E] = 4, [0x4F] = 5, [0x10] = 6, [0x08] = 7 }
@@ -923,8 +1015,79 @@ local function actionWeapon(t)
 	return byForm and byForm[t.actionKey:match("^[^-]+")]
 end
 
+-- A Deku spin (clipfinder action.cpp dekuSpinFrames), once Link is standing at
+-- the start facing `facing`. Every game frame the stick is at full tilt toward
+-- the move's world yaw (through the camera: stickToward). The game frames are
+-- counted as clipfinder's frames are, from the first one Link moves on (the one
+-- the stick is first pushed on doesn't move him yet):
+--  deku-spin: the stick toward `facing` (no Z) for 3 frames (2, 4, 6), A on
+--   the 4th.
+--  deku-spin-backwalk: Z and the stick toward facing + 0x8000 (he backwalks)
+--   for 6 frames (1.5 .. 9), the 7th without Z (he turns round), A on the 8th.
+-- (The frame counts, not speedXZ: a wall he touches lowers the stick's speed,
+-- so 6 / 9 isn't always reached - clipfinder counts the same way.) Then the
+-- stick held through the spin (SPIN_FRAMES), or let go after t.stopAfter
+-- frames (the clip stops part way, Link out of bounds inside the wall).
+-- Statuses: "no run-up" (he never moved), "no spin" (no spinning after A: the
+-- shape yaw turns about 0x4000 a frame in one).
+local SPIN_FRAMES = 15   -- Player_Action_95's frames (B10[1] 0x30000 stepped by 19200, 18400, ...)
+local WALKIN_RUN = 9     -- a -walkin key's run in: up to the run speed (2, 4, 5.5 / 6), then 6 more frames (clipfinder WALKIN_HOLD)
+local function runSpin(t, r, facing, logLine)
+	local back = t.actionKey == "deku-spin-backwalk"
+	local yaw = back and ((facing + 0x8000 + 0x8000) % 0x10000 - 0x8000) or facing
+	local runFrames = back and 6 or 3
+	local aFrame = runFrames + (back and 2 or 1)   -- the frame A is pressed on
+	local lastFrame = aFrame + SPIN_FRAMES
+	local stopAfter = t.stopAfter
+	local gf = read_u32(K.play + K.gameplayFrames)
+	local prevPos = readVec(K.player + K.pos)
+	local frame = 0        -- clipfinder's frame number of the game frame just run (0: not moving yet)
+	local waited = 0
+	local spun, prevShape = false, nil
+	for _ = 1, (40 + lastFrame + 4) * 3 do
+		-- the inputs for frame `frame + 1`
+		local f = frame + 1
+		local held = {}
+		if back and f <= runFrames then held.Z = true end
+		if f == aFrame then held.A = true end
+		if next(held) then joypad.set(held, 1) end
+		local stickOn = f <= lastFrame and not (stopAfter and f > stopAfter)
+		stickToward(stickOn and yaw or nil)
+		emu.frameadvance()
+		local g = read_u32(K.play + K.gameplayFrames)
+		if g ~= gf then
+			gf = g
+			local pos = readVec(K.player + K.pos)
+			if frame > 0 or dist3(pos, prevPos) > 0.0001 then frame = frame + 1 else waited = waited + 1 end
+			prevPos = pos
+			local shape = mainmemory.read_u16_be(K.player + K.shapeRotY)
+			if frame > aFrame and prevShape then
+				local d = (shape - prevShape) % 0x10000
+				if d > 0x8000 then d = 0x10000 - d end
+				if d > 0x2000 then spun = true end
+			end
+			prevShape = shape
+			logLine(frame == 0 and "wait" or string.format("frame %d%s%s", frame, frame == aFrame and " (A)" or "",
+				stopAfter and frame == stopAfter and " (stop: stick let go)" or ""))
+			if frame == 0 and waited > 10 then
+				r.status = "no run-up"
+				r.log[#r.log + 1] = "Link never moved: the stick (camera?), or something in the way"
+				return false
+			end
+			if frame >= lastFrame + 1 then break end
+		end
+	end
+	releaseStick()
+	if not spun then
+		r.status = "no spin"
+		r.log[#r.log + 1] = "A didn't start a spin (the shape yaw didn't spin): Link on foot as Deku, no menus or text"
+		return false
+	end
+	return true
+end
+
 -- An action clip: the game does the lunge. Link is held at `prev` facing
--- `facing` (Z held: the camera goes behind him, so stick up is forward), then
+-- `facing` (Z held; the stick is aimed through the camera, see stickToward), then
 -- B with the stick forward for a game frame (a stab: Z still held). His
 -- meleeWeaponAnimation is set to -1 first: afterwards it says which attack he
 -- did, if any (and the combo counter starts over).
@@ -937,9 +1100,30 @@ end
 local function runActionTest(t, r)
 	local facing = t.facing
 	if facing >= 0x8000 then facing = facing - 0x10000 end
-	local jump = t.actionKey:find("jumpslash") ~= nil
-	local jumpFwd = jump and t.actionKey:find("%-fwd$") ~= nil
-	local stab = jump or t.actionKey:find("stab") ~= nil
+	-- (a -walkin key: the same attack after running into the corner, WALKIN_RUN)
+	local key = (t.actionKey:gsub("%-walkin$", ""))
+	local walkin = key ~= t.actionKey
+	-- (a -ls key: the jumpslash with a lunge stored, LUNGE_FLAG set just before it)
+	local lsKey = (key:gsub("%-ls$", ""))
+	local lungeStored = lsKey ~= key
+	key = lsKey
+	-- (the 2h spin attack locked on: Z held throughout - an enemy has to be there to
+	-- lock on to - B held at the end of the hold, slashing then charging, let go)
+	local spinLock = key:find("spin%-lock") ~= nil
+	-- (any sword spin attack: 1h- / 2h-spin-..., B held to charge, let go)
+	local spinAtk = key:find("^%w+%-spin%-") ~= nil and key:find("^deku") == nil
+	-- (MM Zora: the fins drawn with a B press first, no R - it's the barrier;
+	-- the Zora clip is the jumpslash with B held from before it to the end)
+	local zora = key:find("^zora%-") ~= nil
+	local zclip = key:find("^zora%-clip") ~= nil
+	local jump = key:find("jumpslash") ~= nil or zclip
+	local jumpFwd = jump and key:find("%-fwd$") ~= nil
+	local stab = jump or key:find("stab") ~= nil
+	local spin = key:find("^deku%-spin") ~= nil
+	local R = not zora
+	-- (Z held right up to the test: the stabs and the jumpslash; the backwalk spin
+	-- starts with it held)
+	local holdZ = stab or key == "deku-spin-backwalk" or spinLock
 	local function holdAt(z)
 		if z then joypad.set({ Z = true }, 1) end
 		writeVec(K.player + K.pos, t.prev)
@@ -960,15 +1144,26 @@ local function runActionTest(t, r)
 		-- (sticks to swing)
 		if t.actionKey:match("^stick") and mainmemory.read_u8(K.stickAmmo) == 0 then mainmemory.write_u8(K.stickAmmo, 10) end
 	end
+	-- (pressed again at 36 and 66 if he isn't holding it yet: a weapon in hand
+	-- that's no longer on a button - the savestate's sword, B just changed - is
+	-- put away first (MM Player_ProcessItemButtons), and a press during that is
+	-- lost: the 2h tests ended holding nothing)
+	local wantIA = zora and ZORA_FINS_IA or (weapon and WEAPON_IA[weapon])
 	for i = 1, ACTION_HOLD do
-		if weapon and i >= 6 and i < 9 then joypad.set({ B = true }, 1) end
-		holdAt(i > ACTION_HOLD / 2 and (stab or i <= ACTION_HOLD - 12))
+		-- (Zora: B draws the fins - and punches, over long before the test; the
+		-- Zora clip then holds B, aiming them, for the last 30 frames)
+		local press = (i >= 6 and i < 9) or (((i >= 36 and i < 39) or (i >= 66 and i < 69))
+			and wantIA and mainmemory.read_s8(K.player + K.heldItemAction) ~= wantIA)
+		if (weapon or zora) and press then joypad.set({ B = true }, 1) end
+		if zclip and i > ACTION_HOLD - 30 then joypad.set({ B = true }, 1) end
+		if spinAtk and i > ACTION_HOLD - SPIN_CHARGE then joypad.set({ B = true }, 1) end
+		holdAt(i > ACTION_HOLD / 2 and (holdZ or i <= ACTION_HOLD - 12))
 		emu.frameadvance()
 	end
 	-- standing there on his own until a game frame has just run
 	local frames = read_u32(K.play + K.gameplayFrames)
 	for _ = 1, 6 do
-		if stab then joypad.set({ Z = true }, 1) end
+		if holdZ or zclip or spinAtk then joypad.set({ Z = holdZ or nil, B = (zclip or spinAtk) or nil }, 1) end
 		emu.frameadvance()
 		if read_u32(K.play + K.gameplayFrames) ~= frames then break end
 	end
@@ -981,6 +1176,12 @@ local function runActionTest(t, r)
 	if weapon and WEAPON_IA[weapon] and held ~= WEAPON_IA[weapon] then
 		r.log = { string.format("Link is holding item action %d, not the B weapon's %d (B item 0x%02X): he didn't draw it - is B usable here?", held, WEAPON_IA[weapon], weapon) }
 		r.status = "no weapon"
+		r.after, r.final = readVec(K.player + K.pos), readVec(K.player + K.pos)
+		return r
+	end
+	if zora and held ~= ZORA_FINS_IA then
+		r.log = { string.format("Link is holding item action %d, not the fins (%d): B didn't draw them - Zora, on foot, B usable?", held, ZORA_FINS_IA) }
+		r.status = "no fins"
 		r.after, r.final = readVec(K.player + K.pos), readVec(K.player + K.pos)
 		return r
 	end
@@ -997,16 +1198,74 @@ local function runActionTest(t, r)
 			polyName(read_u32(K.player + K.wallPoly), mainmemory.read_u8(K.player + K.wallBgId)),
 			polyName(read_u32(K.player + K.floorPoly), mainmemory.read_u8(K.player + K.wallBgId + 1)), read_u16(K.player + K.bgCheckFlags))
 	end
-	logLine(string.format("%s (held item action %d)", jump and "Z + A" or "B", held))
+	if spin then
+		logLine("start")
+		local ok = runSpin(t, r, facing, logLine)
+		r.after = readVec(K.player + K.pos)
+		for i = 1, SETTLE_FRAMES do
+			emu.frameadvance()
+			if i % 3 == 0 and i <= 18 then logLine("settle") end
+		end
+		r.final = readVec(K.player + K.pos)
+		if RECORD then for _ = 1, RECORD_BUFFER do emu.frameadvance() end end
+		if not ok then return r end
+		if dist3(r.start, t.prev) > 1 then
+			r.status = "setup"
+			table.insert(r.log, 1, "start (should be prev) " .. fmt(r.start))
+			return r
+		end
+		r.status = judge(t, r.after, r.final)
+		return r
+	end
+	if walkin then
+		-- Run into the corner: the stick at full tilt along the facing (Z held too
+		-- for a stab or the jumpslash) for WALKIN_RUN game frames, counted as
+		-- clipfinder does from the first one he moves on; the B / A press then
+		-- comes on the next (clipfinder's walkInVariant: it still moves him at the
+		-- run speed)
+		local gf, prevPos, frame, waited = read_u32(K.play + K.gameplayFrames), readVec(K.player + K.pos), 0, 0
+		while frame < WALKIN_RUN do
+			if stab or zclip then joypad.set({ Z = stab or nil, B = zclip or nil }, 1) end
+			stickToward(facing)
+			emu.frameadvance()
+			local g = read_u32(K.play + K.gameplayFrames)
+			if g ~= gf then
+				gf = g
+				local pos = readVec(K.player + K.pos)
+				if frame > 0 or dist3(pos, prevPos) > 0.0001 then frame = frame + 1 else waited = waited + 1 end
+				prevPos = pos
+				logLine(frame == 0 and "wait" or string.format("run in %d", frame))
+				-- (gf+ in the log, and the jumpslash's frames in the air, count from the press)
+				if frame == WALKIN_RUN then frames0 = g end
+				if frame == 0 and waited > 10 then
+					releaseStick()
+					r.status = "no run-up"
+					r.log[#r.log + 1] = "Link never moved: the stick (camera?), or something in the way"
+					r.after, r.final = readVec(K.player + K.pos), readVec(K.player + K.pos)
+					return r
+				end
+			end
+		end
+	end
+	if lungeStored then
+		-- the lunge flag, as an attack whose lunge never fired leaves it
+		local f2 = read_u32(K.player + K.stateFlags2)
+		if math.floor(f2 / LUNGE_FLAG) % 2 == 0 then mainmemory.write_u32_be(K.player + K.stateFlags2, f2 + LUNGE_FLAG) end
+	end
+	logLine(string.format("%s (held item action %d%s)", spinAtk and "B let go" or jump and "Z + A" or "B", held, lungeStored and ", lunge stored" or ""))
 	-- B and the stick forward for a game frame (3 emulated frames); the
-	-- jumpslash: A and Z, the stick left alone
+	-- jumpslash: A and Z, the stick left alone; the spin: B let go (Z held), the
+	-- stick forward for -fwd (its lunge) or left alone
 	for _ = 1, 3 do
-		if jump then
-			joypad.set({ A = true, Z = true, R = true }, 1)
-			joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = jumpFwd and STICK_FORWARD or 0 }, 1)
+		if spinAtk then
+			joypad.set({ Z = spinLock or nil }, 1)  -- (Z only locked on: near an enemy it would lock on)
+			stickToward(key:find("%-fwd") and facing or nil)
+		elseif jump then
+			joypad.set({ A = true, Z = true, R = R or nil, B = zclip or nil }, 1)
+			stickToward(jumpFwd and facing or nil)
 		else
 			joypad.set(stab and { B = true, Z = true } or { B = true }, 1)
-			joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = STICK_FORWARD }, 1)
+			stickToward(facing)
 		end
 		emu.frameadvance()
 	end
@@ -1015,25 +1274,43 @@ local function runActionTest(t, r)
 	-- where it leaves him (its frames, and one more)
 	local n = (t.actionFrames or 3) + 2
 	local gf = read_u32(K.play + K.gameplayFrames)
+	local lockedOn = false
+	-- (-r, the spin locked on with R held: Z has to be held through the frame the
+	-- attack switches to its end animation - that's when the locked-on one is
+	-- picked - and let go the next, with R: the shield's full-body action
+	-- (Player_ActionHandler_11) only runs with no lock-on, ending the root motion;
+	-- still locked on, R only raises the shield on the upper body and the step
+	-- back plays out. The switch is spotted as actionFunc leaving the attack's.)
+	local spinR = spinLock and key:find("%-r$") ~= nil
+	local spinAction, switched = nil, false
 	for _ = 1, n * 3 + 6 do
-		if stab and not jump then joypad.set({ Z = true }, 1) end
+		if spinR and switched then joypad.set({ R = true }, 1)
+		elseif (stab and not jump) or spinLock then joypad.set({ Z = true }, 1) end
+		if spinLock and not switched and read_u32(K.player + K.focusActor) ~= 0 then lockedOn = true end
 		if jump then
 			-- (-fwd: Z and the stick forward until he lands, then shield alone)
 			local inAir = jumpFwd and read_u32(K.play + K.gameplayFrames) - frames0 < (t.airFrames or 0)
-			joypad.set(inAir and { R = true, Z = true } or { R = true }, 1)
-			joypad.setanalog({ ["X Axis"] = 0, ["Y Axis"] = inAir and STICK_FORWARD or 0 }, 1)
+			joypad.set({ R = R or nil, Z = inAir or nil, B = zclip or nil }, 1)
+			stickToward(inAir and facing or nil)
 		end
 		emu.frameadvance()
 		local g = read_u32(K.play + K.gameplayFrames)
 		if g ~= gf then
 			gf = g
-			logLine("lunge")
+			if spinR then
+				local af = read_u32(K.player + K.actionFunc)
+				if not spinAction then spinAction = af
+				elseif not switched and af ~= spinAction then switched = true end
+			end
+			logLine(spinR and switched and "lunge (Z let go, R)" or "lunge")
 		end
 		if g - frames0 >= n then break end
 	end
 	r.after = readVec(K.player + K.pos)
 	local mwa = mainmemory.read_s8(K.player + K.meleeWeaponAnimation)
 	for i = 1, SETTLE_FRAMES do
+		if zclip then joypad.set({ B = true }, 1) end  -- (letting go would throw the fins)
+		if spinR then joypad.set({ R = true }, 1) end  -- (the shield held: no step back)
 		emu.frameadvance()
 		if i % 3 == 0 and i <= 18 then logLine("settle") end
 	end
@@ -1045,11 +1322,16 @@ local function runActionTest(t, r)
 			.. (jump and " (and a room that isn't indoors: there Z + A rolls)" or "")
 		return r
 	end
-	if mwa ~= ACTION_MWA[t.actionKey] then
+	if mwa ~= ACTION_MWA[key] then
 		r.status = "wrong attack"
-		r.log[#r.log + 1] = string.format("the game did attack %d, the test is %s (%d): %s", mwa, t.actionKey, ACTION_MWA[t.actionKey],
+		r.log[#r.log + 1] = string.format("the game did attack %d, the test is %s (%d): %s", mwa, t.actionKey, ACTION_MWA[key],
 			jump and "the jumpslash didn't land (attack 17, its start: still in the air after its frames), or wasn't a jumpslash"
-			or "a 1h / 2h weapon mismatch, or the stick wasn't forward (STICK_FORWARD, the camera) - or for a stab, Z-targeting")
+			or "a 1h / 2h weapon mismatch, or the stick wasn't read as forward (stickToward, the camera) - or for a stab, Z-targeting")
+		return r
+	end
+	if spinLock and not lockedOn then
+		r.status = "no lock-on"
+		r.log[#r.log + 1] = "Z didn't lock on to anything during the spin (Player.focusActor stayed 0): the hostile lock-on end needs an enemy in range"
 		return r
 	end
 	if dist3(r.start, t.prev) > 1 then
@@ -1375,12 +1657,30 @@ end
 local function setupStr(r)
 	local t = r.test
 	if t.action then
-		if t.actionKey:find("jumpslash") then
-			return string.format("start %s  facing 0x%04X  %s (Z + A, %s, R held from then on)", fmt(r.start or t.prev), t.facing, t.action,
-				t.actionKey:find("%-fwd$") and string.format("Z and the stick forward for %d frames in the air", t.airFrames or 0) or "stick left alone")
+		local key = (t.actionKey:gsub("%-walkin$", ""))
+		local run = key ~= t.actionKey and string.format("run in %d frames, then ", WALKIN_RUN) or ""
+		local ls = key:find("%-ls$") ~= nil
+		key = (key:gsub("%-ls$", ""))
+		if ls then run = run .. "lunge stored, " end
+		if key:find("^%w+%-spin%-") and not key:find("^deku") then
+			return string.format("start %s  facing 0x%04X  %s (%sB held: slash then charge, B let go%s)", fmt(r.start or t.prev), t.facing, t.action,
+				key:find("spin%-lock") and "Z locked on to an enemy, " or "", key:find("%-fwd") and " with the stick forward" or "")
 		end
-		return string.format("start %s  facing 0x%04X  %s (B, stick forward%s)", fmt(r.start or t.prev), t.facing, t.action,
-			t.actionKey:find("stab") and ", Z held" or "")
+		if key:find("^deku%-spin") then
+			return string.format("start %s  facing 0x%04X  %s%s", fmt(r.start or t.prev), t.facing, t.action,
+				t.stopAfter and string.format(" (stick let go after frame %d)", t.stopAfter) or "")
+		end
+		if key:find("^zora%-clip") or key:find("^zora%-jumpslash") then
+			return string.format("start %s  facing 0x%04X  %s (%sfins out, %sZ + A, %s)", fmt(r.start or t.prev), t.facing, t.action, run,
+				key:find("^zora%-clip") and "B held (aiming) from before to the end, " or "",
+				key:find("%-fwd$") and string.format("Z and the stick forward for %d frames in the air", t.airFrames or 0) or "stick left alone")
+		end
+		if key:find("jumpslash") then
+			return string.format("start %s  facing 0x%04X  %s (%sZ + A, %s, R held from then on)", fmt(r.start or t.prev), t.facing, t.action, run,
+				key:find("%-fwd$") and string.format("Z and the stick forward for %d frames in the air", t.airFrames or 0) or "stick left alone")
+		end
+		return string.format("start %s  facing 0x%04X  %s (%sB, stick forward%s)", fmt(r.start or t.prev), t.facing, t.action, run,
+			key:find("stab") and ", Z held" or "")
 	end
 	local yaw, speed = r.yaw or t.yaw, r.speed or t.speed
 	if not yaw then

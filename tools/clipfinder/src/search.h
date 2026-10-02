@@ -16,7 +16,9 @@ struct Clip {
 	bool cross = false;
 	bool hold = false;    // only with the stick held one more frame (ClipResult::hold)
 	bool inBounds = false; // ends in bounds (past a dynapoly, or somewhere he couldn't walk to: Model::endCounts)
+	double walkDist = 0;   // (inBounds) how far Link walks there from the start, -1 he can't: a shortcut otherwise
 	int drop = 0;         // falling: posNext this far below the floor (0 walking)
+	bool aerial = false;  // --aerial: prev is in the air where he couldn't stand still (aerialSpot)
 	int pusher = -1, crossed = -1;
 	V3 from, prev, next, res, end;
 	bool hasNext = false, hasFloorY = false, endNoFloor = false;
@@ -36,6 +38,7 @@ struct Clip {
 	// each frame's move, as a speed (move / 1.5) and angle from the facing (the JSON's actionFrames)
 	vector<std::pair<double, int>> frameMoves;
 	int airFrames = 0;    // a jumpslash: how many of the frames are in the air (the last one lands)
+	int stopAfter = 0;    // an action: stop after this many of its frames, Link out of bounds in the wall (0: its whole length)
 	// --min-speed: the slowest move from a standable start that does it
 	// (reachability below); reachDone and no reach = none found
 	bool reachDone = false, hasReach = false;
