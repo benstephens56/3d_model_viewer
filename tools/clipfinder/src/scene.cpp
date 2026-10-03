@@ -12,7 +12,72 @@ static uint32_t be32(const vector<uint8_t>& b, size_t o) {
 static uint16_t be16(const vector<uint8_t>& b, size_t o) { return (uint16_t)(b.at(o) << 8 | b.at(o + 1)); }
 static int16_t bes16(const vector<uint8_t>& b, size_t o) { return (int16_t)be16(b, o); }
 
-bool parseScene(const vector<uint8_t>& buf, const string& game, ColHeader& ch, vector<Tri>& tris) {
+static uint32_t le32(const vector<uint8_t>& b, size_t o) {
+	return (uint32_t)b.at(o) | (uint32_t)b.at(o + 1) << 8 | (uint32_t)b.at(o + 2) << 16 | (uint32_t)b.at(o + 3) << 24;
+}
+static uint16_t le16(const vector<uint8_t>& b, size_t o) { return (uint16_t)(b.at(o) | b.at(o + 1) << 8); }
+static int16_t les16(const vector<uint8_t>& b, size_t o) { return (int16_t)le16(b, o); }
+static float lef32(const vector<uint8_t>& b, size_t o) {
+	uint32_t u = le32(b, o);
+	float f;
+	memcpy(&f, &u, 4);
+	return f;
+}
+
+// OoT3D / MM3D .zsi (parse_model.js, game OOT3D / MM3D): little-endian, the
+// commands from 0x10 and pointers relative to it, 0x14-byte polys with the
+// normal at 0xA (OoT3D) / 0x8 (MM3D) and an f32 plane distance at 0x10.
+static bool parseScene3DS(const vector<uint8_t>& buf, const string& game, const string& mapName, ColHeader& ch, vector<Tri>& tris) {
+	const size_t off = 0x10;
+	const bool mm = game == "MM3D";
+	size_t addr = mapName == "Termina Field (Credits Cutscene 2)" ? 0x60 : 0x10;
+	int64_t colAddr = -1;
+	while (addr + 8 <= buf.size()) {
+		int cmd = buf[addr];
+		if (cmd == 0x14) break;
+		if (cmd == 0x19 && !mm) ch.camType = buf[addr + 1];
+		else if (cmd == 0x03) { colAddr = (int64_t)le32(buf, addr + 4) + off; break; }
+		addr += 8;
+	}
+	if (colAddr < 0) return false;
+	const size_t h = (size_t)colAddr;
+	const size_t b0 = mm ? 2 : 0;
+	for (int i = 0; i < 3; i++) { ch.minB[i] = les16(buf, h + b0 + i * 2); ch.maxB[i] = les16(buf, h + b0 + 6 + i * 2); }
+	const int numVtx = le16(buf, h + (mm ? 0x0E : 0x0C));
+	ch.numPolygons = le16(buf, h + (mm ? 0x10 : 0x0E));
+	const int numSurf = le16(buf, h + (mm ? 0x12 : 0x10));
+	const size_t vtxList = le32(buf, h + 0x18) + off;
+	const size_t polyList = le32(buf, h + 0x1C) + off;
+	const size_t surfList = le32(buf, h + 0x20) + off;
+	vector<std::array<int, 3>> verts(numVtx);
+	for (int i = 0; i < numVtx; i++)
+		for (int k = 0; k < 3; k++) verts[i][k] = les16(buf, vtxList + i * 6 + k * 2);
+	const size_t nOff = mm ? 0x8 : 0xA;
+	for (int i = 0; i < ch.numPolygons; i++) {
+		size_t p = polyList + (size_t)i * 0x14;
+		if (p + 0x14 > buf.size()) break;
+		uint16_t ta = le16(buf, p + 2), tb = le16(buf, p + 4), tc = le16(buf, p + 6);
+		int xpFlags = ta >> 13;
+		if (xpFlags & 2) continue; // intangible: not in the collision model
+		int vi[3] = { ta & 0x1FFF, tb & 0x1FFF, tc & 0x1FFF };
+		Tri t;
+		t.id = i;
+		for (int k = 0; k < 3; k++)
+			for (int j = 0; j < 3; j++) t.v[k][j] = verts.at(vi[k])[j];
+		for (int k = 0; k < 3; k++) t.n[k] = les16(buf, p + nOff + k * 2);
+		t.d = lef32(buf, p + 0x10);
+		const uint16_t type = le16(buf, p);
+		if (type < numSurf && surfList + (size_t)type * 8 + 8 <= buf.size()) {
+			t.surf0 = le32(buf, surfList + (size_t)type * 8);
+			t.surf1 = le32(buf, surfList + (size_t)type * 8 + 4);
+		}
+		tris.push_back(t);
+	}
+	return true;
+}
+
+bool parseScene(const vector<uint8_t>& buf, const string& game, const string& mapName, ColHeader& ch, vector<Tri>& tris) {
+	if (game == "OOT3D" || game == "MM3D") return parseScene3DS(buf, game, mapName, ch, tris);
 	const int64_t off = -0x02000000;
 	size_t addr = 0;
 	int64_t colAddr = -1;
@@ -80,10 +145,13 @@ static void setDim(double mn, int amount, double mx, double& newMax, double& len
 void initColCtx(ColCtx& c, const string& game, const string& mapName, const ColHeader& ch) {
 	static const std::map<string, std::array<int, 3>> ootList = { { "Shadow Temple", { 23, 7, 14 } }, { "Forest Temple", { 38, 1, 38 } } };
 	static const std::map<string, std::array<int, 3>> mmList = { { "Termina Field", { 36, 1, 36 } }, { "Great Bay Coast", { 40, 1, 40 } }, { "Zora Cape", { 40, 1, 40 } } };
+	const bool oot = game == "OOT" || game == "OOT3D", mm = game == "MM" || game == "MM3D";
 	std::array<int, 3> a = { 16, 4, 16 };
-	if (game == "OOT" && (ch.camType == 0x10 || ch.camType == 0x20 || ch.camType == 0x30 || ch.camType == 0x40)) a = { 2, 2, 2 };
-	else if (game == "OOT" && ootList.count(mapName)) a = ootList.at(mapName);
-	else if (game == "MM" && mmList.count(mapName)) a = mmList.at(mapName);
+	if (oot && (ch.camType == 0x10 || ch.camType == 0x20 || ch.camType == 0x30 || ch.camType == 0x40)) a = { 2, 2, 2 };
+	else if (oot && ootList.count(mapName)) a = ootList.at(mapName);
+	else if (mm && mmList.count(mapName)) a = mmList.at(mapName);
+	// OoT3D's overworld (Spot) scenes: 32 x 8 x 32 (subdivisions.js spotScenes)
+	else if (game == "OOT3D" && mapName.rfind("Spot ", 0) == 0 && mapName != "Spot 99 - Hyrule Field (Title)") a = { 32, 8, 32 };
 	for (int i = 0; i < 3; i++) {
 		c.amt[i] = a[i];
 		c.minB[i] = F(ch.minB[i]);

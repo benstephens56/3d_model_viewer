@@ -1,4 +1,11 @@
--- Wall push clip tester (BizHawk, N64 OoT US 1.0 / MM US, Mupen64Plus core)
+-- Wall push clip tester (BizHawk, N64 OoT US 1.0 / MM US, Mupen64Plus core;
+-- or OoT3D US Rev 1 / MM3D US, decrypted, 3DS core - see below)
+--
+-- OoT3D / MM3D (clipfinder --game OOT3D / MM3D results): "move" mode only (no
+-- hooks), 30 fps (2 emulated frames a game frame, moves velocity x 1.0), no
+-- action tests. MM3D's form is read from the save context (K.playerForm). At
+-- the start the script checks the frame counter and Player.yaw addresses and
+-- stops with an error if they don't look right (see K).
 --
 -- Tries, in the game, every clip point in a results JSON - from
 -- tools/clipfinder, or the 3d_model_viewer's "Export JSON" of imported
@@ -44,7 +51,7 @@
 -- wall_clip_tests.json next to this script. Its clips are turned into tests,
 -- with the walls read from RAM (load that map first). (A .lua test file from
 -- an older viewer still works too.)
-local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\MM_Deku_Palace_Human_selected.json]] -- \results\
+local TESTS_FILE = [[C:\Users\X\Documents\GitHub\3d_model_viewer\tools\clipfinder\results\jabu slope.json]] -- \results\
 local RESULTS_FILE = nil          -- nil: wall_clip_results.txt next to the tests
 local MAX_PER_GROUP = 12          -- points tried per wall pair (spread evenly); 0 = all
 local SKIP_FALLING = false        -- true: leave out the falling clips (drop > 0, from --type falling scans)
@@ -70,7 +77,7 @@ local FAST = true                 -- skip drawing while testing (client.invisibl
 -- facing the way he'll go, and Z is tapped - Z-targeting nothing swings the
 -- camera behind him), and pauses RECORD_BUFFER emulated frames (60 a second)
 -- before and after each one. Off by default.
-local RECORD = false
+local RECORD = true
 local RECORD_BUFFER = 30
 local RECORD_ONE_PER_PAIR = true  -- recording: once a wall pair's test works, skip the rest of that pair's
 if RECORD then FAST = false end
@@ -137,18 +144,95 @@ if hash == 'AD69C91157F6705E8AB06C79FE08AAD47BB57BA7' then
 	GAME = "OOT" -- OoT US 1.0
 elseif hash == 'D6133ACE5AFAA0882CF214CF88DABA39E266C078' then
 	GAME = "MM" -- MM US
+elseif emu.getsystemid() == "3DS" then
+	-- (the 3DS core's hash: MM3D US's is known, anything else is taken as OoT3D US Rev 1)
+	GAME = hash == '8AEB0679FC5F77D35B8A58954CE98236' and "MM3D" or "OOT3D"
 else
-	error("wall_clip_tester: needs OoT US 1.0 or MM US (rom hash " .. hash .. ")")
+	error("wall_clip_tester: needs OoT US 1.0, MM US, OoT3D or MM3D (rom hash " .. hash .. ")")
 end
+-- OoT3D / MM3D (BizHawk's 3DS core, decrypted US roms): FCRAM is mainmemory,
+-- little-endian, and the game runs at 30 fps - 2 emulated frames a game frame,
+-- and Actor_UpdatePos moves velocity x 1.0 (not x 1.5), so walking posNext is
+-- 5 below the floor (clipfinder --game OOT3D / MM3D). Only "move" mode: there
+-- are no function addresses for the hooks. See K below for the addresses.
+local IS_3DS = GAME == "OOT3D" or GAME == "MM3D"
+local EMU_PER_GAME = IS_3DS and 2 or 3   -- emulated frames per game frame
+local SPEED_RATE = IS_3DS and 1.0 or 1.5 -- Actor_UpdatePos: velocity x this a frame
+local GROUND_DROP = 5 * SPEED_RATE       -- walking: posNext below the floor
+local LINE_DY_SCALE = IS_3DS and 1.5 or 1.0 -- the wall check's feet-level line test: checkHeight + dy x this < 5 (clipfinder feetLine)
+if IS_3DS then SETTLE_FRAMES = math.floor(SETTLE_FRAMES * 2 / 3 + 0.5) end  -- (the same game frames)
 
-local function read_u16(addr) return mainmemory.read_u16_be(addr) end
-local function read_s16(addr) return mainmemory.read_s16_be(addr) end
-local function read_u32(addr) return mainmemory.read_u32_be(addr) end
-local function readfloat(addr) return mainmemory.readfloat(addr, true) end
-local function writefloat(addr, val) mainmemory.writefloat(addr, val, true) end
+local BE = not IS_3DS
+local function read_u16(addr) return BE and mainmemory.read_u16_be(addr) or mainmemory.read_u16_le(addr) end
+local function read_s16(addr) return BE and mainmemory.read_s16_be(addr) or mainmemory.read_s16_le(addr) end
+local function write_s16(addr, v) if BE then mainmemory.write_s16_be(addr, v) else mainmemory.write_s16_le(addr, v) end end
+local function read_u32(addr) return BE and mainmemory.read_u32_be(addr) or mainmemory.read_u32_le(addr) end
+local function readfloat(addr) return mainmemory.readfloat(addr, BE) end
+local function writefloat(addr, val) mainmemory.writefloat(addr, val, BE) end
 
 local K = {}
-if GAME == "OOT" then
+-- The collision header (the scene's static polys) and pointers into RAM
+K.addrOffset = 0x80000000               -- a pointer minus this is a mainmemory address
+K.hdrNumPolys, K.hdrVtxList, K.hdrPolyList = 0x14, 0x10, 0x18
+K.polySize, K.polyNormal = 0x10, 0x8    -- CollisionPoly: size, normal (s16 x 3); dist s16 after it, f32 at +0x10 on 3DS
+if GAME == "OOT3D" then
+	-- (OoT3D US Rev 1: the oot3d decomp (include/z3Dactor.hpp, z3D.hpp), the
+	-- watch file's addresses and collision_dump.lua's header layout)
+	K.addrOffset = 0x2900000
+	K.play = 0x05E1E840                 -- PlayState (0x0871E840)
+	K.gameplayFrames = 0xF8             -- GameState.frames (one a game frame)
+	K.colCtx = K.play + 0xA98
+	K.player = 0x06FF4010               -- Player actor
+	K.home = 0x08                       -- Actor.home.pos (prevPos comes from it each frame)
+	K.pos = 0x28                        -- Actor.world.pos
+	K.rotY = 0x36                       -- Actor.world.rot.y
+	K.velocity = 0x60                   -- Actor.velocity
+	K.actorSpeed = 0x6C                 -- Actor.speedXZ
+	K.wallPoly, K.floorPoly, K.wallBgId, K.bgCheckFlags = 0x78, 0x7C, 0x80, 0x90
+	K.shapeRotY = 0xBE                  -- Actor.shape.rot.y (shape at 0xBC)
+	K.prevPos = 0x108                   -- Actor.prevPos
+	K.stateFlags2 = 0x1714
+	K.crawling = 0x40000                -- PLAYER_STATE2_CRAWLING (as on the N64)
+	K.speedXZ = 0x221C                  -- Player.xzSpeed ("Linear Velocity")
+	-- Player.yaw: the decomp's unk_2220. On the N64 it's right after speedXZ,
+	-- with meleeWeaponState 0xB past speedXZ - here isg is at 0x2227, 0xB past
+	-- too, so the same layout (checked at the start: see checkYaw)
+	K.yaw = 0x2220
+	K.linkAge = 0x077C695C              -- gSaveContext.linkAge (s32, 0 adult, 1 child)
+	K.hdrNumPolys, K.hdrVtxList, K.hdrPolyList = 0x0E, 0x18, 0x1C
+	K.polySize, K.polyNormal = 0x14, 0xA
+elseif GAME == "MM3D" then
+	-- (MM3D US: the watch file / levitate.lua / collision_dump.lua; no decomp.
+	-- Link's actor and the globalContext move: read through their pointers.
+	-- The actor header matches N64 MM where the watch file shows it (world.pos
+	-- 0x24, velocity 0x64, wallPoly 0x7C), so world.rot.y and Actor.speedXZ
+	-- are taken from N64 MM; Player.yaw after speedXZ as in OoT3D and on the
+	-- N64 (checked at the start: see checkYaw))
+	K.addrOffset = 0x24EE000
+	K.play = mainmemory.read_u32_le(0x0754D890) - K.addrOffset  -- globalContext ("Global Context Ptr")
+	-- (a counter that goes up one a game frame: found by the tester's search,
+	-- Laundry Pool 2026-10-02 - play + 0xC4BC / 0xC4C0 count too. OoT3D's
+	-- GameState.frames offset, 0xF8, doesn't move in MM3D)
+	K.gameplayFrames = 0x138
+	K.colCtx = K.play + 0xAB0
+	K.player = mainmemory.read_u32_le(0x0752FD6C)                -- Player actor ("Player Ptr")
+	if K.player > K.addrOffset then K.player = K.player - K.addrOffset end
+	K.home = 0x08
+	K.pos = 0x24
+	K.rotY = 0x32
+	K.velocity = 0x64
+	K.actorSpeed = 0x70
+	K.wallPoly, K.floorPoly = 0x7C, 0x80
+	K.shapeRotY = 0xC2                  -- "Angle"
+	K.speedXZ = 0x11E30                 -- "Linear Velocity"
+	K.yaw = K.speedXZ + 4
+	-- save.playerForm (s16, save context 0x0765B1B0 + 0x4E; the user's find),
+	-- taken to count as N64 MM's PlayerTransformation: 0 Fierce Deity, 1
+	-- Goron, 2 Zora, 3 Deku, 4 Human
+	K.playerForm3DS = 0x0765B1FE
+	K.hdrNumPolys, K.hdrVtxList, K.hdrPolyList = 0x10, 0x18, 0x1C
+	K.polySize, K.polyNormal = 0x14, 0x8
+elseif GAME == "OOT" then
 	K.play = 0x1C84A0                   -- globalContext
 	K.gameplayFrames = 0x11DE4
 	K.colCtx = 0x1C84A0 + 0x7C0         -- globalContext + 0x7C0
@@ -203,6 +287,7 @@ else
 	K.stickAmmo = 0x1EF670 + 0xA8       -- save.saveInfo.inventory.ammo[SLOT_DEKU_STICK]
 	K.playerForm = 0x1EF670 + 0x20      -- save.playerForm (checked against Player.transformation)
 end
+if not IS_3DS then
 -- Player_UpdateCommon (both games) sets prevPos from home.pos at the start of
 -- the frame (and home.pos = world.pos at its end), so home.pos is Link's real
 -- "where he was last frame"
@@ -220,6 +305,7 @@ if GAME == "OOT" then
 else
 	K.wallPoly, K.floorPoly, K.wallBgId, K.bgCheckFlags = 0x7C, 0x80, 0x84, 0x90
 end
+end
 
 local function readVec(addr)
 	return { readfloat(addr), readfloat(addr + 4), readfloat(addr + 8) }
@@ -231,12 +317,12 @@ end
 -- Static collision header of the loaded scene: polygon count and a reader for
 -- one polygon's vertices, to check the tests belong to this map.
 local function staticCollision()
-	local header = read_u32(K.colCtx) - 0x80000000
-	local numPolygons = read_u16(header + 0x14)
-	local vtxList = read_u32(header + 0x10) - 0x80000000
-	local polyList = read_u32(header + 0x18) - 0x80000000
+	local header = read_u32(K.colCtx) - K.addrOffset
+	local numPolygons = read_u16(header + K.hdrNumPolys)
+	local vtxList = read_u32(header + K.hdrVtxList) - K.addrOffset
+	local polyList = read_u32(header + K.hdrPolyList) - K.addrOffset
 	local function polyVerts(id)
-		local poly = polyList + id * 0x10
+		local poly = polyList + id * K.polySize
 		local out = {}
 		for i, off in ipairs({ 0x2, 0x4, 0x6 }) do
 			local vi = read_u16(poly + off) % 0x2000
@@ -244,10 +330,13 @@ local function staticCollision()
 		end
 		return out
 	end
-	-- (CollisionPoly normal at +0x8, dist at +0xE: the export's n and d)
+	-- (CollisionPoly normal at +0x8, dist at +0xE: the export's n and d; 3DS:
+	-- the normal at K.polyNormal, dist an f32 at +0x10)
 	local function polyPlane(id)
-		local poly = polyList + id * 0x10
-		return { read_s16(poly + 0x8), read_s16(poly + 0xA), read_s16(poly + 0xC) }, read_s16(poly + 0xE)
+		local poly = polyList + id * K.polySize
+		local n = K.polyNormal
+		return { read_s16(poly + n), read_s16(poly + n + 2), read_s16(poly + n + 4) },
+			IS_3DS and readfloat(poly + 0x10) or read_s16(poly + 0xE)
 	end
 	return numPolygons, polyVerts, polyPlane
 end
@@ -425,7 +514,7 @@ local function testsFromJson(path)
 									group = nGroups, form = data.forms and c.form or nil, kind = "csv 0x" .. yawName, type = "cell",
 									pusher = c.pusher, crossed = c.crossed, prev = { x, y, z },
 									-- (roughly: move mode lets the game work out the move itself)
-									next = { x + speed * math.sin(ang) * 1.5, y - 7.5, z + speed * math.cos(ang) * 1.5 },
+									next = { x + speed * math.sin(ang) * SPEED_RATE, y - GROUND_DROP, z + speed * math.cos(ang) * SPEED_RATE },
 									yaw = c.yaw, speed = speed, csv = g, zi = zi, xi = xi, expectClip = expect[zi][xi],
 								}
 								T.tests[#T.tests + 1] = t
@@ -499,9 +588,9 @@ local numPolygons, polyVerts, polyPlane = staticCollision()
 -- bgId, not the scan's dynapoly ids) or "-" (none).
 local function polyName(ptr, bgId)
 	if ptr == 0 then return "-" end
-	if bgId ~= 50 then return string.format("dyna(bg %d)", bgId) end  -- BGCHECK_SCENE
-	local polyList = read_u32(read_u32(K.colCtx) - 0x80000000 + 0x18)
-	local id = (ptr - polyList) / 0x10
+	if bgId and bgId ~= 50 then return string.format("dyna(bg %d)", bgId) end  -- BGCHECK_SCENE
+	local polyList = read_u32(read_u32(K.colCtx) - K.addrOffset + K.hdrPolyList)
+	local id = (ptr - polyList) / K.polySize
 	if id >= 0 and id < numPolygons and id == math.floor(id) then return "TRI " .. id end
 	return string.format("%08X", ptr)
 end
@@ -565,9 +654,10 @@ local function findRegister(candidates)
 	end
 	return nil
 end
-local a1Reg = findRegister({ "a1_lo", "a1", "A1", "r5_lo", "r5", "R5", "gpr5", "GPR5" })
-local pcReg = findRegister({ "pc", "PC", "pc_lo", "PC_lo" })
-do
+-- (3DS: no hooks, so no registers)
+local a1Reg = not IS_3DS and findRegister({ "a1_lo", "a1", "A1", "r5_lo", "r5", "R5", "gpr5", "GPR5" }) or nil
+local pcReg = not IS_3DS and findRegister({ "pc", "PC", "pc_lo", "PC_lo" }) or nil
+if not IS_3DS then
 	local names = {}
 	for k in pairs(emu.getregisters()) do names[#names + 1] = tostring(k) end
 	table.sort(names)
@@ -722,12 +812,19 @@ local function fmt(v) return v and string.format("%.9g, %.9g, %.9g", v[1], v[2],
 
 -- The form Link is in now.
 local function currentForm()
-	if GAME == "OOT" then
+	local names = { [0] = "FierceDeity", "Goron", "Zora", "Deku", "Human" }
+	if GAME == "MM3D" then
+		local v = read_s16(K.playerForm3DS)
+		if not names[v] then
+			error(string.format("MM3D: save.playerForm (0x%08X) reads %d, not a form 0-4: set FORM", K.playerForm3DS, v))
+		end
+		return names[v]
+	end
+	if GAME == "OOT" or GAME == "OOT3D" then
 		-- (arithmetic, not `&`: BizHawk's Lua doesn't parse the bitwise operators)
 		if math.floor(read_u32(K.player + K.stateFlags2) / K.crawling) % 2 == 1 then return "Crawlspace" end
 		return read_u32(K.linkAge) == 0 and "Adult" or "Child"
 	end
-	local names = { [0] = "FierceDeity", "Goron", "Zora", "Deku", "Human" }
 	return names[mainmemory.read_u8(K.player + K.transformation)] or "?"
 end
 
@@ -760,6 +857,10 @@ if T.forms then
 			FORM and ", from FORM" or " in RAM", table.concat(names, ", ")))
 	end
 	print(string.format("Form: %s (%d of %d tests; the file has %s)", runForm, #tests, #T.tests, table.concat(names, ", ")))
+	if GAME == "MM3D" and not FORM then
+		print(string.format("  (MM3D: the form is save.playerForm at 0x%08X = %d - if %s is wrong, set FORM)",
+			K.playerForm3DS, read_s16(K.playerForm3DS), runForm))
+	end
 end
 
 -- X_RANGE / Y_RANGE / Z_RANGE: only the clip points in that area
@@ -804,10 +905,10 @@ end
 do
 	local kept = {}
 	for _, t in ipairs(tests) do
-		if t.kind == "ground" or not (t.type == "cross" and checkHeight + (t.next[2] - t.prev[2]) < 5) then kept[#kept + 1] = t end
+		if t.kind == "ground" or not (t.type == "cross" and checkHeight + (t.next[2] - t.prev[2]) * LINE_DY_SCALE < 5) then kept[#kept + 1] = t end
 	end
 	if #kept < #tests then
-		print(string.format("left out %d falling crossing tests with a drop over %g (can't clip)", #tests - #kept, checkHeight - 5))
+		print(string.format("left out %d falling crossing tests with a drop over %g (can't clip)", #tests - #kept, (checkHeight - 5) / LINE_DY_SCALE))
 	end
 	tests = kept
 	if #tests == 0 then error("no tests left: they were all falling crossings that can't clip") end
@@ -886,6 +987,13 @@ for _, gi in ipairs(order) do
 	end
 end
 
+-- (OoT3D / MM3D: no action tests - clipfinder doesn't make them for the 3DS)
+if IS_3DS then
+	for _, t in ipairs(queue) do
+		if t.action then error("action tests (" .. t.action .. ") aren't supported on " .. GAME) end
+	end
+end
+
 -- Action tests put their weapon on B: the save context has to be where K says
 if SET_WEAPON and K.playerForm then
 	local anyAction = false
@@ -906,6 +1014,7 @@ print("Saved the starting state")
 -- where it was last set): a value that isn't a number clears it. Buttons are
 -- only ever pressed (true), never forced up (false), and last one frame.
 local function releaseStick()
+	if IS_3DS then return end
 	joypad.setanalog({ ["X Axis"] = "", ["Y Axis"] = "" }, 1)
 end
 
@@ -924,6 +1033,83 @@ end
 event.onexit(cleanUp)
 
 if FAST and client.invisibleemulation then client.invisibleemulation(true) end
+
+-- OoT3D / MM3D: check the addresses that aren't from a watch file before
+-- relying on them (the starting state is loaded again after).
+-- The frame counter: K.gameplayFrames has to go up one a game frame, every
+-- EMU_PER_GAME emulated frames (the move timing hangs on it). If it doesn't
+-- (MM3D: play + 0xF8, OoT3D's GameState.frames, never moved), the game
+-- context is searched for a word that does: FRAME_SCAN bytes from K.play,
+-- read every emulated frame for 6 game frames; each step 0 or 1, 5-7 in all.
+-- The one used is printed: put it in K.gameplayFrames to skip the search.
+-- checkYaw: Link standing still faces his Player.yaw, so it has to read the
+-- same as shape.rot.y ("Angle").
+local FRAME_SCAN = 0x10000
+if IS_3DS then
+	local n = 6 * EMU_PER_GAME
+	local function counterOk(samples)
+		for i = 2, #samples do
+			local d = samples[i] - samples[i - 1]
+			if d ~= 0 and d ~= 1 then return false end
+		end
+		local total = samples[#samples] - samples[1]
+		return total >= n / EMU_PER_GAME - 1 and total <= n / EMU_PER_GAME + 1
+	end
+	local samples = { read_u32(K.play + K.gameplayFrames) }
+	for _ = 1, n do emu.frameadvance(); samples[#samples + 1] = read_u32(K.play + K.gameplayFrames) end
+	if not counterOk(samples) then
+		print(string.format("%s: play + 0x%X went up %d in %d emulated frames, not %d: searching %d KB of the game context for the frame counter",
+			GAME, K.gameplayFrames, samples[#samples] - samples[1], n, n / EMU_PER_GAME, FRAME_SCAN / 1024))
+		-- (one block read a frame: read_bytes_as_array where the API has it)
+		local function snap()
+			if mainmemory.read_bytes_as_array then
+				local t = mainmemory.read_bytes_as_array(K.play, FRAME_SCAN)
+				local o = t[0] ~= nil and 0 or 1
+				local w = {}
+				for i = 0, FRAME_SCAN - 4, 4 do
+					w[i] = t[i + o] + t[i + o + 1] * 0x100 + t[i + o + 2] * 0x10000 + t[i + o + 3] * 0x1000000
+				end
+				return w
+			end
+			local w = {}
+			for i = 0, FRAME_SCAN - 4, 4 do w[i] = read_u32(K.play + i) end
+			return w
+		end
+		local snaps = { snap() }
+		for _ = 1, n do emu.frameadvance(); snaps[#snaps + 1] = snap() end
+		local found = {}
+		for i = 0, FRAME_SCAN - 4, 4 do
+			local col = {}
+			for k = 1, #snaps do col[k] = snaps[k][i] end
+			if counterOk(col) then found[#found + 1] = i end
+		end
+		if #found == 0 then
+			cleanUp()
+			error(string.format("%s: no word in the %d KB from the game context (0x%08X) goes up one a game frame - is the game running (no pause, no menu) at 30 fps?",
+				GAME, FRAME_SCAN / 1024, K.play))
+		end
+		local list = {}
+		for k = 1, math.min(#found, 8) do list[k] = string.format("0x%X", found[k]) end
+		K.gameplayFrames = found[1]
+		print(string.format("  frame counters at play + %s%s: using play + 0x%X (set K.gameplayFrames = 0x%X to skip this)",
+			table.concat(list, ", "), #found > 8 and ", ..." or "", K.gameplayFrames, K.gameplayFrames))
+	end
+	local yaw, shape = read_u16(K.player + K.yaw), read_u16(K.player + K.shapeRotY)
+	if yaw ~= shape then
+		-- (the s16s near speedXZ that do read as his facing, to try instead)
+		local near = {}
+		if shape ~= 0 then
+			for o = -0x40, 0x40, 2 do
+				if read_u16(K.player + K.speedXZ + o) == shape then near[#near + 1] = string.format("0x%X", K.speedXZ + o) end
+			end
+		end
+		cleanUp()
+		error(string.format("%s: Player.yaw at +0x%X reads 0x%04X but Link faces 0x%04X (shape.rot.y): K.yaw is wrong for this version, or Link isn't standing still%s",
+			GAME, K.yaw, yaw, shape, #near > 0 and (" (near speedXZ, these read 0x%04X: " .. table.concat(near, ", ") .. ")"):format(shape) or ""))
+	end
+	print(string.format("%s: frame counter (play + 0x%X) and Player.yaw check out (player at 0x%08X)", GAME, K.gameplayFrames, K.player))
+	memorysavestate.loadcorestate(base)
+end
 
 -- atan2(y, x) by hand: BizHawk's math.atan ignores a second argument (it
 -- returned atan(dx), sending Link off at the wrong yaw).
@@ -1382,16 +1568,19 @@ local function runTest(t, mode)
 		-- let go for the rest so he's back to standing normally)
 		local hold = HOLD_FRAMES + (RECORD and RECORD_BUFFER or 0)
 		for i = 1, hold do
-			if RECORD and i >= 4 and i < 10 then joypad.set({ Z = true }, 1) end
+			-- (3DS: L targets)
+			if RECORD and i >= 4 and i < 10 then
+				if IS_3DS then joypad.set({ L = true }) else joypad.set({ Z = true }, 1) end
+			end
 			writeVec(K.player + K.pos, t.prev)
-			writeVec(K.player + K.prevPos, t.prev)
+			if K.prevPos then writeVec(K.player + K.prevPos, t.prev) end
 			if K.home then writeVec(K.player + K.home, t.prev) end
 			writefloat(K.player + K.speedXZ, 0)
 			writefloat(K.player + K.actorSpeed, 0)
 			if yaw then
-				mainmemory.write_s16_be(K.player + K.yaw, yaw)
-				mainmemory.write_s16_be(K.player + K.rotY, yaw)
-				mainmemory.write_s16_be(K.player + K.shapeRotY, yaw)
+				write_s16(K.player + K.yaw, yaw)
+				write_s16(K.player + K.rotY, yaw)
+				write_s16(K.player + K.shapeRotY, yaw)
 			end
 			emu.frameadvance()
 		end
@@ -1399,19 +1588,19 @@ local function runTest(t, mode)
 		-- then 2 more emulated frames: the next one runs the next game frame
 		-- (the same timing as the trace).
 		local frames = read_u32(K.play + K.gameplayFrames)
-		for _ = 1, 6 do
+		for _ = 1, 2 * EMU_PER_GAME do
 			emu.frameadvance()
 			if read_u32(K.play + K.gameplayFrames) ~= frames then break end
 		end
-		for _ = 1, 2 do emu.frameadvance() end
+		for _ = 1, EMU_PER_GAME - 1 do emu.frameadvance() end
 		-- (a standing point isn't somewhere Link stays: the pushes of the
 		-- first game frame from it are the test, and have already run)
 		if yaw then r.start = readVec(K.player + K.pos) end
-		-- Just enough speed to reach `next` (Actor_UpdatePos moves 1.5x speed).
-		local speed = t.speed or dist / 1.5
+		-- Just enough speed to reach `next` (Actor_UpdatePos moves 1.5x speed; 3DS 1x).
+		local speed = t.speed or dist / SPEED_RATE
 		if yaw then
-			mainmemory.write_s16_be(K.player + K.yaw, yaw)
-			mainmemory.write_s16_be(K.player + K.shapeRotY, yaw)
+			write_s16(K.player + K.yaw, yaw)
+			write_s16(K.player + K.shapeRotY, yaw)
 		end
 		writefloat(K.player + K.speedXZ, speed)
 		r.yaw, r.speed = yaw, speed
@@ -1419,14 +1608,15 @@ local function runTest(t, mode)
 		-- usual GROUND_DROP, so give him the y velocity that gets there. Written
 		-- where the last frame's floor check left it (-4 standing), before the
 		-- frame's gravity (-1) and Actor_UpdatePos (x1.5): velocity.y ends up
-		-- -drop / 1.5 (at most -20, the terminal velocity, for the 30 drop).
+		-- -drop / 1.5 (at most -20, the terminal velocity, for the 30 drop;
+		-- 3DS x1.0: -drop, at most the 20 drop).
 		local drop = t.prev[2] - t.next[2]
 		if t.vy then
 			-- ground clips: the scan's velocity.y for the frame, before gravity
 			r.velY = t.vy + 1
 			writefloat(K.player + K.velocity + 4, r.velY)
-		elseif t.kind:find("^low") or drop > 7.5 + 0.01 then
-			r.velY = -drop / 1.5 + 1
+		elseif t.kind:find("^low") or drop > GROUND_DROP + 0.01 then
+			r.velY = -drop / SPEED_RATE + 1
 			writefloat(K.player + K.velocity + 4, r.velY)
 		end
 		r.log = {}
@@ -1435,11 +1625,22 @@ local function runTest(t, mode)
 		-- his animation moves him itself (skelAnime.movementFlags) and whether
 		-- he's riding something
 		local function logLine(tag)
+			if IS_3DS then
+				r.log[#r.log + 1] = string.format(
+					"%s gf+%d pos %s speedXZ %.3f speed %.3f velY %.3f yaw %04X wall %s floor %s%s",
+					tag, read_u32(K.play + K.gameplayFrames) - frames0, fmt(readVec(K.player + K.pos)),
+					readfloat(K.player + K.speedXZ), readfloat(K.player + K.actorSpeed), readfloat(K.player + K.velocity + 4),
+					read_u16(K.player + K.yaw),
+					polyName(read_u32(K.player + K.wallPoly), K.wallBgId and mainmemory.read_u8(K.player + K.wallBgId)),
+					polyName(read_u32(K.player + K.floorPoly), K.wallBgId and mainmemory.read_u8(K.player + K.wallBgId + 1)),
+					K.bgCheckFlags and string.format(" bgFlags %04X", read_u16(K.player + K.bgCheckFlags)) or "")
+				return
+			end
 			r.log[#r.log + 1] = string.format(
 				"%s gf+%d pos %s speedXZ %.3f speed %.3f velY %.3f yaw %04X action %08X flags1 %08X animMove %02X ride %08X wall %s floor %s bgFlags %04X",
 				tag, read_u32(K.play + K.gameplayFrames) - frames0, fmt(readVec(K.player + K.pos)),
 				readfloat(K.player + K.speedXZ), readfloat(K.player + K.actorSpeed), readfloat(K.player + K.velocity + 4),
-				mainmemory.read_u16_be(K.player + K.yaw),
+				read_u16(K.player + K.yaw),
 				read_u32(K.player + K.actionFunc), read_u32(K.player + K.stateFlags1),
 				mainmemory.read_u8(K.player + K.skelAnime + 0x35), read_u32(K.player + K.rideActor),
 				polyName(read_u32(K.player + K.wallPoly), mainmemory.read_u8(K.player + K.wallBgId)),
@@ -1464,8 +1665,8 @@ local function runTest(t, mode)
 		-- about to push him back out).
 		if t.speed2 then
 			if yaw then
-				mainmemory.write_s16_be(K.player + K.yaw, yaw)
-				mainmemory.write_s16_be(K.player + K.shapeRotY, yaw)
+				write_s16(K.player + K.yaw, yaw)
+				write_s16(K.player + K.shapeRotY, yaw)
 			end
 			writefloat(K.player + K.speedXZ, t.speed2)
 			logLine("write speed2")
@@ -1477,7 +1678,7 @@ local function runTest(t, mode)
 			end
 			r.after = readVec(K.player + K.pos)
 		end
-		for _ = 1, 3 do emu.frameadvance() end
+		for _ = 1, EMU_PER_GAME do emu.frameadvance() end
 		local later = readVec(K.player + K.pos)
 		logLine("+1 game frame")
 		-- Given speed but didn't move at all in two game frames: Link's state
@@ -1544,7 +1745,8 @@ end
 -- falls through to the next one.
 -- (CSV_TESTS: always "move" - the game works out the move from exactly
 -- that start, yaw and speed, which is what the grid is about)
-local mode = T.csvGrids and "move" or MODE
+-- (OoT3D / MM3D: always "move" - no function addresses to hook)
+local mode = (T.csvGrids or IS_3DS) and "move" or MODE
 local first
 -- (the mode is tried on the first test that isn't a slope or ground clip or
 -- an action clip: those don't use the hooks, so they'd pass any; all of them: "move")
@@ -1607,7 +1809,7 @@ for i, t in ipairs(queue) do
 			-- the test's move: where Link starts, angle, speedXZ and the frame's y
 			-- velocity (after gravity: ground clips' vy, else from the drop)
 			local yaw, speed = r.yaw or t.yaw, r.speed or t.speed
-			local vy = t.vy or (t.next[2] - t.prev[2]) / 1.5
+			local vy = t.vy or (t.next[2] - t.prev[2]) / SPEED_RATE
 			if t.action then
 				print(string.format("      start %s  facing 0x%04X  %s", fmt(t.prev), t.facing, t.action))
 			else
@@ -1687,7 +1889,7 @@ local function setupStr(r)
 		local dx, dz = t.next[1] - t.prev[1], t.next[3] - t.prev[3]
 		if dx * dx + dz * dz >= 0.0001 then
 			yaw = yawTo(dx, dz)
-			speed = speed or math.sqrt(dx * dx + dz * dz) / 1.5
+			speed = speed or math.sqrt(dx * dx + dz * dz) / SPEED_RATE
 		end
 	end
 	return string.format("start %s  angle %s  speedXZ %s%s", fmt(r.start or t.prev),

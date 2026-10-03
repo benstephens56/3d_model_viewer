@@ -44,7 +44,10 @@ const FORM_RUN_SPEED = {
 // leaves a grounded actor's velocity.y at -4 (Actor_UpdateBgCheckInfo), gravity
 // makes it -5 before he moves and Actor_UpdatePos moves 1.5x that, so the wall
 // check runs 7.5 below the floor (seen in-game: MM Laundry Pool trace).
-const GROUND_DROP = 7.5;
+// OoT3D / MM3D run at 30 fps: Actor_UpdatePos moves velocity x 1.0 a frame,
+// so walking posNext is 5 below the floor there (setGameRate, from `game`;
+// clipfinder's setGameRate).
+let GROUND_DROP = 7.5;
 
 // Reachability: starts up to REACH_DIST away (speed 30 moves 45 a frame), every
 // REACH_STEP, in 32 directions. Actor_UpdatePos moves speed * 1.5 a frame.
@@ -57,7 +60,12 @@ const REACH_STEP = 1;
 function setMaxMove(n) {
     REACH_DIST = n;
 }
-const SPEED_RATE = 1.5;
+let SPEED_RATE = 1.5;
+function setGameRate() {
+    const is3ds = game === "OOT3D" || game === "MM3D";
+    SPEED_RATE = is3ds ? 1.0 : 1.5;
+    GROUND_DROP = 5 * SPEED_RATE;
+}
 
 const ACUTE_COLOR = 0xff3030;
 const EXTENDED_COLOR = 0xff40ff;
@@ -110,9 +118,9 @@ const yawOf = (dx, dz) => Math.round(Math.atan2(dx, dz) / (2 * Math.PI) * 0x1000
 // Actor_UpdateVelocityWithGravity + Actor_UpdatePos (x1.5, velocity.y -4 + gravity -1).
 function moveStep(from, yaw, speed) {
     return {
-        x: F(from.x + F(F(speed * sinS(yaw)) * 1.5)),
+        x: F(from.x + F(F(speed * sinS(yaw)) * SPEED_RATE)),
         y: F(from.y - GROUND_DROP),
-        z: F(from.z + F(F(speed * cosS(yaw)) * 1.5)),
+        z: F(from.z + F(F(speed * cosS(yaw)) * SPEED_RATE)),
     };
 }
 
@@ -1083,7 +1091,7 @@ function describeClipLinesBase(g, c, checkHeight) {
             `WALL CROSSING CLIP (${title}): crossing ${polyLabel(g.pusher)} puts Link through ${polyLabel(g.crossed)}`,
             `  move through: ${fmt(c.from)} (feet; the crossing is ${+checkHeight.toPrecision(7)} above)`,
             ...(c.drop > 0 ? [`  that's ${c.drop} below the floor (y ${f32Str(c.floorY)}): falling at y velocity ` +
-                `${(-c.drop / 1.5).toFixed(2)} or faster this frame`] : []),
+                `${(-c.drop / SPEED_RATE).toFixed(2)} or faster this frame`] : []),
             `  works moving at yaw ${c.yaws.map(hex4).join(", ")} (any speed that gets past ${polyLabel(g.pusher)}'s plane)`,
             `  e.g. ${c.aerial ? "in the air" : "standing still"} at ${fmt(c.prev)} (feet), moving to ${fmt(c.next)}` +
                 (c.speed !== undefined ? ` (yaw ${hex4(c.yaw)}, speed ${f32Str(c.speed).split(" ")[0]})` : ""),
@@ -1098,7 +1106,7 @@ function describeClipLinesBase(g, c, checkHeight) {
         return [
             `LOW WALL CLIP (${title}): ${polyLabel(g.pusher)} pushes Link through ${polyLabel(g.crossed)}`,
             `  Link at:   ${fmt(c.from)} (after moving there, e.g. from ${fmt(c.prev)})`,
-            `  that's ${c.drop} below the floor (y ${f32Str(c.floorY)}): falling at y velocity ${(-c.drop / 1.5).toFixed(2)} or faster this frame`,
+            `  that's ${c.drop} below the floor (y ${f32Str(c.floorY)}): falling at y velocity ${(-c.drop / SPEED_RATE).toFixed(2)} or faster this frame`,
             `  pushed to: ${fmt(c.res)}`,
             c.end.noFloor ? `  no floor under where he's pushed to: falls out of bounds` : `  lands at:  ${fmt(c.end)} (out of bounds)`,
             ...pairLine(g),
@@ -1426,7 +1434,8 @@ export function setupWallPushClipUI(scene) {
     let last = null;
 
     const refresh = () => {
-        container.style.display = game === "OOT" || game === "MM" ? "flex" : "none";
+        container.style.display = ["OOT", "MM", "OOT3D", "MM3D"].includes(game) ? "flex" : "none";
+        setGameRate();
     };
     document.getElementById("selected-game").addEventListener("change", refresh);
     document.getElementById("loadMap").addEventListener("click", () => {

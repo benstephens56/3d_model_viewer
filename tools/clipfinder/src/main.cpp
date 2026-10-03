@@ -119,6 +119,7 @@ static string safeName(const string& s) {
 
 int main(int argc, char** argv) {
 	string game, mapName, form, out, outDir, root, after, dynaPath;
+	bool maxMoveGiven = false;
 	int groundStepMax = 3, slopeStepMax = 3;
 	double wallStep = 0;  // --wall-step S: the fine pass on pairs without a clip (Model::wallStep)
 	bool dynaOnly = false, slopeStarts = false, keepLoadVoid = false;
@@ -251,6 +252,7 @@ int main(int argc, char** argv) {
 			double n = std::stod(val());
 			if (!(n > 0)) { fprintf(stderr, "--max-move wants a distance > 0\n"); return 2; }
 			setMaxMove(n);
+			maxMoveGiven = true;
 		}
 		else if (a == "--threads") threads = std::max(1, std::stoi(val()));
 		else if (a == "--falling" || a == "--extended-only" || a == "--no-slope" || a == "--slope-only" || a == "--ground-clips" ||
@@ -290,20 +292,28 @@ int main(int argc, char** argv) {
 	if (angleSweep && (onlyPusher < 0 || maxSpeed <= 0)) { fprintf(stderr, "--angles needs --pair PUSHER,CROSSED and --max-speed S\n"); return 2; }
 	if (angleSweep && (atYaw >= 0 || minSpeed)) { fprintf(stderr, "--angles can't be used with --yaw / --min-speed / --refine\n"); return 2; }
 	for (auto& ch : game) ch = (char)toupper((unsigned char)ch);
+	// OoT3D / MM3D: the same collision and forms as OoT / MM (base), at 30 fps:
+	// a frame moves velocity x 1.0 instead of x 1.5 (setGameRate), so speed 30
+	// moves 30 a frame and walking posNext is 5 below the floor
+	const bool is3ds = game == "OOT3D" || game == "MM3D";
+	const string base = is3ds ? game.substr(0, game.size() - 2) : game;
+	setGameRate(is3ds);
+	if (is3ds && !maxMoveGiven) setMaxMove(DEFAULT_MAX_MOVE / 1.5 * SPEED_RATE);
+	if (is3ds && (types & TYPE_ACTIONS)) { fprintf(stderr, "--type actions isn't supported for %s\n", game.c_str()); return 2; }
 	// --type actions: the scan's walking and slope clip points, then the lunges aimed at them
 	vector<int> actions;
 	if (types & TYPE_ACTIONS) {
 		string err;
-		actions = parseActions(game, actionsArg, err);
+		actions = parseActions(base, actionsArg, err);
 		if (actions.empty()) { fprintf(stderr, "--action-keys: %s\n", err.empty() ? "no actions" : err.c_str()); return 2; }
 		if ((types & (TYPE_FALLING | TYPE_GROUND)) || minSpeed || atYaw >= 0 || angleSweep) {
 			fprintf(stderr, "--type actions can't be used with falling / ground types, --min-speed / --refine / --yaw / --angles\n");
 			return 2;
 		}
 	}
-	if ((game != "OOT" && game != "MM") || (mapName.empty() && !all)) {
+	if ((base != "OOT" && base != "MM") || (mapName.empty() && !all)) {
 		fprintf(stderr,
-			"usage: clipfinder --game OOT|MM (--map \"<name in the viewer's map list>\" | --all)\n"
+			"usage: clipfinder --game OOT|MM|OOT3D|MM3D (--map \"<name in the viewer's map list>\" | --all)\n"
 			"                  [--form Adult|Child|Crawlspace|Human|Deku|Zora|Goron|FierceDeity|All, or a list: Adult,Child] [--radius R] [--first-per-pair]\n"
 			"                  [--type acute,extended,slope,ground,falling,actions | all]  (which clips; default acute,extended,slope; all: every one but actions)\n"
 			"                  [--min-speed] [--pair PUSHER,CROSSED] [--refine (with --pair: the exact lowest walking speed)]\n"
@@ -316,7 +326,7 @@ int main(int argc, char** argv) {
 			"                  [--clip-kind walking|falling|slope|ground] [--drop D]  (with --refine / --yaw / --angles: which of the pair's clips; falling: posNext D below the floor)\n"
 			"                  [--sim X,Y,Z,YAW,SPEED[,DROP | ,vVY]]  (one frame from a standing start, printed step by step; SPEED as 15/7: a frame per speed)\n"
 			"                  [--tri ID[,ID...]]  (print those polys: vertices, normal, type)\n"
-			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30)\n"
+			"                  [--max-move N]  (units Link can move in one frame: default 45, speed 30; OOT3D / MM3D 30)\n"
 			"                  [--dyna FILE|none [--dyna-only] [--setup N] [--night]]  (the viewer's dynapoly export; default tools/clipfinder/<GAME>_dyna_all.json)\n"
 			"                  [--slope-step 1|2|3] [--wall-step S] [--slope-starts] [--aerial] [--keep-load-void] [--ground-step 1|2|3]\n"
 			"                  [--max-per-pair N]  (at most N points per wall pair, spread out evenly: smaller files)\n"
@@ -337,7 +347,7 @@ int main(int argc, char** argv) {
 		{ "OOT", { "Adult", "Child", "Crawlspace" } },
 		{ "MM", { "Human", "Deku", "Zora", "Goron", "FierceDeity" } },
 	};
-	if (form.empty()) form = game == "OOT" ? "Adult" : "Human";
+	if (form.empty()) form = base == "OOT" ? "Adult" : "Human";
 	auto upper = [](string v) { for (auto& ch : v) ch = (char)toupper((unsigned char)ch); return v; };
 	struct Variant { string form; double radius, checkHeight; };
 	vector<Variant> variants;
@@ -349,7 +359,7 @@ int main(int argc, char** argv) {
 			if (b == string::npos) b = form.size();
 			string f = form.substr(a, b - a);
 			if (!f.empty()) {
-				if (upper(f) == "ALL") list.insert(list.end(), allForms.at(game).begin(), allForms.at(game).end());
+				if (upper(f) == "ALL") list.insert(list.end(), allForms.at(base).begin(), allForms.at(base).end());
 				else list.push_back(f);
 			}
 			a = b + 1;
@@ -363,8 +373,8 @@ int main(int argc, char** argv) {
 				r = radii.at(fu);
 			}
 			// OoT's PLAYER_STATE2_CRAWLING checks walls at 15 instead of 26 (z_player.c)
-			const bool crawl = game == "OOT" && (fu == "CRAWLSPACE" || fu == "CRAWL");
-			variants.push_back({ f, r, crawl ? 15.0 : game == "OOT" ? 26.0 : F(F(268 * F(0.1))) });
+			const bool crawl = base == "OOT" && (fu == "CRAWLSPACE" || fu == "CRAWL");
+			variants.push_back({ f, r, crawl ? 15.0 : base == "OOT" ? 26.0 : F(F(268 * F(0.1))) });
 		}
 	}
 	if (root.empty()) {
@@ -395,7 +405,8 @@ int main(int argc, char** argv) {
 	vector<DynaFile> dynas;
 	// (default: the viewer's Export all dynapolys for this game, tools/clipfinder/<GAME>_dyna_all.json;
 	// --dyna none scans without dynapolys)
-	if (dynaPath.empty()) {
+	// (OoT3D / MM3D: the viewer has no dynapoly actors for them)
+	if (dynaPath.empty() && !is3ds) {
 		const string def = root + "/tools/clipfinder/" + game + "_dyna_all.json";
 		if (exists(def)) dynaPath = def;
 		else fprintf(stderr, "warning: no %s (the viewer's Export all dynapolys) - scanning without dynapolys\n", def.c_str());
@@ -431,7 +442,7 @@ int main(int argc, char** argv) {
 	// OoT: which setups each scene has (the viewer's setup list), so each form
 	// is scanned with the dynapolys of the setups it plays in
 	std::map<string, vector<bool>> sceneSetups;
-	if (game == "OOT" && !dynas.empty() && onlySetup < 0) {
+	if (base == "OOT" && !dynas.empty() && onlySetup < 0) {
 		string err;
 		if (!readSceneSetups(root + "/models/OOT/actors/OOT_actors_by_scene.json", sceneSetups, err))
 			fprintf(stderr, "%s - every form gets every setup's dynapolys\n", err.c_str());
@@ -467,14 +478,14 @@ int main(int argc, char** argv) {
 		ColHeader ch;
 		vector<Tri> tris;
 		try {
-			if (!parseScene(buf, game, ch, tris)) { fprintf(stderr, "%s - %s: no collision header\n", game.c_str(), e.name.c_str()); failures++; continue; }
+			if (!parseScene(buf, game, e.name, ch, tris)) { fprintf(stderr, "%s - %s: no collision header\n", game.c_str(), e.name.c_str()); failures++; continue; }
 		} catch (const std::exception& ex) { fprintf(stderr, "%s - %s: bad scene file: %s\n", game.c_str(), e.name.c_str(), ex.what()); failures++; continue; }
 		// The jumpslash: not where every room is indoors (Z + A rolls there,
 		// Player_ActionHandler_10; the room Link is in isn't known, so a scene
 		// with some indoor rooms keeps it)
 		bool noJump = false, indoors = false;
-		// (always: --sim @KEY too)
-		{
+		// (always: --sim @KEY too; OoT3D / MM3D have no actions)
+		if (!is3ds) {
 			// (the stick's speed: R_RUN_SPEED_LIMIT 500 indoors; a scene with some
 			// indoor rooms: the room Link is in isn't known, the outdoor limit)
 			const vector<int> rt = roomTypes(root, game, e.file, buf);
@@ -600,7 +611,8 @@ int main(int argc, char** argv) {
 				m.radius = F(v.radius);
 				m.checkHeight = F(v.checkHeight);
 				// (a jumpslash also aims at the scan's falling clip points)
-				m.lowDrop = falling || anyJump(formActions) ? 30 : 0;
+				// (the most posNext falls below the start: terminal velocity -20, x1.5 / x1.0 on 3DS)
+				m.lowDrop = falling || anyJump(formActions) ? (int)(20 * SPEED_RATE) : 0;
 				m.extendedOnly = extendedOnly;
 				m.build(tris, ch.numPolygons);
 				addDynaActors(m, dyna);
@@ -625,7 +637,7 @@ int main(int argc, char** argv) {
 					m.focusA = onlyPusher;
 					m.focusB = onlyCrossed;
 				}
-				if (!simArg.empty()) return runSim(m, simArg, game, upper(v.form));
+				if (!simArg.empty()) return runSim(m, simArg, base, upper(v.form));
 				if (!triArg.empty()) return printTris(m, triArg);
 				vector<Clip> found = scan(m, threads, firstPerPair);
 				keepTypes(found, types | (anyJump(formActions) ? TYPE_FALLING : 0));
@@ -664,9 +676,9 @@ int main(int argc, char** argv) {
 						// (the scan measures a falling clip's drop from the floor at the
 						// clip point: downhill, Link falls further than that)
 						specOk = false;
-						if (fallDrop > 0) fprintf(stderr, "  --drop %g: over checkHeight - 5 (%g), the game's line test runs at the feet: not a wall push\n", fallDrop, F(m.checkHeight - 5));
+						if (fallDrop > 0) fprintf(stderr, "  --drop %g: over checkHeight - 5 (%g), the game's line test runs at the feet: not a wall push\n", fallDrop, F(maxPushDrop(m.checkHeight)));
 						else fprintf(stderr, "  falling clips: every one of this pair's falls further than checkHeight - 5 (%g) from its start, where the game's line test "
-							"runs at the feet (not a wall push): nothing to refine. --drop D tries a smaller one.\n", F(m.checkHeight - 5));
+							"runs at the feet (not a wall push): nothing to refine. --drop D tries a smaller one.\n", F(maxPushDrop(m.checkHeight)));
 					} else {
 						const FrameSpec& sp = FRAME_SPEC;
 						fprintf(stderr, "  %s clips", FRAME_TYPE_NAMES[sp.type]);

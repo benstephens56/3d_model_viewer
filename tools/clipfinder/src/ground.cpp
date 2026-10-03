@@ -37,7 +37,7 @@ GroundLine groundLine(const Model& m, Scratch& s, const V3& prev, const V3& next
 std::optional<Clip> groundFrame(const Model& m, Scratch& s, const V3& start, int yaw, double speed, double vy, int wall) {
 	const V3 next = { F(start.x + F(F(speed * sinS(yaw)) * SPEED_RATE)), F(start.y + F(vy * SPEED_RATE)),
 		F(start.z + F(F(speed * cosS(yaw)) * SPEED_RATE)) };
-	if (!(F(m.checkHeight + F(next.y - start.y)) < 5)) return std::nullopt;
+	if (!feetLine(m.checkHeight, F(next.y - start.y))) return std::nullopt;
 	int startFloor = -1;
 	if (!m.floorCheck(start.x, start.z, F(start.y + 1), &startFloor) || startFloor < 0) return std::nullopt;
 	const GroundLine gl = groundLine(m, s, start, next);
@@ -131,10 +131,14 @@ void groundClipsForWall(const Model& m, Scratch& s, const Poly& W,
 		if (bottom <= top) {
 			sp.base = onPlane(u, bottom);
 			// A floor in front, at the wall's bottom: the wall rises out of the
-			// ground there (the line test, under the ground, passes under it)
+			// ground there (the line test, under the ground, passes under it).
+			// N64: the wall check (at dy -30) runs under the wall's bottom too.
+			// 3DS: dy is only -20, so it runs 6 above the floor, on the wall -
+			// but the wall doesn't push Link back once he's far enough past it
+			// (OoT3D Shadow Temple TRI 24 under TRI 48: 5 past clips, 4 doesn't)
 			const double fx = sp.base.first + 1 * nx, fz = sp.base.second + 1 * nz;
 			for (double y : m.floorsAt(fx, fz)) {
-				if (!(std::fabs(y - bottom) <= 3 && y + lowest < bottom)) continue;
+				if (!(std::fabs(y - bottom) <= 3 && (IS_3DS || y + lowest < bottom))) continue;
 				sp.front.push_back(y);
 				int poly = -1;
 				m.floorCheck(fx, fz, F(y + 1), &poly);

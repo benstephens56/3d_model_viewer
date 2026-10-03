@@ -94,7 +94,8 @@ static int runSimGround(const Model& m, Scratch& s, const V3& start, int yaw, do
 			*fy == start.y ? "exactly on" : *fy < start.y ? "above" : "below", pa, pa < 0 ? "< 0: the line doesn't cross it" : ">= 0: the line stops on it");
 	}
 	warnStartFloor(m, start);
-	printf("checkHeight + dy = %.9g < 5: the line test runs at the feet, floors included\n", F(m.checkHeight + F(next.y - start.y)));
+	printf("checkHeight + dy%s = %.9g < 5: the line test runs at the feet, floors included\n", LINE_DY_SCALE == 1.0 ? "" : " x 1.5 (3DS)",
+		F(m.checkHeight + F(F(next.y - start.y) * LINE_DY_SCALE)));
 	const GroundLine gl = groundLine(m, s, start, next);
 	if (gl.poly >= 0) printf("line test hits %s, puts him at %s\n", m.polyName(gl.poly).c_str(), P(gl.res));
 	else printf("line test: nothing hit\n");
@@ -207,7 +208,7 @@ int runSim(const Model& m, const string& simArg, const string& game, const strin
 	} else if (dropStr[0]) drop = atof(dropStr);
 	if (drop > 0) next.y = F(start.y - drop);
 	// falling fast from the floor: the line test at the feet (ground clips)
-	if (drop > 0 && F(m.checkHeight + F(next.y - start.y)) < 5)
+	if (drop > 0 && feetLine(m.checkHeight, F(next.y - start.y)))
 		return runSimGround(m, s, start, yaw, F(speed), std::isnan(vy) ? F(-drop / SPEED_RATE) : vy);
 	printf("start %s  yaw 0x%04X  speed %.9g -> posNext %s\n", P(start), yaw, F(speed), P(next));
 	printf("start in bounds: %s\n", m.isInBounds(s, start, true) ? "yes" : "NO");
@@ -221,7 +222,7 @@ int runSim(const Model& m, const string& simArg, const string& game, const strin
 			m.polys[fp].exitIndex, m.polys[fp].floorProp, m.polys[fp].loadOrVoid ? " (a loading zone / void plane: the scan leaves out clips starting here)" : "");
 		if (fy && fp >= 0 && m.polys[fp].slide) printf("  a slide floor (floor effect 1): Link slides off it, or is pushed down it - not a start the scan uses\n");
 	}
-	if (F(m.checkHeight + F(next.y - start.y)) < 5) printf("checkHeight + dy < 5: the game's line test runs at the feet, floors included (not modelled)\n");
+	if (feetLine(m.checkHeight, F(next.y - start.y))) printf("checkHeight + dy < 5: the game's line test runs at the feet, floors included (not modelled)\n");
 	V3 res;
 	PushList trace;
 	auto f = lineFrame(m, s, start, next, LOOSE);

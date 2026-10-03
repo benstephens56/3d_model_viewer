@@ -1,6 +1,7 @@
 # clipfinder
 
-The wall push clip scan for OoT and MM, native and multithreaded. It reads a
+The wall push clip scan for OoT and MM (and OoT3D / MM3D, see **OoT3D and
+MM3D** below), native and multithreaded. It reads a
 scene from `models/`, builds the same collision model the viewer does, and
 runs the search in the game's f32 arithmetic. It writes the clip points as
 JSON, which you can load with the viewer's **Import results** button or run in
@@ -68,7 +69,7 @@ output file.
 
 | Option | Meaning |
 |---|---|
-| `--game OOT\|MM` | **Required.** OoT US 1.0 or MM US scenes. |
+| `--game OOT\|MM\|OOT3D\|MM3D` | **Required.** OoT US 1.0 or MM US scenes, or the 3DS versions' (`models/OOT3D`, `models/MM3D`; see **OoT3D and MM3D** below). |
 | `--map "<name>"` | One map, named exactly as in the viewer's map list (`js/model_list.js`), e.g. `"Spot 01 - Kakariko Village"`, `"Laundry Pool"`. |
 | `--all` | Every map of the game, one JSON per map (see `--out-dir`). Use this or `--map`. |
 | `--after "<name>"` | With `--all`: skip the maps up to and including this one, to resume a run that stopped. |
@@ -321,6 +322,60 @@ scanned with `--setup`, which takes every form.
 The viewer does the same on auto-import: loading setup 0-3 of an OoT map
 shows only the forms that play in it (the status says which were left out);
 a cutscene setup shows every form.
+
+## OoT3D and MM3D
+
+`--game OOT3D` / `--game MM3D` scan the 3DS versions' scenes (`.zsi` in
+`models/OOT3D` / `models/MM3D`, the viewer's `OOT3D_Maps` / `MM3D_Maps`), with
+OoT's / MM's forms (radius, check height) and the same collision checks.
+What changes:
+
+- **30 fps.** `Actor_UpdatePos` moves velocity x 1.0 a frame instead of x 1.5,
+  so a speed moves 2/3 as far: walking, posNext is 5 below the floor (not
+  7.5), and a falling frame's drop is at most 20 (terminal velocity -20; not
+  30). Speeds in the results are speedXZ as the game has it (posNext is
+  `speed` along the yaw): MM3D Treasure Chest Shop, Human, TRI 50 → 90 needs
+  speed 16.43 where MM needs 11.01.
+- **Max move.** The default `--max-move` is 30 (speed 30), written to the JSON
+  as `"maxMove": 30`.
+- **The scene file.** Little-endian, the plane distance an f32 (the N64's is an
+  s16), 0x14-byte polys (`parse_model.js`). Poly ids are the 3DS file's.
+  OoT3D's overworld (`Spot` ...) scenes use 32 x 8 x 32 subdivisions, and
+  `IS_ZERO` is 0.00008 (the viewer's `EPS`).
+- **Ground clips.** The wall check's feet-level line test still comes on at the
+  N64's y velocity, as if dy were velocity x 1.5: checkHeight + dy x 1.5 < 5
+  (`feetLine`), so below y velocity -14 for OoT. At -20 Link falls only 20, so
+  the wall check runs 6 above the floor, on the wall, not under its bottom
+  as on the N64. The clip still works when the move ends far enough past the
+  wall that it doesn't push him back. In game: OoT3D Shadow Temple, adult,
+  from (-1763.541, -63.00192, 77) at yaw 0 and y velocity -20, speed 25 goes
+  under TRI 48 and out (20 doesn't; the model says 23 and up clip). The 1.5 is
+  fitted to that clip, not read from the 3DS code (`z_bgcheck` isn't
+  decompiled in oot3d). `tools/clipfinder/ground_clip_poke.lua` gives Link a
+  speed and y velocity for one frame to try one by hand.
+- **Not supported:** `--type actions` (the lunges' frames are the N64's), and
+  dynapolys (the viewer has no 3DS dynapoly actors, so none are loaded by
+  default).
+
+Assumed, not checked against the 3DS code: the floor check leaving velocity.y
+at -4 and gravity -1 a frame as on the N64, minVelocityY -20, and libultra's
+sine table for the move's direction. The viewer imports the results like the
+N64 ones, and its "Reachable only" uses the 30 fps move.
+
+`wall_clip_tester.lua` runs them in BizHawk's 3DS core (OoT3D US Rev 1, MM3D
+US, decrypted) in "move" mode only (there are no function addresses to hook),
+2 emulated frames a game frame. OoT3D's addresses are from the oot3d decomp
+(`include/z3Dactor.hpp`, `z3D.hpp`). MM3D has no decomp: its Player and
+globalContext are read through the pointers at 0x0752FD6C / 0x0754D890, with
+the actor fields taken from N64 MM's layout, which matches where the watch
+file shows it. At the start the tester checks that the frame counter
+(OoT3D GameState.frames, play + 0xF8; MM3D play + 0x138) goes up once a game
+frame, and if not, searches the first 64 KB of the game context for a word
+that does and uses that (printing it). It also checks that Player.yaw
+(speedXZ + 4) reads the same as Link's facing, and stops if not. In game,
+MM3D Laundry Pool TRI 26 → 70 and TRI 239 → 234 clipped this way. MM3D reads Link's form from save.playerForm (s16 at
+0x0765B1FE, taken as N64 MM's values: 0 Fierce Deity ... 4 Human); `FORM`
+overrides it.
 
 ## Holding the stick, and floor snaps
 

@@ -7,7 +7,7 @@ struct Tri {
 	int id;
 	int v[3][3];
 	int n[3];
-	int d;
+	double d; // the plane distance: s16 on N64, f32 on 3DS
 	uint32_t surf0 = 0; // its SurfaceType's data[0] (exit index, floor property, ...)
 	uint32_t surf1 = 0; // and data[1] (floor effect, ...)
 };
@@ -33,7 +33,9 @@ inline CellIdx pointCell(const ColCtx& c, double x, double y, double z) {
 	return { s[0], s[1], s[2], s[2] * c.amt[0] * c.amt[1] + s[1] * c.amt[0] + s[0] };
 }
 
-bool parseScene(const vector<uint8_t>& buf, const string& game, ColHeader& ch, vector<Tri>& tris);
+// game: OOT / MM (N64 scene files) or OOT3D / MM3D (.zsi, little-endian).
+// mapName: Termina Field (Credits Cutscene 2)'s .zsi has its commands further in.
+bool parseScene(const vector<uint8_t>& buf, const string& game, const string& mapName, ColHeader& ch, vector<Tri>& tris);
 
 void initColCtx(ColCtx& c, const string& game, const string& mapName, const ColHeader& ch);
 

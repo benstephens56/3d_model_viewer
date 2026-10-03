@@ -321,7 +321,7 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 	vector<double> lineDrops = { 0 };
 	if (A.isFloor) {
 		lineDrops.push_back(GROUND_DROP);
-		if (m.lowDrop) for (double d : { 14.0, (double)ch - 5 }) if (d > GROUND_DROP && d <= m.lowDrop) lineDrops.push_back(d);
+		if (m.lowDrop) for (double d : { 14.0, maxPushDrop(ch) }) if (d > GROUND_DROP && d <= m.lowDrop) lineDrops.push_back(d);
 	}
 	auto floorsFor = [&](double u) {
 		// floorsBeside of a position already looked up in this block (on a
@@ -368,7 +368,7 @@ static void crossingPointsForWall(const Model& m, Scratch& s, const Poly& A, con
 				// checkHeight + dy < 5 makes the game's line
 				// test run at the feet with floors, which stops Link on the
 				// floor he starts from - bigger drops can't clip crossing
-				if (F(ch + F(low - y)) < 5) break;
+				if (feetLine(ch, F(low - y))) break;
 				double h = F(low + ch);
 				if (h < A.minY - 1 || h > A.maxY + 1) continue;
 				auto i = onPlane(u, h);
@@ -427,7 +427,7 @@ static std::optional<std::pair<CrossFound, vector<int>>> crossingClip(const Mode
 				// is higher: from the start, checkHeight + dy < 5 makes the game's line
 				// test run at the feet, which stops him on his floor (tested in game:
 				// OoT Kakariko child TRI 142 -> 673, 141 -> 21 etc., 20 of 20 didn't clip).
-				if (cp.drop > 0 && F(m.checkHeight + F(next.y - prev.y)) < 5) continue;
+				if (cp.drop > 0 && feetLine(m.checkHeight, F(next.y - prev.y))) continue;
 				auto f = lineFrame(m, s, prev, next, tol);
 				if (!f || f->hit.poly != A.id) continue;
 				const Move mv{ yaw, speed };
@@ -471,7 +471,7 @@ static std::optional<V3> reachFrom(const Model& m, Scratch& s, const V3& p, doub
 				// floors included, and stops him on the floor he starts from (as
 				// crossingClip; tested in game: MM West Clock Town human, drop 28
 				// from y 75 / 135, TRI 143 -> 62 / 66 and 172 -> 69 didn't clip)
-				if (F(m.checkHeight + F(p.y - prev.y)) < 5) continue;
+				if (feetLine(m.checkHeight, F(p.y - prev.y))) continue;
 				if (m.lineHit(s, { x, h, z }, { p.x, h, p.z }, LOOSE, false, true)) continue;
 				if (m.isInBounds(s, prev, true)) {
 					if (aerial) *aerial = ai == 1;

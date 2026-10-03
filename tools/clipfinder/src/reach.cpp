@@ -36,7 +36,7 @@ void reachability(const Model& m, Scratch& s, Clip& c) {
 			if (c.drop > 0) next.y = P.y;
 			// (moving, a drop with checkHeight + dy < 5 gets the feet-level line
 			// test that stops him on his floor: see crossingPointsForWall)
-			if (F(m.checkHeight + F(next.y - start.y)) < 5) continue;
+			if (feetLine(m.checkHeight, F(next.y - start.y))) continue;
 			if (c.cross) {
 				auto f = lineFrame(m, s, start, next, LOOSE);
 				if (!f || f->hit.poly != c.pusher) continue;
@@ -139,7 +139,7 @@ static std::optional<V3> walkFrameClips(const Model& m, Scratch& s, const V3& st
 	if (falling) {
 		next.y = F(start.y - spec.drop);
 		// (checkHeight + dy < 5: the line test at the feet stops him on his floor)
-		if (F(m.checkHeight + F(next.y - start.y)) < 5) return std::nullopt;
+		if (feetLine(m.checkHeight, F(next.y - start.y))) return std::nullopt;
 	}
 	V3 res;
 	PushList trace;

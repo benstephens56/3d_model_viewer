@@ -478,7 +478,7 @@ async function loadSelectedMap(game) {
             }
 
             // The map is in: wall_push_clips.js auto-imports its results
-            if (game == "OOT" || game == "MM") {
+            if (game == "OOT" || game == "MM" || game == "OOT3D" || game == "MM3D") {
                 document.dispatchEvent(new CustomEvent("zeldamaploaded", {
                     detail: { game, map: mapName, setup: Number(setupDropdown.value || 0) },
                 }));
